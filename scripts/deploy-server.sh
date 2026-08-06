@@ -18,7 +18,14 @@ npm run lint
 npm run build
 npm audit --audit-level=high
 
-sudo install -d -m 755 "${release_root}" "${release}"
+sudo install -d -m 755 \
+  "${release_root}" \
+  "${release}" \
+  "${release}/services/control-plane/dist" \
+  "${release}/services/control-plane" \
+  "${release}/scripts" \
+  "${release}/node_modules" \
+  "${release}/web"
 sudo rsync -a --delete services/control-plane/dist/ "${release}/services/control-plane/dist/"
 sudo install -m 644 services/control-plane/package.json "${release}/services/control-plane/package.json"
 sudo rsync -a --delete scripts/ "${release}/scripts/"
