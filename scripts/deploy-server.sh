@@ -58,7 +58,11 @@ sudo rsync -a --delete services/control-plane/dist/ "${release}/services/control
 sudo install -m 644 services/control-plane/package.json "${release}/services/control-plane/package.json"
 sudo rsync -a --delete scripts/ "${release}/scripts/"
 sudo chmod 755 "${release}/scripts/"*.sh
-sudo rsync -a --delete node_modules/ "${release}/node_modules/"
+if [[ -n "${previous}" && -d "${previous}/node_modules" ]]; then
+  sudo rsync -a --delete --link-dest="${previous}/node_modules" node_modules/ "${release}/node_modules/"
+else
+  sudo rsync -a --delete node_modules/ "${release}/node_modules/"
+fi
 sudo rsync -a --delete apps/web/dist/ "${release}/web/"
 sudo install -o root -g root -m 644 deploy/cod-control-plane.service /etc/systemd/system/cod-control-plane.service
 sudo install -o root -g root -m 644 deploy/cod-backup.service /etc/systemd/system/cod-backup.service
@@ -91,6 +95,13 @@ if [[ "${ready}" != true ]]; then
 fi
 
 sudo systemctl enable --now cod-backup.timer cod-healthcheck.timer
+
+mapfile -t stale_releases < <(find "${release_root}" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -nr | tail -n +6 | cut -d' ' -f2-)
+for stale_release in "${stale_releases[@]}"; do
+  if [[ "${stale_release}" != "$(readlink -f "${current_link}")" && "${stale_release}" != "${previous}" ]]; then
+    sudo rm -rf --one-file-system "${stale_release}"
+  fi
+done
 
 curl -fsS http://127.0.0.1:8787/version
 printf '\nrelease=%s\n' "${release}"

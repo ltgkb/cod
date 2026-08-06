@@ -17,6 +17,7 @@ Server files:
 ## Release and reliability
 
 - `scripts/deploy-server.sh` runs the complete verification suite, creates an immutable revision directory under `/opt/cod/releases`, switches `/opt/cod/current`, checks readiness, and rolls the service back if the new revision does not become ready.
+- Unchanged dependencies are hard-linked from the previous release, and the release directory retains the active/previous revisions plus the newest recovery candidates instead of growing without bound.
 - `cod-backup.timer` creates a verified custom-format PostgreSQL backup every day and keeps 14 days.
 - `scripts/restore-database.sh` restores only into an explicitly named `cod_restore_*` database so recovery drills cannot overwrite production accidentally.
 - `cod-healthcheck.timer` checks the control plane, PostgreSQL readiness, and Nginx every minute.
