@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ArrowsClockwise,
   CaretDown,
@@ -22,6 +22,7 @@ import {
   Warning,
 } from '@phosphor-icons/react';
 import type { CodTask, TaskStatus, WorkspaceFile } from '@cod/contracts';
+import { loadCodSession, topup, type CodSession } from './api';
 import { demoDiff, demoFiles, demoTasks, demoTimeline } from './demoData';
 import { hasDesktopBridge, openProject, readProjectFile } from './desktop';
 import type { InspectorTab, ProjectSnapshot, WorkspaceMode } from './types';
@@ -111,6 +112,9 @@ export function App() {
   const [prompt, setPrompt] = useState('');
   const [command, setCommand] = useState('npm test');
   const [terminalOutput, setTerminalOutput] = useState('$ npm test\n等待执行权限');
+  const [session, setSession] = useState<CodSession | null>(null);
+  const [accountError, setAccountError] = useState(false);
+  const [selectedModel, setSelectedModel] = useState('coder-pro');
   const [project, setProject] = useState<ProjectSnapshot>({
     root: '/home/ubuntu/cod-project/cod',
     files: demoFiles,
@@ -120,6 +124,21 @@ export function App() {
   });
 
   const active = useMemo(() => demoTasks.find((task) => task.id === activeTask) ?? demoTasks[0], [activeTask]);
+
+  useEffect(() => {
+    loadCodSession()
+      .then((next) => {
+        setSession(next);
+        setSelectedModel(next.models[0]?.id ?? 'coder-pro');
+      })
+      .catch(() => setAccountError(true));
+  }, []);
+
+  const handleTopup = async () => {
+    if (!session) return;
+    const account = await topup(session.token, 1000);
+    setSession({ ...session, account });
+  };
 
   const handleOpenProject = async () => {
     const snapshot = await openProject();
@@ -172,7 +191,7 @@ export function App() {
             <span><small>当前项目</small><strong>{project.root.split('/').pop()}</strong></span>
             <CaretDown />
           </button>
-          <div className="balance-preview"><Lightning weight="fill" /><span><small>KAI Token</small><strong>¥ 68.40</strong></span><button>充值</button></div>
+          <div className="balance-preview"><Lightning weight="fill" /><span><small>{accountError ? '离线余额' : 'KAI Token'}</small><strong>¥ {session ? (session.account.balanceCents / 100).toFixed(2) : '68.40'}</strong></span><button onClick={handleTopup} disabled={!session}>充值</button></div>
         </div>
       </aside>
 
@@ -190,7 +209,7 @@ export function App() {
               <button className={mode === 'code' ? 'active' : ''} onClick={() => setMode('code')}><Code /> 代码</button>
               <button className={mode === 'chat' ? 'active' : ''} onClick={() => setMode('chat')}><ChatCircleDots /> 对话</button>
             </div>
-            <button className="model-picker"><span>KAI</span> coder-pro <CaretDown /></button>
+            <button className="model-picker" onClick={() => session && setSelectedModel(session.models[(session.models.findIndex((model) => model.id === selectedModel) + 1) % session.models.length]?.id ?? selectedModel)}><span>KAI</span> {selectedModel} <CaretDown /></button>
           </div>
         </header>
 

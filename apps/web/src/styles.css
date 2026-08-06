@@ -82,6 +82,7 @@ button:active { transform: translateY(1px); }
 .balance-preview { display: grid; grid-template-columns: 20px 1fr auto; align-items: center; gap: 7px; margin-top: 6px; padding: 8px 9px; color: var(--accent); background: #101612; border: 1px solid rgba(66,211,166,.16); border-radius: 9px; }
 .balance-preview strong { display: block; color: var(--text); font: 12px 'Geist Mono', monospace; }
 .balance-preview button { padding: 5px 7px; color: var(--accent); background: var(--accent-soft); border-radius: 6px; font-size: 10px; }
+.balance-preview button:disabled { color: var(--faint); background: #202521; cursor: not-allowed; }
 
 .workspace { display: flex; flex-direction: column; background: #0f1210; }
 .workspace-header { display: flex; align-items: center; justify-content: space-between; height: 74px; padding: 0 20px; border-bottom: 1px solid var(--line); -webkit-app-region: drag; }

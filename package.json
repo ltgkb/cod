@@ -10,12 +10,13 @@
   ],
   "scripts": {
     "dev": "npm run dev -w @cod/web",
-    "build": "npm run build -w @cod/web && npm run build -w @cod/desktop",
-    "typecheck": "npm run typecheck -w @cod/web && npm run typecheck -w @cod/desktop",
-    "test": "npm run test -w @cod/web",
+    "build": "npm run build -w @cod/web && npm run build -w @cod/desktop && npm run build -w @cod/control-plane",
+    "typecheck": "npm run typecheck -w @cod/web && npm run typecheck -w @cod/desktop && npm run typecheck -w @cod/control-plane",
+    "test": "npm run test -w @cod/web && npm run test -w @cod/control-plane",
     "lint": "npm run lint -w @cod/web",
     "desktop": "npm run dev -w @cod/desktop",
-    "package:linux": "npm run package:linux -w @cod/desktop"
+    "package:linux": "npm run package:linux -w @cod/desktop",
+    "control-plane": "npm run dev -w @cod/control-plane"
   },
   "engines": {
     "node": ">=22"
