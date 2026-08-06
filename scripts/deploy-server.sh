@@ -7,6 +7,7 @@ current_link="${COD_CURRENT_LINK:-/opt/cod/current}"
 revision="$(git -C "${project_root}" rev-parse --short=12 HEAD)"
 release="${release_root}/${revision}"
 previous="$(readlink -f "${current_link}" 2>/dev/null || true)"
+previous_revision="$(basename "${previous}" 2>/dev/null || true)"
 
 source /home/ubuntu/cod-project/upstream/goose/bin/activate-hermit
 cd "${project_root}"
@@ -51,7 +52,12 @@ done
 if [[ "${ready}" != true ]]; then
   if [[ -n "${previous}" && -d "${previous}" ]]; then
     sudo ln -sfn "${previous}" "${current_link}"
+    rollback_revision_file="$(mktemp)"
+    printf 'COD_REVISION=%s\n' "${previous_revision}" > "${rollback_revision_file}"
+    sudo install -o root -g root -m 644 "${rollback_revision_file}" /etc/cod/revision.env
+    rm -f "${rollback_revision_file}"
     sudo systemctl restart cod-control-plane
+    sudo systemctl reload nginx
   fi
   sudo journalctl -u cod-control-plane -n 100 --no-pager
   exit 1
