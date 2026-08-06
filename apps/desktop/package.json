@@ -50,7 +50,6 @@
     "linux": {
       "target": ["AppImage", "deb"],
       "category": "Development",
-      "desktopName": "COD",
       "synopsis": "COD agent workspace",
       "artifactName": "COD-${version}-${arch}.${ext}"
     },
