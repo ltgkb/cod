@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "COD cross-platform agent workspace",
+  "desktopName": "cod.desktop",
   "homepage": "https://kai.com/cod",
   "author": {
     "name": "KAI",
@@ -57,6 +58,7 @@
     ],
     "linux": {
       "target": ["AppImage", "deb"],
+      "syncDesktopName": true,
       "category": "Development",
       "maintainer": "KAI <support@kai.com>",
       "synopsis": "COD agent workspace",
