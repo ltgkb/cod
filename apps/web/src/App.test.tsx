@@ -2,6 +2,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
+import { createClientId } from './api';
 
 afterEach(() => {
   cleanup();
@@ -22,6 +23,11 @@ function json(value: unknown, status = 200): Response {
 }
 
 describe('COD workspace', () => {
+  it('creates client IDs when randomUUID is unavailable on HTTP origins', () => {
+    vi.stubGlobal('crypto', { getRandomValues: (bytes: Uint8Array) => { bytes.fill(7); return bytes; } });
+    expect(createClientId()).toBe('07'.repeat(16));
+  });
+
   it('shows a real pilot login gate instead of silently creating a session', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => json(capabilities)));
     render(<App />);

@@ -30,6 +30,7 @@ import {
 import type { DeviceRecord, KnowledgeHit, ProductManifest, TaskStatus, WorkspaceFile } from '@cod/contracts';
 import {
   createRemoteTask,
+  createClientId,
   getCapabilities,
   heartbeatDevice,
   listDevices,
@@ -290,7 +291,7 @@ export function App() {
       }
       if (task.status !== 'running') task = await changeTaskStatus(task, 'running');
       const submittedPrompt = prompt.trim();
-      appendMessage(task.id, { id: crypto.randomUUID(), role: 'user', content: submittedPrompt, createdAt: new Date().toISOString() });
+      appendMessage(task.id, { id: createClientId(), role: 'user', content: submittedPrompt, createdAt: new Date().toISOString() });
       setPrompt(''); setIsSending(true); setAgentStatus('正在执行'); setNotice('');
       let reply = '';
       let replyMode: 'live' | 'demo' = capabilities?.ai.mode === 'demo' ? 'demo' : 'live';
@@ -304,7 +305,7 @@ export function App() {
         if (mode === 'code' && !hasDesktopBridge()) setNotice('Web 端仅提供代码问答；修改本机文件请使用 COD Desktop。');
         const result = await sendChat(session.token, selectedModel, submittedPrompt); reply = result.content; replyMode = result.mode;
       }
-      appendMessage(task.id, { id: crypto.randomUUID(), role: 'assistant', content: reply, mode: replyMode, createdAt: new Date().toISOString() });
+      appendMessage(task.id, { id: createClientId(), role: 'assistant', content: reply, mode: replyMode, createdAt: new Date().toISOString() });
       if (task.status === 'running' || task.status === 'waiting') task = await changeTaskStatus(task, 'complete');
       setAgentStatus('已完成'); await refreshWallet();
       if (hasDesktopBridge() && project.root) { const snapshot = await loadProject(project.root); if (snapshot) setProject(snapshot); }

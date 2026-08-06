@@ -50,6 +50,15 @@ export class ApiError extends Error {
   }
 }
 
+export function createClientId(): string {
+  if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
+  if (typeof globalThis.crypto?.getRandomValues === 'function') {
+    const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+    return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 function storageGet(key: string): string | null {
   try { return window.localStorage.getItem(key); } catch { return null; }
 }
@@ -132,7 +141,7 @@ export async function listLedger(token: string): Promise<LedgerEntry[]> {
 export async function topup(token: string, amountCents: number): Promise<AccountSummary> {
   const result = await request<{ account: AccountSummary }>('/api/topups', token, {
     method: 'POST',
-    headers: { 'idempotency-key': crypto.randomUUID() },
+    headers: { 'idempotency-key': createClientId() },
     body: JSON.stringify({ amountCents, channel: 'mock' }),
   });
   return result.account;
