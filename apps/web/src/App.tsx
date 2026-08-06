@@ -188,7 +188,7 @@ export function App() {
           },
           requestPermission: (request) => new Promise((resolve) => {
             permissionResolver.current = resolve;
-            setPendingPermission({ title: request.toolCall.title, options: request.options });
+            setPendingPermission({ title: request.toolCall.title ?? '工具权限请求', options: request.options });
           }),
         });
         if (!reply) setChatReply('Goose 已完成任务，请在右侧查看文件和 Diff。');

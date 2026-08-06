@@ -73,7 +73,7 @@ export async function runGooseTask(options: GooseRunOptions): Promise<string> {
       options.onUpdate(update);
     },
     requestPermission: async (request) => {
-      options.onUpdate({ kind: 'permission', text: request.toolCall.title, data: request });
+      options.onUpdate({ kind: 'permission', text: request.toolCall.title ?? '工具权限请求', data: request });
       const optionId = await options.requestPermission(request);
       return optionId ? { outcome: { outcome: 'selected', optionId } } : { outcome: { outcome: 'cancelled' } };
     },
