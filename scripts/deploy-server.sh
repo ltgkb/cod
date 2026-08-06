@@ -48,6 +48,14 @@ npm run build
 npm audit --audit-level=high
 
 sudo install -d -m 755 "${release_root}"
+if [[ "${release}" == "${previous}" && -f "${release}/start.mjs" && -f "${release}/web/index.html" ]]; then
+  curl -fsS http://127.0.0.1:8787/ready >/dev/null
+  curl -fsS http://127.0.0.1:8787/version
+  printf '\nrelease=%s (already active)\n' "${release}"
+  trap - ERR
+  exit 0
+fi
+
 if [[ ! -f "${release}/start.mjs" || ! -f "${release}/web/index.html" ]]; then
   if [[ "${release}" == "${previous}" ]]; then
     echo "Current release is incomplete; refusing to overwrite it in place" >&2

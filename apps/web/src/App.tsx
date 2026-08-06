@@ -138,16 +138,19 @@ export function App() {
   const active = useMemo(() => demoTasks.find((task) => task.id === activeTask) ?? demoTasks[0], [activeTask]);
 
   useEffect(() => {
+    let active = true;
     loadCodSession()
       .then((next) => {
+        if (!active) return;
         setSession(next);
         setSelectedModel(next.models[0]?.id ?? 'coder-pro');
         return Promise.all([
-          listDevices(next.token).then(async (items) => items.length ? items : [await registerDevice(next.token, 'COD Desktop', 'linux')]).then(setDevices),
-          listProducts(next.token).then(setProducts),
+          listDevices(next.token).then(async (items) => items.length ? items : [await registerDevice(next.token, 'COD Desktop', 'linux')]).then((items) => active && setDevices(items)),
+          listProducts(next.token).then((items) => active && setProducts(items)),
         ]);
       })
-      .catch(() => setAccountError(true));
+      .catch(() => active && setAccountError(true));
+    return () => { active = false; };
   }, []);
 
   const handleTopup = async () => {
