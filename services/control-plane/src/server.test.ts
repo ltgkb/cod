@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import { createControlPlane } from './server.js';
 import { loadConfig } from './config.js';
 import { MemoryDatabase } from './memory-database.js';
@@ -17,13 +18,29 @@ async function start(overrides: Record<string, string> = {}) {
 
 describe('control-plane production rules', () => {
   it('restricts development login and disables direct topups', async () => {
-    const { base } = await start();
+    const accessCode = 'pilot-access';
+    const { base } = await start({ COD_PILOT_ACCESS_CODE_HASH: createHash('sha256').update(accessCode).digest('hex') });
     const denied = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'other@kai.com' }) });
     expect(denied.status).toBe(403);
-    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com' }) });
+    const wrongCode = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com', accessCode: 'wrong' }) });
+    expect(wrongCode.status).toBe(403);
+    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com', accessCode }) });
     const { token } = await login.json() as { token: string };
     const topup = await fetch(`${base}/api/topups`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'idempotency-key': 'test' }, body: JSON.stringify({ amountCents: 1000, channel: 'mock' }) });
     expect(topup.status).toBe(403);
+  });
+
+  it('reports integration capabilities and rejects invalid JSON and origins', async () => {
+    const { base } = await start({ COD_ALLOWED_ORIGINS: 'https://cod.example' });
+    const capabilities = await fetch(`${base}/api/capabilities`);
+    expect(await capabilities.json()).toMatchObject({ ai: { mode: 'demo' }, payments: { topupEnabled: false } });
+    const malformed = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{' });
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toMatchObject({ error: 'invalid_json' });
+    const forbiddenOrigin = await fetch(`${base}/api/capabilities`, { headers: { origin: 'https://evil.example' } });
+    expect(forbiddenOrigin.status).toBe(403);
+    const allowedOrigin = await fetch(`${base}/api/capabilities`, { headers: { origin: 'https://cod.example' } });
+    expect(allowedOrigin.headers.get('access-control-allow-origin')).toBe('https://cod.example');
   });
 
   it('settles non-stream chat usage exactly once', async () => {
@@ -32,6 +49,7 @@ describe('control-plane production rules', () => {
     const { token, user } = await login.json() as { token: string; user: { id: string; email: string } };
     const response = await fetch(`${base}/v1/chat/completions`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: 'coder-pro', messages: [{ role: 'user', content: 'hi' }], stream: false }) });
     expect(response.status).toBe(200);
+    expect(await response.clone().json()).toMatchObject({ model: 'coder-pro', cod_mode: 'demo' });
     const principal = { userId: user.id, tenantId: 'tenant_kai_com', email: user.email, role: 'member' as const };
     expect(await database.getLedger(principal)).toHaveLength(1);
     expect((await database.getAccount(principal)).balanceCents).toBe(6839);

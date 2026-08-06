@@ -1,7 +1,13 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { HttpError } from './errors.js';
 
 export async function readJson<T>(request: IncomingMessage): Promise<T> {
-  return JSON.parse(await readText(request) || '{}') as T;
+  const body = await readText(request);
+  try {
+    return JSON.parse(body || '{}') as T;
+  } catch {
+    throw new HttpError('Request body must be valid JSON', 400, 'invalid_json');
+  }
 }
 
 export async function readText(request: IncomingMessage): Promise<string> {
@@ -10,7 +16,7 @@ export async function readText(request: IncomingMessage): Promise<string> {
   for await (const chunk of request) {
     const buffer = Buffer.from(chunk);
     size += buffer.length;
-    if (size > 1024 * 1024) throw new Error('Request body is too large');
+    if (size > 1024 * 1024) throw new HttpError('Request body is too large', 413, 'body_too_large');
     chunks.push(buffer);
   }
   return Buffer.concat(chunks).toString('utf8');
@@ -19,9 +25,6 @@ export async function readText(request: IncomingMessage): Promise<string> {
 export function sendJson(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
-    'access-control-allow-origin': '*',
-    'access-control-allow-headers': 'authorization,content-type,idempotency-key',
-    'access-control-allow-methods': 'GET,POST,OPTIONS',
   });
   response.end(JSON.stringify(value));
 }

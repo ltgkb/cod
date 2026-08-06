@@ -72,7 +72,17 @@ async function ensureGooseSidecar(): Promise<string | null> {
       OPENAI_BASE_URL: process.env.OPENAI_BASE_URL ?? 'https://ai.kai.com',
     },
   });
-  await waitForGoose(port);
+  gooseSidecar.once('exit', () => {
+    gooseSidecar = null;
+    gooseAcpUrl = null;
+  });
+  try {
+    await waitForGoose(port);
+  } catch (error) {
+    gooseSidecar.kill();
+    gooseSidecar = null;
+    throw error;
+  }
   gooseAcpUrl = `ws://127.0.0.1:${port}/acp?token=${secret}`;
   return gooseAcpUrl;
 }
@@ -80,6 +90,41 @@ async function ensureGooseSidecar(): Promise<string | null> {
 function isWithinRoot(root: string, target: string): boolean {
   const relative = path.relative(path.resolve(root), path.resolve(target));
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+async function resolveProjectRoot(root: string): Promise<string> {
+  const resolved = await fs.realpath(root);
+  const stats = await fs.stat(resolved);
+  if (!stats.isDirectory()) throw new Error('Selected project is not a directory');
+  return resolved;
+}
+
+function parseCommand(rawCommand: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let quote: '"' | "'" | null = null;
+  let escaped = false;
+  for (const character of rawCommand.trim()) {
+    if (escaped) { current += character; escaped = false; continue; }
+    if (character === '\\' && quote !== "'") { escaped = true; continue; }
+    if (quote) { if (character === quote) quote = null; else current += character; continue; }
+    if (character === '"' || character === "'") { quote = character; continue; }
+    if (/\s/.test(character)) { if (current) { parts.push(current); current = ''; } continue; }
+    current += character;
+  }
+  if (quote || escaped) throw new Error('Command contains an unfinished quote or escape');
+  if (current) parts.push(current);
+  return parts;
+}
+
+function isDestructiveGitCommand(parts: string[]): boolean {
+  if (parts[0] !== 'git') return false;
+  const subcommand = parts[1];
+  return subcommand === 'clean'
+    || (subcommand === 'reset' && parts.includes('--hard'))
+    || (subcommand === 'checkout' && parts.includes('--'))
+    || subcommand === 'restore'
+    || (subcommand === 'push' && parts.some((part) => part === '--force' || part === '-f'));
 }
 
 async function collectFiles(root: string, directory = root, depth = 0): Promise<WorkspaceFile[]> {
@@ -131,11 +176,15 @@ ipcMain.handle('cod:select-project', async () => {
   return result.canceled ? null : result.filePaths[0];
 });
 
-ipcMain.handle('cod:list-files', async (_event, root: string) => collectFiles(root));
+ipcMain.handle('cod:list-files', async (_event, root: string) => {
+  const resolvedRoot = await resolveProjectRoot(root);
+  return collectFiles(resolvedRoot);
+});
 
 ipcMain.handle('cod:read-text-file', async (_event, root: string, relativePath: string) => {
-  const target = path.join(root, relativePath);
-  if (!isWithinRoot(root, target)) throw new Error('File is outside the selected project');
+  const resolvedRoot = await resolveProjectRoot(root);
+  const target = await fs.realpath(path.join(resolvedRoot, relativePath));
+  if (!isWithinRoot(resolvedRoot, target)) throw new Error('File is outside the selected project');
   const stats = await fs.stat(target);
   if (stats.size > 1024 * 1024) throw new Error('File is larger than 1 MB');
   return fs.readFile(target, 'utf8');
@@ -143,7 +192,8 @@ ipcMain.handle('cod:read-text-file', async (_event, root: string, relativePath: 
 
 ipcMain.handle('cod:git-diff', async (_event, root: string) => {
   try {
-    const { stdout } = await execFileAsync('git', ['diff', '--no-ext-diff', '--'], { cwd: root, maxBuffer: 2 * 1024 * 1024 });
+    const resolvedRoot = await resolveProjectRoot(root);
+    const { stdout } = await execFileAsync('git', ['diff', '--no-ext-diff', '--'], { cwd: resolvedRoot, maxBuffer: 2 * 1024 * 1024 });
     return stdout;
   } catch (error) {
     return error instanceof Error ? error.message : 'Unable to read git diff';
@@ -153,13 +203,17 @@ ipcMain.handle('cod:git-diff', async (_event, root: string) => {
 ipcMain.handle('cod:get-goose-acp-url', () => ensureGooseSidecar());
 
 ipcMain.handle('cod:run-command', async (_event, root: string, rawCommand: string): Promise<TerminalResult> => {
-  const parts = rawCommand.trim().split(/\s+/).filter(Boolean);
+  let parts: string[];
+  try { parts = parseCommand(rawCommand); }
+  catch (error) { return { command: rawCommand, output: error instanceof Error ? error.message : 'Invalid command', exitCode: 126 }; }
   const executable = parts.shift();
   if (!executable || !allowedCommands.has(executable)) {
-    return { command: rawCommand, output: 'Command is not in the Stage 1 allowlist.', exitCode: 126 };
+    return { command: rawCommand, output: 'Command is not in the COD allowlist.', exitCode: 126 };
   }
+  if (isDestructiveGitCommand([executable, ...parts])) return { command: rawCommand, output: 'Destructive Git commands are blocked in the embedded terminal.', exitCode: 126 };
   try {
-    const { stdout, stderr } = await execFileAsync(executable, parts, { cwd: root, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
+    const resolvedRoot = await resolveProjectRoot(root);
+    const { stdout, stderr } = await execFileAsync(executable, parts, { cwd: resolvedRoot, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
     return { command: rawCommand, output: `${stdout}${stderr}`.trim(), exitCode: 0 };
   } catch (error) {
     const details = error as Error & { stdout?: string; stderr?: string; code?: number };

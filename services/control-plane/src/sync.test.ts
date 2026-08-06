@@ -13,6 +13,13 @@ describe('synchronization database contract', () => {
     expect(updated.version).toBe(2);
     expect(await database.eventsAfter(principal, 1)).toHaveLength(2);
     await expect(database.updateTask(principal, task.id, 'complete', 1)).rejects.toMatchObject({ status: 409 });
+    const completed = await database.updateTask(principal, task.id, 'complete', 2);
+    await expect(database.updateTask(principal, completed.id, 'draft', completed.version)).rejects.toMatchObject({ code: 'invalid_task_transition' });
+  });
+
+  it('validates device platforms', async () => {
+    const database = new MemoryDatabase();
+    await expect(database.registerDevice(principal, { name: 'Unknown', platform: 'watch' as 'linux' })).rejects.toMatchObject({ code: 'invalid_device_platform' });
   });
 
   it('does not expose devices and tasks across users', async () => {

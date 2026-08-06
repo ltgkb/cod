@@ -7,5 +7,6 @@ describe('KnowledgeAdapter', () => {
     const hits = await new KnowledgeAdapter(loadConfig({})).search('Agent');
     expect(hits[0]?.url).toContain('wiki.kai.com');
     expect(hits[0]?.score).toBeGreaterThan(0.8);
+    expect(await new KnowledgeAdapter(loadConfig({})).search('unrelated phrase')).toEqual([]);
   });
 });

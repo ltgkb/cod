@@ -73,6 +73,25 @@ export interface CodDatabase {
   close(): Promise<void>;
 }
 
+const devicePlatforms = new Set<DeviceRecord['platform']>(['macos', 'windows', 'linux', 'web', 'mobile']);
+const taskTransitions: Record<TaskStatus, ReadonlySet<TaskStatus>> = {
+  draft: new Set(['running', 'failed']),
+  running: new Set(['waiting', 'complete', 'failed']),
+  waiting: new Set(['running', 'complete', 'failed']),
+  complete: new Set(['running']),
+  failed: new Set(['running']),
+};
+
+export function validateDeviceInput(input: Pick<DeviceRecord, 'name' | 'platform'>): void {
+  if (!input.name?.trim()) throw new HttpError('Device name is required', 400, 'invalid_device');
+  if (!devicePlatforms.has(input.platform)) throw new HttpError('Device platform is invalid', 400, 'invalid_device_platform');
+}
+
+export function validateTaskTransition(current: TaskStatus, next: TaskStatus): void {
+  if (current === next) return;
+  if (!taskTransitions[current].has(next)) throw new HttpError(`Task cannot move from ${current} to ${next}`, 409, 'invalid_task_transition');
+}
+
 const schema = `
 CREATE TABLE IF NOT EXISTS cod_users (
   tenant_id text NOT NULL, user_id text NOT NULL, email text NOT NULL, display_name text NOT NULL,
@@ -114,7 +133,11 @@ const accountFromRow = (row: Record<string, unknown>): AccountSummary => ({
   userId: String(row.user_id), displayName: String(row.display_name), balanceCents: Number(row.balance_cents), currency: 'CNY', plan: row.plan === 'team' ? 'team' : 'developer',
 });
 const ledgerFromRow = (row: Record<string, unknown>): LedgerEntry => ({ id: String(row.id), type: row.type as LedgerEntry['type'], amountCents: Number(row.amount_cents), reference: String(row.reference), createdAt: new Date(String(row.created_at)).toISOString() });
-const deviceFromRow = (row: Record<string, unknown>): DeviceRecord => ({ id: String(row.id), name: String(row.name), platform: row.platform as DeviceRecord['platform'], status: row.status as DeviceRecord['status'], lastSeenAt: new Date(String(row.last_seen_at)).toISOString() });
+const deviceFromRow = (row: Record<string, unknown>): DeviceRecord => {
+  const lastSeenAt = new Date(String(row.last_seen_at)).toISOString();
+  const stale = Date.now() - new Date(lastSeenAt).getTime() > 45_000;
+  return { id: String(row.id), name: String(row.name), platform: row.platform as DeviceRecord['platform'], status: stale ? 'offline' : row.status as DeviceRecord['status'], lastSeenAt };
+};
 const taskFromRow = (row: Record<string, unknown>): SyncedTask => ({ id: String(row.id), title: String(row.title), status: row.status as TaskStatus, deviceId: String(row.device_id), updatedAt: new Date(String(row.updated_at)).toISOString(), version: Number(row.version) });
 
 export class PostgresDatabase implements CodDatabase {
@@ -158,11 +181,24 @@ export class PostgresDatabase implements CodDatabase {
   }
   async releaseUsage(p:Principal,reservationId:string) { await this.transaction(async(client)=>{const reservation=await client.query(`SELECT * FROM cod_usage_reservations WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE`,[reservationId,p.tenantId,p.userId]);if(!reservation.rows[0]||reservation.rows[0].status!=='reserved')return;await client.query('UPDATE cod_users SET balance_cents=balance_cents+$3,updated_at=now() WHERE tenant_id=$1 AND user_id=$2',[p.tenantId,p.userId,Number(reservation.rows[0].amount_cents)]);await client.query(`UPDATE cod_usage_reservations SET status='released',updated_at=now() WHERE id=$1`,[reservationId]);}); }
   async listDevices(p: Principal) { const {rows}=await this.pool.query('SELECT * FROM cod_devices WHERE tenant_id=$1 AND user_id=$2 ORDER BY created_at',[p.tenantId,p.userId]); return rows.map(deviceFromRow); }
-  async registerDevice(p: Principal,input:Pick<DeviceRecord,'name'|'platform'>) { if(!input.name?.trim()) throw new HttpError('Device name is required',400,'invalid_device'); const id=randomUUID(); const {rows}=await this.pool.query(`INSERT INTO cod_devices (id,tenant_id,user_id,name,platform,status,last_seen_at) VALUES ($1,$2,$3,$4,$5,'online',now()) RETURNING *`,[id,p.tenantId,p.userId,input.name.trim().slice(0,100),input.platform]); const device=deviceFromRow(rows[0]); await this.append(p,'device.registered',id,device); return device; }
-  async heartbeat(p: Principal,id:string) { const {rows}=await this.pool.query(`UPDATE cod_devices SET status='online',last_seen_at=now() WHERE id=$1 AND tenant_id=$2 AND user_id=$3 RETURNING *`,[id,p.tenantId,p.userId]); if(!rows[0]) throw new HttpError('Device not found',404,'device_not_found'); const device=deviceFromRow(rows[0]); await this.append(p,'device.heartbeat',id,device); return device; }
+  async registerDevice(p: Principal,input:Pick<DeviceRecord,'name'|'platform'>) { validateDeviceInput(input); const id=randomUUID(); const {rows}=await this.pool.query(`INSERT INTO cod_devices (id,tenant_id,user_id,name,platform,status,last_seen_at) VALUES ($1,$2,$3,$4,$5,'online',now()) RETURNING *`,[id,p.tenantId,p.userId,input.name.trim().slice(0,100),input.platform]); const device=deviceFromRow(rows[0]); await this.append(p,'device.registered',id,device); return device; }
+  async heartbeat(p: Principal,id:string) { const {rows}=await this.pool.query(`UPDATE cod_devices SET status='online',last_seen_at=now() WHERE id=$1 AND tenant_id=$2 AND user_id=$3 RETURNING *`,[id,p.tenantId,p.userId]); if(!rows[0]) throw new HttpError('Device not found',404,'device_not_found'); return deviceFromRow(rows[0]); }
   async listTasks(p: Principal) { const {rows}=await this.pool.query('SELECT * FROM cod_tasks WHERE tenant_id=$1 AND user_id=$2 ORDER BY updated_at DESC',[p.tenantId,p.userId]); return rows.map(taskFromRow); }
   async createTask(p: Principal,input:Pick<SyncedTask,'title'|'deviceId'>) { if(!input.title?.trim()) throw new HttpError('Task title is required',400,'invalid_task'); const device=await this.pool.query('SELECT 1 FROM cod_devices WHERE id=$1 AND tenant_id=$2 AND user_id=$3',[input.deviceId,p.tenantId,p.userId]); if(!device.rows[0]) throw new HttpError('Device not found',404,'device_not_found'); const id=randomUUID(); const {rows}=await this.pool.query(`INSERT INTO cod_tasks (id,tenant_id,user_id,title,status,device_id) VALUES ($1,$2,$3,$4,'draft',$5) RETURNING *`,[id,p.tenantId,p.userId,input.title.trim().slice(0,500),input.deviceId]); const task=taskFromRow(rows[0]); await this.append(p,'task.created',id,task); return task; }
-  async updateTask(p: Principal,id:string,status:TaskStatus,version:number) { const {rows}=await this.pool.query(`UPDATE cod_tasks SET status=$1,version=version+1,updated_at=now() WHERE id=$2 AND tenant_id=$3 AND user_id=$4 AND version=$5 RETURNING *`,[status,id,p.tenantId,p.userId,version]); if(!rows[0]) { const exists=await this.pool.query('SELECT 1 FROM cod_tasks WHERE id=$1 AND tenant_id=$2 AND user_id=$3',[id,p.tenantId,p.userId]); throw new HttpError(exists.rows[0]?'Task version conflict':'Task not found',exists.rows[0]?409:404,exists.rows[0]?'version_conflict':'task_not_found'); } const task=taskFromRow(rows[0]); await this.append(p,'task.updated',id,task); return task; }
+  async updateTask(p: Principal,id:string,status:TaskStatus,version:number) {
+    return this.transaction(async (client) => {
+      const currentResult = await client.query('SELECT * FROM cod_tasks WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE', [id,p.tenantId,p.userId]);
+      if (!currentResult.rows[0]) throw new HttpError('Task not found',404,'task_not_found');
+      const current = taskFromRow(currentResult.rows[0]);
+      if (current.version !== version) throw new HttpError('Task version conflict',409,'version_conflict');
+      validateTaskTransition(current.status, status);
+      if (current.status === status) return current;
+      const { rows } = await client.query('UPDATE cod_tasks SET status=$1,version=version+1,updated_at=now() WHERE id=$2 RETURNING *', [status,id]);
+      const task = taskFromRow(rows[0]);
+      await client.query('INSERT INTO cod_events (tenant_id,user_id,type,entity_id,data) VALUES ($1,$2,$3,$4,$5)', [p.tenantId,p.userId,'task.updated',id,JSON.stringify(task)]);
+      return task;
+    });
+  }
   async eventsAfter(p:Principal,cursor:number) { const {rows}=await this.pool.query('SELECT * FROM cod_events WHERE tenant_id=$1 AND user_id=$2 AND cursor>$3 ORDER BY cursor LIMIT 500',[p.tenantId,p.userId,cursor]); return rows.map((row)=>({cursor:Number(row.cursor),type:row.type,entityId:String(row.entity_id),data:row.data,createdAt:new Date(row.created_at).toISOString()})); }
   async audit(p:Principal,action:string,entityType:string,entityId:string|null,data:unknown={}) { await this.pool.query('INSERT INTO cod_audit (id,tenant_id,user_id,action,entity_type,entity_id,data) VALUES ($1,$2,$3,$4,$5,$6,$7)',[randomUUID(),p.tenantId,p.userId,action,entityType,entityId,JSON.stringify(data)]); }
   async listAudit(p:Principal,limit:number) { const {rows}=await this.pool.query('SELECT * FROM cod_audit WHERE tenant_id=$1 AND user_id=$2 ORDER BY created_at DESC LIMIT $3',[p.tenantId,p.userId,Math.min(Math.max(limit,1),200)]); return rows.map((row)=>({id:String(row.id),action:String(row.action),entityType:String(row.entity_type),entityId:row.entity_id?String(row.entity_id):null,data:row.data,createdAt:new Date(row.created_at).toISOString()})); }

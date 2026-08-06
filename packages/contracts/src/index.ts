@@ -64,6 +64,7 @@ export interface ProductManifest {
 
 export interface DesktopBridge {
   platform: string;
+  controlPlaneUrl: string;
   selectProject(): Promise<string | null>;
   listFiles(root: string): Promise<WorkspaceFile[]>;
   readTextFile(root: string, relativePath: string): Promise<string>;

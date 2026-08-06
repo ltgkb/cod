@@ -1,4 +1,5 @@
 import type { ControlPlaneConfig } from './config.js';
+import { HttpError } from './errors.js';
 
 export interface ModelInfo {
   id: string;
@@ -20,6 +21,10 @@ export class AiGateway {
     return defaultModels;
   }
 
+  mode(): 'live' | 'demo' | 'unavailable' {
+    return this.config.aiApiKey ? 'live' : this.config.demoMode ? 'demo' : 'unavailable';
+  }
+
   costCents(modelId: string, inputTokens: number, outputTokens: number): number {
     const model = defaultModels.find((item) => item.id === modelId);
     if (!model) throw new Error('Unknown model');
@@ -30,17 +35,30 @@ export class AiGateway {
 
   async proxyChat(body: unknown): Promise<Response> {
     if (!this.config.aiApiKey) {
+      if (!this.config.demoMode) throw new HttpError('The KAI model provider is not configured', 503, 'ai_unavailable');
+      const input = body && typeof body === 'object' ? body as { model?: string; messages?: Array<{ role?: string; content?: unknown }> } : {};
+      const lastUserMessage = [...(input.messages ?? [])].reverse().find((message) => message.role === 'user');
+      const prompt = typeof lastUserMessage?.content === 'string' ? lastUserMessage.content.trim().slice(0, 160) : '';
+      const content = prompt
+        ? `COD 当前处于演示模式，已收到：“${prompt}”。配置 KAI_API_KEY 后将由真实模型处理。`
+        : 'COD 当前处于演示模式。配置 KAI_API_KEY 后将由真实模型处理。';
       return Response.json({
         id: 'mock-chat',
-        model: 'coder-pro',
-        choices: [{ message: { role: 'assistant', content: 'COD 模型网关已就绪，当前使用 Mock 响应。' }, finish_reason: 'stop' }],
-        usage: { prompt_tokens: 12, completion_tokens: 18, total_tokens: 30 },
+        model: input.model ?? 'coder-pro',
+        choices: [{ message: { role: 'assistant', content }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: Math.max(1, Math.ceil(prompt.length / 4)), completion_tokens: Math.max(1, Math.ceil(content.length / 4)), total_tokens: Math.max(2, Math.ceil((prompt.length + content.length) / 4)) },
+        cod_mode: 'demo',
       });
     }
-    return fetch(`${this.config.aiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${this.config.aiApiKey}` },
-      body: JSON.stringify(body),
-    });
+    try {
+      return await fetch(`${this.config.aiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${this.config.aiApiKey}` },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(120_000),
+      });
+    } catch (error) {
+      throw new HttpError(error instanceof Error && error.name === 'TimeoutError' ? 'KAI model request timed out' : 'KAI model provider is unavailable', 502, 'ai_upstream_unavailable');
+    }
   }
 }

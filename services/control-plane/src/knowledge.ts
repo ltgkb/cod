@@ -9,13 +9,17 @@ const samples: KnowledgeHit[] = [
 export class KnowledgeAdapter {
   constructor(private readonly config: ControlPlaneConfig) {}
 
+  mode(): 'live' | 'demo' {
+    return process.env.KAI_WIKI_SEARCH_ENDPOINT && process.env.KAI_WIKI_API_KEY ? 'live' : 'demo';
+  }
+
   async search(query: string): Promise<KnowledgeHit[]> {
     const normalized = query.trim();
     if (!normalized) return [];
     const endpoint = process.env.KAI_WIKI_SEARCH_ENDPOINT;
     const apiKey = process.env.KAI_WIKI_API_KEY;
     if (!endpoint || !apiKey) {
-      return samples.filter((item) => `${item.title}${item.excerpt}`.toLowerCase().includes(normalized.toLowerCase()) || normalized.length > 1);
+      return samples.filter((item) => `${item.title}${item.excerpt}`.toLowerCase().includes(normalized.toLowerCase()));
     }
     const response = await fetch(new URL(endpoint, this.config.wikiBaseUrl), {
       method: 'POST',
