@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 backup_root="${COD_BACKUP_ROOT:-/var/lib/cod/backups}"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"

@@ -2,6 +2,8 @@
 Description=COD control plane
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -17,8 +19,6 @@ ExecStart=/home/ubuntu/.cache/hermit/pkg/node-24.10.0/bin/node /opt/cod/current/
 Restart=always
 RestartSec=3
 TimeoutStopSec=15
-StartLimitIntervalSec=60
-StartLimitBurst=10
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
