@@ -1,4 +1,4 @@
-import type { AccountSummary, DeviceRecord, KnowledgeHit, TaskStatus } from '@cod/contracts';
+import type { AccountSummary, DeviceRecord, KnowledgeHit, ProductManifest, TaskStatus } from '@cod/contracts';
 
 const controlPlaneUrl = import.meta.env.VITE_COD_CONTROL_PLANE_URL ?? 'http://127.0.0.1:8787';
 
@@ -71,4 +71,8 @@ export async function registerDevice(token: string, name: string, platform: Devi
 
 export async function createRemoteTask(token: string, title: string, deviceId: string): Promise<RemoteTask> {
   return request('/api/tasks', token, { method: 'POST', body: JSON.stringify({ title, deviceId }) });
+}
+
+export async function listProducts(token: string): Promise<ProductManifest[]> {
+  return request('/api/products', token);
 }

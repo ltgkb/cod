@@ -11,6 +11,7 @@ import {
   Folder,
   GitDiff,
   Lightning,
+  ArrowSquareOut,
   ListChecks,
   MagnifyingGlass,
   PaperPlaneTilt,
@@ -22,8 +23,8 @@ import {
   Warning,
 } from '@phosphor-icons/react';
 import type { CodTask, TaskStatus, WorkspaceFile } from '@cod/contracts';
-import { createRemoteTask, listDevices, loadCodSession, registerDevice, searchKnowledge, topup, type CodSession } from './api';
-import type { DeviceRecord, KnowledgeHit } from '@cod/contracts';
+import { createRemoteTask, listDevices, listProducts, loadCodSession, registerDevice, searchKnowledge, topup, type CodSession } from './api';
+import type { DeviceRecord, KnowledgeHit, ProductManifest } from '@cod/contracts';
 import { demoDiff, demoFiles, demoTasks, demoTimeline } from './demoData';
 import { hasDesktopBridge, openProject, readProjectFile } from './desktop';
 import type { InspectorTab, ProjectSnapshot, WorkspaceMode } from './types';
@@ -119,6 +120,8 @@ export function App() {
   const [knowledgeHits, setKnowledgeHits] = useState<KnowledgeHit[]>([]);
   const [devices, setDevices] = useState<DeviceRecord[]>([]);
   const [remoteNotice, setRemoteNotice] = useState('');
+  const [products, setProducts] = useState<ProductManifest[]>([]);
+  const [activeProduct, setActiveProduct] = useState<ProductManifest | null>(null);
   const [project, setProject] = useState<ProjectSnapshot>({
     root: '/home/ubuntu/cod-project/cod',
     files: demoFiles,
@@ -134,7 +137,10 @@ export function App() {
       .then((next) => {
         setSession(next);
         setSelectedModel(next.models[0]?.id ?? 'coder-pro');
-        return listDevices(next.token).then(async (items) => items.length ? items : [await registerDevice(next.token, 'COD Desktop', 'linux')]).then(setDevices);
+        return Promise.all([
+          listDevices(next.token).then(async (items) => items.length ? items : [await registerDevice(next.token, 'COD Desktop', 'linux')]).then(setDevices),
+          listProducts(next.token).then(setProducts),
+        ]);
       })
       .catch(() => setAccountError(true));
   }, []);
@@ -186,6 +192,7 @@ export function App() {
           <button className="icon-button active" title="任务"><ListChecks weight="fill" /></button>
           <button className="icon-button" title="普通对话" onClick={() => setMode('chat')}><ChatCircleDots /></button>
           <button className="icon-button" title="命令面板"><Command /></button>
+          {products.map((product) => <button className="icon-button" title={product.name} key={product.id} onClick={() => product.embedUrl ? setActiveProduct(product) : window.open(product.launchUrl, '_blank', 'noopener,noreferrer')}><ArrowSquareOut /></button>)}
         </div>
         <div className="rail-footer">
           <button className="icon-button" title="账户"><UserCircle /></button>
@@ -288,6 +295,12 @@ export function App() {
           {inspectorTab === 'terminal' && <><div className="panel-title"><span><TerminalWindow /> 本地终端</span><small>{hasDesktopBridge() ? 'desktop' : 'preview'}</small></div><div className="terminal"><pre>{terminalOutput}</pre><div className="terminal-command"><span>$</span><input aria-label="终端命令" value={command} onChange={(event) => setCommand(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && handleRun()} /><button onClick={handleRun}>运行</button></div></div></>}
         </div>
       </aside>
+      {activeProduct?.embedUrl && (
+        <section className="product-overlay" aria-label={`${activeProduct.name} 产品`}>
+          <header><strong>{activeProduct.name}</strong><div><button onClick={() => window.open(activeProduct.launchUrl, '_blank', 'noopener,noreferrer')}><ArrowSquareOut /> 浏览器打开</button><button onClick={() => setActiveProduct(null)}>关闭</button></div></header>
+          <iframe title={activeProduct.name} src={activeProduct.embedUrl} sandbox="allow-forms allow-popups allow-scripts allow-same-origin" referrerPolicy="strict-origin-when-cross-origin" />
+        </section>
+      )}
     </div>
   );
 }

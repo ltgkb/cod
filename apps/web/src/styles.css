@@ -164,6 +164,11 @@ button:active { transform: translateY(1px); }
 .terminal-command input { width: 100%; background: transparent; border: 0; outline: 0; font: inherit; }
 .terminal-command button { padding: 5px 8px; color: #0b1712; background: var(--accent); border-radius: 6px; font: 9px ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-weight: 700; }
 .mobile-only { display: none; }
+.product-overlay { position: fixed; z-index: 30; inset: 16px; display: flex; flex-direction: column; overflow: hidden; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 14px; box-shadow: 0 30px 100px rgba(0,0,0,.55); }
+.product-overlay header { display: flex; align-items: center; justify-content: space-between; height: 54px; padding: 0 14px; border-bottom: 1px solid var(--line); }
+.product-overlay header div { display: flex; gap: 7px; }
+.product-overlay header button { display: flex; align-items: center; gap: 5px; padding: 7px 9px; color: var(--muted); background: var(--surface-hover); border-radius: 7px; font-size: 10px; }
+.product-overlay iframe { flex: 1; width: 100%; border: 0; background: #fff; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } }

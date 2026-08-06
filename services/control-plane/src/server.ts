@@ -8,6 +8,7 @@ import { KnowledgeAdapter } from './knowledge.js';
 import { AccountStore, type TopupRequest } from './store.js';
 import { SyncStore } from './sync.js';
 import { BotService, parseBotCommand, verifyWebhookSignature, type BotPlatform } from './bots.js';
+import { ProductRegistry } from './products.js';
 
 export function createControlPlane() {
   const config = loadConfig();
@@ -16,6 +17,7 @@ export function createControlPlane() {
   const knowledge = new KnowledgeAdapter(config);
   const sync = new SyncStore();
   const bots = new BotService(sync);
+  const products = new ProductRegistry(config);
 
   return createServer(async (request, response) => {
     if (request.method === 'OPTIONS') return sendJson(response, 204, null);
@@ -42,6 +44,7 @@ export function createControlPlane() {
       if (request.method === 'GET' && url.pathname === '/api/account') return sendJson(response, 200, accounts.getAccount());
       if (request.method === 'GET' && url.pathname === '/api/ledger') return sendJson(response, 200, accounts.getLedger());
       if (request.method === 'GET' && url.pathname === '/api/models') return sendJson(response, 200, gateway.listModels());
+      if (request.method === 'GET' && url.pathname === '/api/products') return sendJson(response, 200, products.list());
       if (request.method === 'GET' && url.pathname === '/api/knowledge/search') return sendJson(response, 200, await knowledge.search(url.searchParams.get('q') ?? ''));
       if (request.method === 'GET' && url.pathname === '/api/devices') return sendJson(response, 200, sync.listDevices());
       if (request.method === 'POST' && url.pathname === '/api/devices') return sendJson(response, 201, sync.registerDevice(await readJson(request)));
