@@ -57,7 +57,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
     const url = new URL(request.url ?? '/', 'http://localhost');
     try {
       if (request.method === 'GET' && url.pathname === '/health') return sendJson(response, 200, { status: 'ok', service: 'cod-control-plane' });
-      if (request.method === 'GET' && url.pathname === '/ready') return sendJson(response, await database.health() ? 200 : 503, { status: await database.health() ? 'ready' : 'not_ready', database: config.databaseUrl ? 'postgres' : 'memory' });
+      if (request.method === 'GET' && url.pathname === '/ready') { const ready=await database.health(); return sendJson(response, ready ? 200 : 503, { status: ready ? 'ready' : 'not_ready', database: config.databaseUrl ? 'postgres' : 'memory' }); }
       if (request.method === 'POST' && url.pathname === '/api/auth/login') {
         const body = await readJson<{ email?: string }>(request);
         const email = validateLoginEmail(body.email, config);

@@ -8,5 +8,8 @@ Server files:
 - `/etc/nginx/sites-available/cod`
 - `/var/www/cod`
 - `/etc/cod/control-plane.env`
+- `/etc/cod/runtime.env`
+
+`control-plane.env` contains secrets. `runtime.env` contains versioned non-secret runtime settings such as the local PostgreSQL connection and the restricted pilot login account.
 
 `cod.kai.com` must have an A record pointing to `95.41.23.60` before issuing a public TLS certificate.

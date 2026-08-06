@@ -10,6 +10,7 @@ Group=ubuntu
 WorkingDirectory=/home/ubuntu/cod-project/cod
 Environment=NODE_ENV=production
 Environment=COD_CONTROL_PORT=8787
+EnvironmentFile=/etc/cod/runtime.env
 EnvironmentFile=-/etc/cod/control-plane.env
 ExecStart=/home/ubuntu/.cache/hermit/pkg/node-24.10.0/bin/node services/control-plane/dist/server.js
 Restart=always
