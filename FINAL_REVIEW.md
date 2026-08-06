@@ -90,7 +90,11 @@ Further visual work should focus on a final COD icon set, richer empty/loading s
 - Web and desktop production builds pass.
 - `npm audit --audit-level=high` reports no vulnerabilities.
 - Goose upstream remains unmodified and clean.
-- Linux AppImage and Debian packages build successfully; the final package is rebuilt with the release Goose sidecar during release preparation.
+- The release Goose 1.45.0 sidecar passed `/status` and a real ACP prompt that completed three tool calls through the COD adapter.
+- Final Linux packages include the 148,700,800-byte Goose sidecar:
+  - `COD-0.1.0-x86_64.AppImage`: 163,347,500 bytes.
+  - `COD-0.1.0-amd64.deb`: 125,059,192 bytes.
+- The Debian package installs Goose at `/opt/COD/resources/bin/goose` with executable permissions and uses a matching `cod` desktop identity.
 
 ## Production boundary
 
