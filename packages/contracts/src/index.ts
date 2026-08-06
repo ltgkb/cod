@@ -69,6 +69,7 @@ export interface DesktopBridge {
   readTextFile(root: string, relativePath: string): Promise<string>;
   gitDiff(root: string): Promise<string>;
   runCommand(root: string, command: string): Promise<TerminalResult>;
+  getGooseAcpUrl(): Promise<string | null>;
 }
 
 declare global {

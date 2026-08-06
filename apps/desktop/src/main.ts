@@ -84,6 +84,15 @@ ipcMain.handle('cod:git-diff', async (_event, root: string) => {
   }
 });
 
+ipcMain.handle('cod:get-goose-acp-url', () => {
+  const base = process.env.COD_GOOSE_ACP_URL;
+  const token = process.env.COD_GOOSE_ACP_TOKEN;
+  if (!base || !token) return null;
+  const url = new URL(base);
+  url.searchParams.set('token', token);
+  return url.toString();
+});
+
 ipcMain.handle('cod:run-command', async (_event, root: string, rawCommand: string): Promise<TerminalResult> => {
   const parts = rawCommand.trim().split(/\s+/).filter(Boolean);
   const executable = parts.shift();

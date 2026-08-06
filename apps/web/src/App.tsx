@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowsClockwise,
   CaretDown,
@@ -25,6 +25,7 @@ import {
 import type { CodTask, TaskStatus, WorkspaceFile } from '@cod/contracts';
 import { createRemoteTask, listDevices, listProducts, loadCodSession, registerDevice, searchKnowledge, sendChat, topup, type CodSession } from './api';
 import type { DeviceRecord, KnowledgeHit, ProductManifest } from '@cod/contracts';
+import { runGooseTask } from './goose';
 import { demoDiff, demoFiles, demoTasks, demoTimeline } from './demoData';
 import { hasDesktopBridge, openProject, readProjectFile } from './desktop';
 import type { InspectorTab, ProjectSnapshot, WorkspaceMode } from './types';
@@ -124,6 +125,9 @@ export function App() {
   const [activeProduct, setActiveProduct] = useState<ProductManifest | null>(null);
   const [chatReply, setChatReply] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const [agentStatus, setAgentStatus] = useState('正在执行');
+  const [pendingPermission, setPendingPermission] = useState<{ title: string; options: Array<{ optionId: string; name: string; kind: string }> } | null>(null);
+  const permissionResolver = useRef<((optionId: string | null) => void) | null>(null);
   const [project, setProject] = useState<ProjectSnapshot>({
     root: '/home/ubuntu/cod-project/cod',
     files: demoFiles,
@@ -167,13 +171,44 @@ export function App() {
 
   const handleSend = async () => {
     if (!prompt.trim() || !session) return;
+    const submittedPrompt = prompt;
     setIsSending(true);
+    setChatReply('');
     try {
-      setChatReply(await sendChat(session.token, selectedModel, prompt));
+      const acpUrl = await window.codDesktop?.getGooseAcpUrl();
+      if (mode === 'code' && acpUrl) {
+        setAgentStatus('连接本机 Goose');
+        const reply = await runGooseTask({
+          acpUrl,
+          cwd: project.root,
+          prompt: submittedPrompt,
+          onUpdate: (update) => {
+            if (update.kind === 'message') setChatReply((value) => value + update.text);
+            if (update.kind === 'tool' || update.kind === 'status') setAgentStatus(update.text);
+          },
+          requestPermission: (request) => new Promise((resolve) => {
+            permissionResolver.current = resolve;
+            setPendingPermission({ title: request.toolCall.title, options: request.options });
+          }),
+        });
+        if (!reply) setChatReply('Goose 已完成任务，请在右侧查看文件和 Diff。');
+      } else {
+        setChatReply(await sendChat(session.token, selectedModel, submittedPrompt));
+      }
       setPrompt('');
+      setAgentStatus('已完成');
+    } catch (error) {
+      setAgentStatus('执行失败');
+      setChatReply(error instanceof Error ? error.message : 'COD 执行失败');
     } finally {
       setIsSending(false);
     }
+  };
+
+  const resolvePermission = (optionId: string | null) => {
+    permissionResolver.current?.(optionId);
+    permissionResolver.current = null;
+    setPendingPermission(null);
   };
 
   const handleOpenProject = async () => {
@@ -257,10 +292,11 @@ export function App() {
             </div>
             <div className="agent-intro">
               <div className="agent-avatar"><span>C</span></div>
-              <div><strong>COD Agent</strong><small>正在执行</small></div>
+              <div><strong>COD Agent</strong><small>{agentStatus}</small></div>
               <span className="live-chip"><CircleNotch className="spin" /> running</span>
             </div>
             {chatReply && <div className="agent-reply"><p>{chatReply}</p></div>}
+            {pendingPermission && <div className="live-permission"><strong>{pendingPermission.title}</strong><p>Goose 请求执行权限，请确认本次操作。</p><div>{pendingPermission.options.map((option) => <button className={option.kind.startsWith('allow') ? 'approve' : ''} key={option.optionId} onClick={() => resolvePermission(option.optionId)}>{option.name}</button>)}<button onClick={() => resolvePermission(null)}>取消</button></div></div>}
             <div className="timeline">
               {demoTimeline.map((item, index) => (
                 <article className={`timeline-item ${item.kind}`} key={item.id}>

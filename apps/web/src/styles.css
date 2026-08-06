@@ -104,6 +104,12 @@ button:active { transform: translateY(1px); }
 .agent-intro strong, .agent-intro small { display: block; }
 .agent-reply { max-width: 620px; margin: 12px 0 4px 41px; padding: 12px 14px; background: #151a17; border: 1px solid var(--line); border-radius: 10px; }
 .agent-reply p { margin: 0; font-size: 12px; line-height: 1.65; }
+.live-permission { margin: 10px 0 8px 41px; padding: 12px; background: #191b16; border: 1px solid rgba(230,189,100,.35); border-radius: 10px; }
+.live-permission strong { font-size: 11px; }
+.live-permission p { margin: 5px 0 9px; color: var(--muted); font-size: 10px; }
+.live-permission div { display: flex; flex-wrap: wrap; gap: 6px; }
+.live-permission button { padding: 6px 8px; color: var(--muted); background: var(--surface-hover); border-radius: 6px; font-size: 9px; }
+.live-permission button.approve { color: #0b1712; background: var(--accent); }
 .agent-intro strong { font-size: 12px; }
 .agent-intro small { margin-top: 2px; color: var(--muted); font-size: 10px; }
 .live-chip { display: flex; align-items: center; gap: 5px; margin-left: auto; padding: 5px 7px; color: var(--accent); background: var(--accent-soft); border-radius: 6px; font: 9px 'Geist Mono', monospace; }
