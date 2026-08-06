@@ -73,6 +73,7 @@ The COD code workspace now connects to Goose through ACP instead of a demo-only 
 - Electron supervises a bundled Goose binary, selects a local port, generates an ephemeral ACP secret, waits for readiness, and stops the process on exit.
 - The Web workspace dynamically loads the ACP client, initializes a session, submits prompts, streams agent messages and tool status, and returns real permission decisions.
 - The sidecar defaults to the KAI OpenAI-compatible provider configuration and supports an explicit `COD_GOOSE_BINARY` development override.
+- The default OpenAI-compatible base URL intentionally omits `/v1` because Goose appends the API route itself.
 - A real ACP smoke test completed a model response and a three-tool execution path through the COD adapter.
 
 ## Visual review

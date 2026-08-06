@@ -69,7 +69,7 @@ async function ensureGooseSidecar(): Promise<string | null> {
       GOOSE_PROVIDER: process.env.GOOSE_PROVIDER ?? 'openai',
       GOOSE_MODEL: process.env.GOOSE_MODEL ?? 'coder-pro',
       OPENAI_MODEL: process.env.OPENAI_MODEL ?? 'coder-pro',
-      OPENAI_BASE_URL: process.env.OPENAI_BASE_URL ?? 'https://ai.kai.com/v1',
+      OPENAI_BASE_URL: process.env.OPENAI_BASE_URL ?? 'https://ai.kai.com',
     },
   });
   await waitForGoose(port);
