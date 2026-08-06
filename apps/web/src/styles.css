@@ -119,8 +119,12 @@ button:active { transform: translateY(1px); }
 .permission-actions .approve { color: #0c1813; background: var(--accent); border-color: var(--accent); font-weight: 700; }
 .composer-wrap { padding: 8px clamp(18px, 4vw, 56px) 18px; }
 .context-strip { display: flex; gap: 6px; margin-bottom: 7px; overflow-x: auto; }
-.context-strip span { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; padding: 5px 7px; color: var(--muted); background: #161b18; border: 1px solid var(--line); border-radius: 6px; font-size: 9px; }
+.context-strip span, .context-strip button { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; padding: 5px 7px; color: var(--muted); background: #161b18; border: 1px solid var(--line); border-radius: 6px; font-size: 9px; }
 .context-strip svg { width: 11px; color: var(--accent); }
+.knowledge-strip { display: grid; gap: 6px; margin-bottom: 7px; }
+.knowledge-strip a { display: grid; gap: 3px; padding: 8px 10px; color: var(--text); text-decoration: none; background: #151a17; border: 1px solid var(--line); border-radius: 8px; }
+.knowledge-strip strong { font-size: 10px; }
+.knowledge-strip span { color: var(--muted); font-size: 9px; }
 .composer { background: #191e1b; border: 1px solid #354039; border-radius: var(--radius); box-shadow: 0 18px 50px rgba(0,0,0,.25); }
 .composer:focus-within { border-color: rgba(66,211,166,.7); box-shadow: 0 18px 50px rgba(0,0,0,.25), 0 0 0 3px rgba(66,211,166,.08); }
 .composer textarea { display: block; width: 100%; min-height: 70px; resize: none; padding: 13px 14px; color: var(--text); background: transparent; border: 0; outline: 0; font-size: 12px; line-height: 1.5; }

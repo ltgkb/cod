@@ -4,12 +4,14 @@ import { createSessionToken, verifySessionToken } from './auth.js';
 import { loadConfig } from './config.js';
 import { AiGateway } from './gateway.js';
 import { bearerToken, readJson, sendJson } from './http.js';
+import { KnowledgeAdapter } from './knowledge.js';
 import { AccountStore, type TopupRequest } from './store.js';
 
 export function createControlPlane() {
   const config = loadConfig();
   const accounts = new AccountStore();
   const gateway = new AiGateway(config);
+  const knowledge = new KnowledgeAdapter(config);
 
   return createServer(async (request, response) => {
     if (request.method === 'OPTIONS') return sendJson(response, 204, null);
@@ -26,6 +28,7 @@ export function createControlPlane() {
       if (request.method === 'GET' && url.pathname === '/api/account') return sendJson(response, 200, accounts.getAccount());
       if (request.method === 'GET' && url.pathname === '/api/ledger') return sendJson(response, 200, accounts.getLedger());
       if (request.method === 'GET' && url.pathname === '/api/models') return sendJson(response, 200, gateway.listModels());
+      if (request.method === 'GET' && url.pathname === '/api/knowledge/search') return sendJson(response, 200, await knowledge.search(url.searchParams.get('q') ?? ''));
       if (request.method === 'POST' && url.pathname === '/api/topups') {
         const body = await readJson<Omit<TopupRequest, 'idempotencyKey'>>(request);
         const key = String(request.headers['idempotency-key'] ?? '');

@@ -1,4 +1,4 @@
-import type { AccountSummary } from '@cod/contracts';
+import type { AccountSummary, KnowledgeHit } from '@cod/contracts';
 
 const controlPlaneUrl = import.meta.env.VITE_COD_CONTROL_PLANE_URL ?? 'http://127.0.0.1:8787';
 
@@ -46,4 +46,8 @@ export async function topup(token: string, amountCents: number): Promise<Account
     body: JSON.stringify({ amountCents, channel: 'mock' }),
   });
   return result.account;
+}
+
+export async function searchKnowledge(token: string, query: string): Promise<KnowledgeHit[]> {
+  return request(`/api/knowledge/search?q=${encodeURIComponent(query)}`, token);
 }
