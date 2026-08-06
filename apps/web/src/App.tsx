@@ -25,7 +25,6 @@ import {
 import type { CodTask, TaskStatus, WorkspaceFile } from '@cod/contracts';
 import { createRemoteTask, listDevices, listProducts, loadCodSession, registerDevice, searchKnowledge, sendChat, topup, type CodSession } from './api';
 import type { DeviceRecord, KnowledgeHit, ProductManifest } from '@cod/contracts';
-import { runGooseTask } from './goose';
 import { demoDiff, demoFiles, demoTasks, demoTimeline } from './demoData';
 import { hasDesktopBridge, openProject, readProjectFile } from './desktop';
 import type { InspectorTab, ProjectSnapshot, WorkspaceMode } from './types';
@@ -177,6 +176,7 @@ export function App() {
     try {
       const acpUrl = await window.codDesktop?.getGooseAcpUrl();
       if (mode === 'code' && acpUrl) {
+        const { runGooseTask } = await import('./goose');
         setAgentStatus('连接本机 Goose');
         const reply = await runGooseTask({
           acpUrl,
