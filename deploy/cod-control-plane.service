@@ -15,7 +15,7 @@ Environment=COD_CONTROL_PORT=8787
 EnvironmentFile=/etc/cod/runtime.env
 EnvironmentFile=-/etc/cod/control-plane.env
 EnvironmentFile=-/etc/cod/revision.env
-ExecStart=/home/ubuntu/.cache/hermit/pkg/node-24.10.0/bin/node /opt/cod/current/services/control-plane/dist/server.js
+ExecStart=/home/ubuntu/.cache/hermit/pkg/node-24.10.0/bin/node /opt/cod/current/server.mjs
 Restart=always
 RestartSec=3
 TimeoutStopSec=15
