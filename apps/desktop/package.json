@@ -26,6 +26,7 @@
   "build": {
     "appId": "com.kai.cod",
     "productName": "COD",
+    "executableName": "cod",
     "asar": true,
     "directories": {
       "output": "release"
@@ -49,6 +50,8 @@
     "linux": {
       "target": ["AppImage", "deb"],
       "category": "Development",
+      "desktopName": "COD",
+      "synopsis": "COD agent workspace",
       "artifactName": "COD-${version}-${arch}.${ext}"
     },
     "mac": {
