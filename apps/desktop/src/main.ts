@@ -1,5 +1,8 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import { execFile } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { createServer as createNetServer } from 'node:net';
+import { randomBytes } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +13,69 @@ const execFileAsync = promisify(execFile);
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const developmentUrl = process.env.COD_DEV_SERVER_URL || 'http://127.0.0.1:5173';
 const allowedCommands = new Set(['npm', 'pnpm', 'cargo', 'git', 'node', 'just']);
+let gooseSidecar: ChildProcess | null = null;
+let gooseAcpUrl: string | null = null;
+
+async function availablePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createNetServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      const port = typeof address === 'object' && address ? address.port : 3284;
+      server.close(() => resolve(port));
+    });
+  });
+}
+
+async function waitForGoose(port: number, attempts = 50): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/status`);
+      if (response.ok) return;
+    } catch {
+      // The sidecar is still starting.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  throw new Error('Goose sidecar did not become ready');
+}
+
+async function ensureGooseSidecar(): Promise<string | null> {
+  if (gooseAcpUrl) return gooseAcpUrl;
+  const configuredBase = process.env.COD_GOOSE_ACP_URL;
+  const configuredToken = process.env.COD_GOOSE_ACP_TOKEN;
+  if (configuredBase && configuredToken) {
+    const configured = new URL(configuredBase);
+    configured.searchParams.set('token', configuredToken);
+    gooseAcpUrl = configured.toString();
+    return gooseAcpUrl;
+  }
+
+  const packagedBinary = path.join(process.resourcesPath, 'bin', process.platform === 'win32' ? 'goose.exe' : 'goose');
+  const binary = process.env.COD_GOOSE_BINARY ?? packagedBinary;
+  try {
+    await fs.access(binary);
+  } catch {
+    return null;
+  }
+  const port = await availablePort();
+  const secret = randomBytes(24).toString('hex');
+  gooseSidecar = spawn(binary, ['serve', '--platform', 'desktop', '--host', '127.0.0.1', '--port', String(port)], {
+    stdio: 'ignore',
+    env: {
+      ...process.env,
+      GOOSE_SERVER__SECRET_KEY: secret,
+      GOOSE_PROVIDER: process.env.GOOSE_PROVIDER ?? 'openai',
+      GOOSE_MODEL: process.env.GOOSE_MODEL ?? 'coder-pro',
+      OPENAI_MODEL: process.env.OPENAI_MODEL ?? 'coder-pro',
+      OPENAI_BASE_URL: process.env.OPENAI_BASE_URL ?? 'https://ai.kai.com/v1',
+    },
+  });
+  await waitForGoose(port);
+  gooseAcpUrl = `ws://127.0.0.1:${port}/acp?token=${secret}`;
+  return gooseAcpUrl;
+}
 
 function isWithinRoot(root: string, target: string): boolean {
   const relative = path.relative(path.resolve(root), path.resolve(target));
@@ -84,14 +150,7 @@ ipcMain.handle('cod:git-diff', async (_event, root: string) => {
   }
 });
 
-ipcMain.handle('cod:get-goose-acp-url', () => {
-  const base = process.env.COD_GOOSE_ACP_URL;
-  const token = process.env.COD_GOOSE_ACP_TOKEN;
-  if (!base || !token) return null;
-  const url = new URL(base);
-  url.searchParams.set('token', token);
-  return url.toString();
-});
+ipcMain.handle('cod:get-goose-acp-url', () => ensureGooseSidecar());
 
 ipcMain.handle('cod:run-command', async (_event, root: string, rawCommand: string): Promise<TerminalResult> => {
   const parts = rawCommand.trim().split(/\s+/).filter(Boolean);
@@ -116,5 +175,6 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
+  gooseSidecar?.kill();
   if (process.platform !== 'darwin') app.quit();
 });

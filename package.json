@@ -16,6 +16,7 @@
     "lint": "npm run lint -w @cod/web",
     "desktop": "npm run dev -w @cod/desktop",
     "package:linux": "npm run package:linux -w @cod/desktop",
+    "prepare:goose": "node scripts/prepare-goose-sidecar.mjs",
     "control-plane": "npm run dev -w @cod/control-plane"
   },
   "engines": {
