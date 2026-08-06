@@ -1,0 +1,21 @@
+[Unit]
+Description=COD control plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/cod-project/cod
+Environment=NODE_ENV=production
+Environment=COD_CONTROL_PORT=8787
+EnvironmentFile=-/etc/cod/control-plane.env
+ExecStart=/home/ubuntu/.cache/hermit/pkg/node-24.10.0/bin/node services/control-plane/dist/server.js
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,7 @@
 import type { AccountSummary, DeviceRecord, KnowledgeHit, ProductManifest, TaskStatus } from '@cod/contracts';
 
-const controlPlaneUrl = import.meta.env.VITE_COD_CONTROL_PLANE_URL ?? 'http://127.0.0.1:8787';
+const controlPlaneUrl = import.meta.env.VITE_COD_CONTROL_PLANE_URL
+  ?? (import.meta.env.DEV ? 'http://127.0.0.1:8787' : '');
 
 export interface ModelInfo {
   id: string;
