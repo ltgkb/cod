@@ -152,8 +152,12 @@ export function App() {
 
   const handleTopup = async () => {
     if (!session) return;
-    const account = await topup(session.token, 1000);
-    setSession({ ...session, account });
+    try {
+      const account = await topup(session.token, 1000);
+      setSession({ ...session, account });
+    } catch (error) {
+      setRemoteNotice(error instanceof Error ? error.message : '充值暂不可用');
+    }
   };
 
   const handleKnowledge = async () => {
@@ -258,6 +262,7 @@ export function App() {
         <div className="search"><MagnifyingGlass /><input aria-label="搜索任务" placeholder="搜索任务或项目" /></div>
         <TaskList tasks={demoTasks} activeId={activeTask} onSelect={setActiveTask} />
         <div className="sidebar-bottom">
+          {remoteNotice && <div className="remote-notice">{remoteNotice}</div>}
           <button className="project-switch" onClick={handleOpenProject}>
             <span className="project-icon"><Folder weight="fill" /></span>
             <span><small>当前项目</small><strong>{project.root.split('/').pop()}</strong></span>

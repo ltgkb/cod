@@ -11,10 +11,12 @@
     "start": "node dist/server.js"
   },
   "dependencies": {
-    "@cod/contracts": "*"
+    "@cod/contracts": "*",
+    "pg": "^8.22.0"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
+    "@types/pg": "^8.20.4",
     "tsx": "^4.20.6",
     "typescript": "~5.9.2",
     "vitest": "^3.2.4"

@@ -15,6 +15,8 @@ export interface CodSession {
   models: ModelInfo[];
 }
 
+export interface ApiErrorBody { error?: string; message?: string }
+
 export interface RemoteTask {
   id: string;
   title: string;
@@ -33,7 +35,10 @@ async function request<T>(path: string, token?: string, init?: RequestInit): Pro
       ...init?.headers,
     },
   });
-  if (!response.ok) throw new Error(`Control plane request failed: ${response.status}`);
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({})) as ApiErrorBody;
+    throw new Error(body.message ?? `Control plane request failed: ${response.status}`);
+  }
   return response.json() as Promise<T>;
 }
 

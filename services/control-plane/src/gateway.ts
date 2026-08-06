@@ -20,6 +20,14 @@ export class AiGateway {
     return defaultModels;
   }
 
+  costCents(modelId: string, inputTokens: number, outputTokens: number): number {
+    const model = defaultModels.find((item) => item.id === modelId);
+    if (!model) throw new Error('Unknown model');
+    if (![inputTokens, outputTokens].every((value) => Number.isInteger(value) && value >= 0)) throw new Error('Invalid token usage');
+    const raw = (inputTokens * model.inputPricePerMillionCents + outputTokens * model.outputPricePerMillionCents) / 1_000_000;
+    return inputTokens + outputTokens > 0 ? Math.max(1, Math.ceil(raw)) : 0;
+  }
+
   async proxyChat(body: unknown): Promise<Response> {
     if (!this.config.aiApiKey) {
       return Response.json({
