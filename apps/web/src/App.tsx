@@ -22,8 +22,8 @@ import {
   Warning,
 } from '@phosphor-icons/react';
 import type { CodTask, TaskStatus, WorkspaceFile } from '@cod/contracts';
-import { loadCodSession, searchKnowledge, topup, type CodSession } from './api';
-import type { KnowledgeHit } from '@cod/contracts';
+import { createRemoteTask, listDevices, loadCodSession, registerDevice, searchKnowledge, topup, type CodSession } from './api';
+import type { DeviceRecord, KnowledgeHit } from '@cod/contracts';
 import { demoDiff, demoFiles, demoTasks, demoTimeline } from './demoData';
 import { hasDesktopBridge, openProject, readProjectFile } from './desktop';
 import type { InspectorTab, ProjectSnapshot, WorkspaceMode } from './types';
@@ -117,6 +117,8 @@ export function App() {
   const [accountError, setAccountError] = useState(false);
   const [selectedModel, setSelectedModel] = useState('coder-pro');
   const [knowledgeHits, setKnowledgeHits] = useState<KnowledgeHit[]>([]);
+  const [devices, setDevices] = useState<DeviceRecord[]>([]);
+  const [remoteNotice, setRemoteNotice] = useState('');
   const [project, setProject] = useState<ProjectSnapshot>({
     root: '/home/ubuntu/cod-project/cod',
     files: demoFiles,
@@ -132,6 +134,7 @@ export function App() {
       .then((next) => {
         setSession(next);
         setSelectedModel(next.models[0]?.id ?? 'coder-pro');
+        return listDevices(next.token).then(async (items) => items.length ? items : [await registerDevice(next.token, 'COD Desktop', 'linux')]).then(setDevices);
       })
       .catch(() => setAccountError(true));
   }, []);
@@ -145,6 +148,13 @@ export function App() {
   const handleKnowledge = async () => {
     if (!session) return;
     setKnowledgeHits(await searchKnowledge(session.token, prompt || 'Agent 权限'));
+  };
+
+  const handleRemoteTask = async () => {
+    if (!session) return;
+    const device = devices[0] ?? await registerDevice(session.token, 'COD Desktop', 'linux');
+    const task = await createRemoteTask(session.token, prompt || '从手机继续当前任务', device.id);
+    setRemoteNotice(`已发送到 ${device.name}，任务状态：${statusLabels[task.status]}`);
   };
 
   const handleOpenProject = async () => {
@@ -254,7 +264,9 @@ export function App() {
               <span><GitDiff /> 4 个改动</span>
               <span><ShieldCheck /> 受控模式</span>
               <button onClick={handleKnowledge}><MagnifyingGlass /> 公司 Wiki</button>
+              <button onClick={handleRemoteTask}><PaperPlaneTilt /> 发送到设备</button>
             </div>
+            {remoteNotice && <div className="remote-notice">{remoteNotice}</div>}
             {knowledgeHits.length > 0 && <div className="knowledge-strip">{knowledgeHits.map((hit) => <a href={hit.url} target="_blank" rel="noreferrer" key={hit.id}><strong>{hit.title}</strong><span>{hit.excerpt}</span></a>)}</div>}
             <div className="composer">
               <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={mode === 'code' ? '让 COD 修改、检查或解释这个项目...' : '问 COD 任何问题...'} />

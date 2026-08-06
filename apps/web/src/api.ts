@@ -1,4 +1,4 @@
-import type { AccountSummary, KnowledgeHit } from '@cod/contracts';
+import type { AccountSummary, DeviceRecord, KnowledgeHit, TaskStatus } from '@cod/contracts';
 
 const controlPlaneUrl = import.meta.env.VITE_COD_CONTROL_PLANE_URL ?? 'http://127.0.0.1:8787';
 
@@ -12,6 +12,15 @@ export interface CodSession {
   token: string;
   account: AccountSummary;
   models: ModelInfo[];
+}
+
+export interface RemoteTask {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  deviceId: string;
+  updatedAt: string;
+  version: number;
 }
 
 async function request<T>(path: string, token?: string, init?: RequestInit): Promise<T> {
@@ -50,4 +59,16 @@ export async function topup(token: string, amountCents: number): Promise<Account
 
 export async function searchKnowledge(token: string, query: string): Promise<KnowledgeHit[]> {
   return request(`/api/knowledge/search?q=${encodeURIComponent(query)}`, token);
+}
+
+export async function listDevices(token: string): Promise<DeviceRecord[]> {
+  return request('/api/devices', token);
+}
+
+export async function registerDevice(token: string, name: string, platform: DeviceRecord['platform']): Promise<DeviceRecord> {
+  return request('/api/devices', token, { method: 'POST', body: JSON.stringify({ name, platform }) });
+}
+
+export async function createRemoteTask(token: string, title: string, deviceId: string): Promise<RemoteTask> {
+  return request('/api/tasks', token, { method: 'POST', body: JSON.stringify({ title, deviceId }) });
 }

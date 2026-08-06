@@ -1,0 +1,10 @@
+{
+  "name": "COD Agent Workspace",
+  "short_name": "COD",
+  "description": "Control code tasks and ask COD from any device.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0d100f",
+  "theme_color": "#101412",
+  "icons": []
+}
