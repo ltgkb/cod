@@ -6,12 +6,14 @@ import { AiGateway } from './gateway.js';
 import { bearerToken, readJson, sendJson } from './http.js';
 import { KnowledgeAdapter } from './knowledge.js';
 import { AccountStore, type TopupRequest } from './store.js';
+import { SyncStore } from './sync.js';
 
 export function createControlPlane() {
   const config = loadConfig();
   const accounts = new AccountStore();
   const gateway = new AiGateway(config);
   const knowledge = new KnowledgeAdapter(config);
+  const sync = new SyncStore();
 
   return createServer(async (request, response) => {
     if (request.method === 'OPTIONS') return sendJson(response, 204, null);
@@ -29,6 +31,16 @@ export function createControlPlane() {
       if (request.method === 'GET' && url.pathname === '/api/ledger') return sendJson(response, 200, accounts.getLedger());
       if (request.method === 'GET' && url.pathname === '/api/models') return sendJson(response, 200, gateway.listModels());
       if (request.method === 'GET' && url.pathname === '/api/knowledge/search') return sendJson(response, 200, await knowledge.search(url.searchParams.get('q') ?? ''));
+      if (request.method === 'GET' && url.pathname === '/api/devices') return sendJson(response, 200, sync.listDevices());
+      if (request.method === 'POST' && url.pathname === '/api/devices') return sendJson(response, 201, sync.registerDevice(await readJson(request)));
+      if (request.method === 'POST' && url.pathname.match(/^\/api\/devices\/[^/]+\/heartbeat$/)) return sendJson(response, 200, sync.heartbeat(url.pathname.split('/')[3]));
+      if (request.method === 'GET' && url.pathname === '/api/tasks') return sendJson(response, 200, sync.listTasks());
+      if (request.method === 'POST' && url.pathname === '/api/tasks') return sendJson(response, 201, sync.createTask(await readJson(request)));
+      if (request.method === 'POST' && url.pathname.match(/^\/api\/tasks\/[^/]+\/status$/)) {
+        const body = await readJson<{ status: Parameters<SyncStore['updateTask']>[1]; expectedVersion: number }>(request);
+        return sendJson(response, 200, sync.updateTask(url.pathname.split('/')[3], body.status, body.expectedVersion));
+      }
+      if (request.method === 'GET' && url.pathname === '/api/events') return sendJson(response, 200, sync.eventsAfter(Number(url.searchParams.get('cursor') ?? 0)));
       if (request.method === 'POST' && url.pathname === '/api/topups') {
         const body = await readJson<Omit<TopupRequest, 'idempotencyKey'>>(request);
         const key = String(request.headers['idempotency-key'] ?? '');
