@@ -1,0 +1,8 @@
+{
+  "name": "COD",
+  "tagline": "Build, ask, and keep moving.",
+  "accent": "#42d3a6",
+  "desktopAppId": "com.kai.cod",
+  "protocol": "cod",
+  "supportUrl": "https://kai.com"
+}

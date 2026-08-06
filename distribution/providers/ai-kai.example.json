@@ -1,0 +1,8 @@
+{
+  "id": "ai-kai",
+  "label": "KAI Models",
+  "type": "openai-compatible",
+  "baseUrl": "https://ai.kai.com/v1",
+  "apiKeyEnvironmentVariable": "KAI_API_KEY",
+  "enabledByDefault": true
+}
