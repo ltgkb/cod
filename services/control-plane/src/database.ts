@@ -16,12 +16,15 @@ export interface LedgerEntry {
   amountCents: number;
   createdAt: string;
   reference: string;
+  sourceId: string | null;
+  model: string | null;
+  paymentDirection: string | null;
 }
 
 export interface TopupRequest {
   idempotencyKey: string;
   amountCents: number;
-  channel: 'mock' | 'wechat' | 'alipay';
+  channel: 'pilot' | 'wechat' | 'alipay';
 }
 
 export interface SyncedTask {
@@ -100,9 +103,12 @@ CREATE TABLE IF NOT EXISTS cod_users (
 );
 CREATE TABLE IF NOT EXISTS cod_ledger (
   id uuid PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL, type text NOT NULL CHECK (type IN ('topup','usage')),
-  amount_cents bigint NOT NULL, reference text NOT NULL, idempotency_key text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
+  amount_cents bigint NOT NULL, reference text NOT NULL, idempotency_key text NOT NULL, source_id text, model_id text, payment_direction text, created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (tenant_id, user_id, idempotency_key)
 );
+ALTER TABLE cod_ledger ADD COLUMN IF NOT EXISTS source_id text;
+ALTER TABLE cod_ledger ADD COLUMN IF NOT EXISTS model_id text;
+ALTER TABLE cod_ledger ADD COLUMN IF NOT EXISTS payment_direction text;
 CREATE TABLE IF NOT EXISTS cod_usage_reservations (
   id uuid PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL, amount_cents bigint NOT NULL CHECK (amount_cents >= 0),
   status text NOT NULL CHECK (status IN ('reserved','settled','released')), created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
@@ -132,7 +138,7 @@ CREATE INDEX IF NOT EXISTS cod_audit_owner_created_idx ON cod_audit(tenant_id, u
 const accountFromRow = (row: Record<string, unknown>): AccountSummary => ({
   userId: String(row.user_id), displayName: String(row.display_name), balanceCents: Number(row.balance_cents), currency: 'CNY', plan: row.plan === 'team' ? 'team' : 'developer',
 });
-const ledgerFromRow = (row: Record<string, unknown>): LedgerEntry => ({ id: String(row.id), type: row.type as LedgerEntry['type'], amountCents: Number(row.amount_cents), reference: String(row.reference), createdAt: new Date(String(row.created_at)).toISOString() });
+const ledgerFromRow = (row: Record<string, unknown>): LedgerEntry => ({ id: String(row.id), type: row.type as LedgerEntry['type'], amountCents: Number(row.amount_cents), reference: String(row.reference), sourceId: row.source_id ? String(row.source_id) : null, model: row.model_id ? String(row.model_id) : null, paymentDirection: row.payment_direction ? String(row.payment_direction) : null, createdAt: new Date(String(row.created_at)).toISOString() });
 const deviceFromRow = (row: Record<string, unknown>): DeviceRecord => {
   const lastSeenAt = new Date(String(row.last_seen_at)).toISOString();
   const stale = Date.now() - new Date(lastSeenAt).getTime() > 45_000;
@@ -168,7 +174,7 @@ export class PostgresDatabase implements CodDatabase {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`${p.tenantId}:${p.userId}:${request.idempotencyKey}`]);
       const existing = await client.query('SELECT * FROM cod_ledger WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3',[p.tenantId,p.userId,request.idempotencyKey]); if (existing.rows[0]) return ledgerFromRow(existing.rows[0]);
       const id=randomUUID(); const reference=`${request.channel}:${request.idempotencyKey}`;
-      const inserted=await client.query(`INSERT INTO cod_ledger (id,tenant_id,user_id,type,amount_cents,reference,idempotency_key) VALUES ($1,$2,$3,'topup',$4,$5,$6) RETURNING *`,[id,p.tenantId,p.userId,request.amountCents,reference,request.idempotencyKey]);
+      const inserted=await client.query(`INSERT INTO cod_ledger (id,tenant_id,user_id,type,amount_cents,reference,idempotency_key,payment_direction) VALUES ($1,$2,$3,'topup',$4,$5,$6,$7) RETURNING *`,[id,p.tenantId,p.userId,request.amountCents,reference,request.idempotencyKey,'用户 → COD 钱包']);
       await client.query('UPDATE cod_users SET balance_cents=balance_cents+$3,updated_at=now() WHERE tenant_id=$1 AND user_id=$2',[p.tenantId,p.userId,request.amountCents]); return ledgerFromRow(inserted.rows[0]);
     });
   }
@@ -178,7 +184,7 @@ export class PostgresDatabase implements CodDatabase {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`${p.tenantId}:${p.userId}:${event.idempotencyKey}`]);
       const existing=await client.query('SELECT * FROM cod_ledger WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3',[p.tenantId,p.userId,event.idempotencyKey]); if(existing.rows[0]) return ledgerFromRow(existing.rows[0]);
       const account=await client.query('SELECT balance_cents FROM cod_users WHERE tenant_id=$1 AND user_id=$2 FOR UPDATE',[p.tenantId,p.userId]); if(!account.rows[0] || Number(account.rows[0].balance_cents)<event.costCents) throw new HttpError('Insufficient balance',402,'insufficient_balance');
-      const inserted=await client.query(`INSERT INTO cod_ledger (id,tenant_id,user_id,type,amount_cents,reference,idempotency_key) VALUES ($1,$2,$3,'usage',$4,$5,$6) RETURNING *`,[randomUUID(),p.tenantId,p.userId,-event.costCents,`${event.model}:${event.taskId}`,event.idempotencyKey]);
+      const inserted=await client.query(`INSERT INTO cod_ledger (id,tenant_id,user_id,type,amount_cents,reference,idempotency_key,source_id,model_id,payment_direction) VALUES ($1,$2,$3,'usage',$4,$5,$6,$7,$8,$9) RETURNING *`,[randomUUID(),p.tenantId,p.userId,-event.costCents,`${event.sourceId}:${event.model}:${event.taskId}`,event.idempotencyKey,event.sourceId,event.model,event.paymentDirection]);
       await client.query('UPDATE cod_users SET balance_cents=balance_cents-$3,updated_at=now() WHERE tenant_id=$1 AND user_id=$2',[p.tenantId,p.userId,event.costCents]); return ledgerFromRow(inserted.rows[0]);
     });
   }
@@ -188,7 +194,7 @@ export class PostgresDatabase implements CodDatabase {
   }
   async settleUsage(p:Principal,reservationId:string,event:UsageEvent) {
     if(!Number.isInteger(event.costCents)||event.costCents<0)throw new HttpError('Usage cost is invalid',400,'invalid_usage');
-    return this.transaction(async(client)=>{await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`${p.tenantId}:${p.userId}:${event.idempotencyKey}`]);const reservation=await client.query(`SELECT * FROM cod_usage_reservations WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE`,[reservationId,p.tenantId,p.userId]);const existing=await client.query('SELECT * FROM cod_ledger WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3',[p.tenantId,p.userId,event.idempotencyKey]);if(existing.rows[0]){if(reservation.rows[0]?.status==='reserved'){await client.query('UPDATE cod_users SET balance_cents=balance_cents+$3,updated_at=now() WHERE tenant_id=$1 AND user_id=$2',[p.tenantId,p.userId,Number(reservation.rows[0].amount_cents)]);await client.query(`UPDATE cod_usage_reservations SET status='released',updated_at=now() WHERE id=$1`,[reservationId]);}return ledgerFromRow(existing.rows[0]);}if(!reservation.rows[0]||reservation.rows[0].status!=='reserved')throw new HttpError('Usage reservation not found',409,'reservation_not_found');const reserved=Number(reservation.rows[0].amount_cents);if(event.costCents>reserved){const extra=event.costCents-reserved;const account=await client.query('SELECT balance_cents FROM cod_users WHERE tenant_id=$1 AND user_id=$2 FOR UPDATE',[p.tenantId,p.userId]);if(Number(account.rows[0]?.balance_cents??0)<extra)throw new HttpError('Insufficient balance',402,'insufficient_balance');await client.query('UPDATE cod_users SET balance_cents=balance_cents-$3,updated_at=now() WHERE tenant_id=$1 AND user_id=$2',[p.tenantId,p.userId,extra]);}else if(reserved>event.costCents){await client.query('UPDATE cod_users SET balance_cents=balance_cents+$3,updated_at=now() WHERE tenant_id=$1 AND user_id=$2',[p.tenantId,p.userId,reserved-event.costCents]);}const inserted=await client.query(`INSERT INTO cod_ledger (id,tenant_id,user_id,type,amount_cents,reference,idempotency_key) VALUES ($1,$2,$3,'usage',$4,$5,$6) RETURNING *`,[randomUUID(),p.tenantId,p.userId,-event.costCents,`${event.model}:${event.taskId}`,event.idempotencyKey]);await client.query(`UPDATE cod_usage_reservations SET status='settled',updated_at=now() WHERE id=$1`,[reservationId]);return ledgerFromRow(inserted.rows[0]);});
+    return this.transaction(async(client)=>{await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`${p.tenantId}:${p.userId}:${event.idempotencyKey}`]);const reservation=await client.query(`SELECT * FROM cod_usage_reservations WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE`,[reservationId,p.tenantId,p.userId]);const existing=await client.query('SELECT * FROM cod_ledger WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3',[p.tenantId,p.userId,event.idempotencyKey]);if(existing.rows[0]){if(reservation.rows[0]?.status==='reserved'){await client.query('UPDATE cod_users SET balance_cents=balance_cents+$3,updated_at=now() WHERE tenant_id=$1 AND user_id=$2',[p.tenantId,p.userId,Number(reservation.rows[0].amount_cents)]);await client.query(`UPDATE cod_usage_reservations SET status='released',updated_at=now() WHERE id=$1`,[reservationId]);}return ledgerFromRow(existing.rows[0]);}if(!reservation.rows[0]||reservation.rows[0].status!=='reserved')throw new HttpError('Usage reservation not found',409,'reservation_not_found');const reserved=Number(reservation.rows[0].amount_cents);if(event.costCents>reserved){const extra=event.costCents-reserved;const account=await client.query('SELECT balance_cents FROM cod_users WHERE tenant_id=$1 AND user_id=$2 FOR UPDATE',[p.tenantId,p.userId]);if(Number(account.rows[0]?.balance_cents??0)<extra)throw new HttpError('Insufficient balance',402,'insufficient_balance');await client.query('UPDATE cod_users SET balance_cents=balance_cents-$3,updated_at=now() WHERE tenant_id=$1 AND user_id=$2',[p.tenantId,p.userId,extra]);}else if(reserved>event.costCents){await client.query('UPDATE cod_users SET balance_cents=balance_cents+$3,updated_at=now() WHERE tenant_id=$1 AND user_id=$2',[p.tenantId,p.userId,reserved-event.costCents]);}const inserted=await client.query(`INSERT INTO cod_ledger (id,tenant_id,user_id,type,amount_cents,reference,idempotency_key,source_id,model_id,payment_direction) VALUES ($1,$2,$3,'usage',$4,$5,$6,$7,$8,$9) RETURNING *`,[randomUUID(),p.tenantId,p.userId,-event.costCents,`${event.sourceId}:${event.model}:${event.taskId}`,event.idempotencyKey,event.sourceId,event.model,event.paymentDirection]);await client.query(`UPDATE cod_usage_reservations SET status='settled',updated_at=now() WHERE id=$1`,[reservationId]);return ledgerFromRow(inserted.rows[0]);});
   }
   async releaseUsage(p:Principal,reservationId:string) { await this.transaction(async(client)=>{const reservation=await client.query(`SELECT * FROM cod_usage_reservations WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE`,[reservationId,p.tenantId,p.userId]);if(!reservation.rows[0]||reservation.rows[0].status!=='reserved')return;await client.query('UPDATE cod_users SET balance_cents=balance_cents+$3,updated_at=now() WHERE tenant_id=$1 AND user_id=$2',[p.tenantId,p.userId,Number(reservation.rows[0].amount_cents)]);await client.query(`UPDATE cod_usage_reservations SET status='released',updated_at=now() WHERE id=$1`,[reservationId]);}); }
   async listDevices(p: Principal) { const {rows}=await this.pool.query('SELECT * FROM cod_devices WHERE tenant_id=$1 AND user_id=$2 ORDER BY created_at',[p.tenantId,p.userId]); return rows.map(deviceFromRow); }

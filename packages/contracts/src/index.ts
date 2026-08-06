@@ -32,6 +32,8 @@ export interface AccountSummary {
 export interface UsageEvent {
   idempotencyKey: string;
   taskId: string;
+  sourceId: string;
+  paymentDirection: string;
   model: string;
   inputTokens: number;
   outputTokens: number;

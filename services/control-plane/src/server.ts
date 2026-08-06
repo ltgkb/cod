@@ -93,9 +93,9 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       if (request.method === 'GET' && url.pathname === '/version') return sendJson(response, 200, { revision: process.env.COD_REVISION ?? 'development', node: process.version });
       if (request.method === 'GET' && url.pathname === '/api/capabilities') return sendJson(response, 200, {
         authentication: { mode: 'pilot', accessCodeRequired: Boolean(config.pilotAccessCodeHash) },
-        ai: { mode: gateway.mode(), streaming: false },
+        ai: { mode: await gateway.mode(), streaming: false },
         knowledge: { mode: knowledge.mode() },
-        payments: { topupEnabled: config.developmentTopupEnabled },
+        payments: { topupEnabled: config.developmentTopupEnabled, mode: config.developmentTopupEnabled ? 'pilot-credit' : 'unavailable' },
         synchronization: { transport: 'polling', taskStatusVersioning: true },
       });
       if (request.method === 'POST' && url.pathname === '/api/auth/login') {
@@ -127,7 +127,8 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       if (request.method === 'GET' && url.pathname === '/api/account') return sendJson(response, 200, await database.getAccount(principal));
       if (request.method === 'GET' && url.pathname === '/api/ledger') return sendJson(response, 200, await database.getLedger(principal));
       if (request.method === 'GET' && url.pathname === '/api/audit') return sendJson(response, 200, await database.listAudit(principal, queryInteger(url.searchParams.get('limit'), 50, 200)));
-      if (request.method === 'GET' && url.pathname === '/api/models') return sendJson(response, 200, gateway.listModels());
+      if (request.method === 'GET' && url.pathname === '/api/model-sources') return sendJson(response, 200, await gateway.listSources());
+      if (request.method === 'GET' && url.pathname === '/api/models') return sendJson(response, 200, (await gateway.listSources()).flatMap((source) => source.models.map((model) => ({ ...model, sourceId: source.id }))));
       if (request.method === 'GET' && url.pathname === '/api/products') return sendJson(response, 200, products.list());
       if (request.method === 'GET' && url.pathname === '/api/knowledge/search') return sendJson(response, 200, await knowledge.search(url.searchParams.get('q') ?? ''));
       if (request.method === 'GET' && url.pathname === '/api/devices') return sendJson(response, 200, await database.listDevices(principal));
@@ -147,18 +148,18 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         const event=await readJson<UsageEvent>(request); const entry=await database.recordUsage(principal,event); return sendJson(response,201,{entry,account:await database.getAccount(principal)});
       }
       if (request.method === 'POST' && url.pathname === '/v1/chat/completions') {
-        const body = await readJson<{ model?: string } & Record<string, unknown>>(request);
+        const body = await readJson<{ model?: string; source?: string } & Record<string, unknown>>(request);
         if(body.stream===true)throw new HttpError('Streaming through the billed gateway is not enabled yet',400,'streaming_not_supported');
         if(!Array.isArray(body.messages) || body.messages.length === 0)throw new HttpError('At least one chat message is required',400,'invalid_messages');
-        const model=body.model??'coder-pro'; if(!gateway.listModels().some((item)=>item.id===model))throw new HttpError('Unknown model',400,'unknown_model');
+        const sourceId=body.source??(config.modelSources.some((source)=>source.apiKey)?config.modelSources.find((source)=>source.apiKey)!.id:'demo');const model=body.model??'coder-pro';const selection=await gateway.getModel(sourceId,model);
         const maxOutput=Number(body.max_completion_tokens??body.max_tokens??4096);if(!Number.isInteger(maxOutput)||maxOutput<1||maxOutput>65536)throw new HttpError('Invalid max output tokens',400,'invalid_max_tokens');
-        const reservationId=randomUUID();const reservedCost=gateway.costCents(model,estimatedInputTokens(body),maxOutput);await database.reserveUsage(principal,reservationId,reservedCost);
+        const {source: _source, ...providerBody}=body;const reservationId=randomUUID();const reservedCost=gateway.costCents(selection.model,estimatedInputTokens(providerBody),maxOutput);await database.reserveUsage(principal,reservationId,reservedCost);
         try {
-          const upstream=await gateway.proxyChat(body);const raw=Buffer.from(await upstream.arrayBuffer());
+          const upstream=await gateway.proxyChat(sourceId,providerBody);const raw=Buffer.from(await upstream.arrayBuffer());
           if(!upstream.ok){await database.releaseUsage(principal,reservationId);response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}
           const parsed=JSON.parse(raw.toString('utf8')) as unknown;const usage=usageFromResponse(parsed);if(!usage){await database.releaseUsage(principal,reservationId);throw new HttpError('Upstream response did not include billable usage',502,'usage_missing');}
-          const costCents=gateway.costCents(model,usage.inputTokens,usage.outputTokens);await database.settleUsage(principal,reservationId,{idempotencyKey:`chat:${(parsed as {id?:string}).id??createHash('sha256').update(raw).digest('hex')}`,taskId:'chat',model,inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,costCents});await database.audit(principal,'chat.complete','model',model,{...usage,costCents});
-          response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;
+          const costCents=gateway.costCents(selection.model,usage.inputTokens,usage.outputTokens);await database.settleUsage(principal,reservationId,{idempotencyKey:`chat:${sourceId}:${(parsed as {id?:string}).id??createHash('sha256').update(raw).digest('hex')}`,taskId:'chat',sourceId,paymentDirection:selection.source.paymentDirection,model,inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,costCents});await database.audit(principal,'chat.complete','model',model,{sourceId,paymentDirection:selection.source.paymentDirection,...usage,costCents});
+          const result={...(parsed as Record<string,unknown>),cod_source:sourceId,cod_payment_direction:selection.source.paymentDirection,cod_charge_cents:costCents};const output=Buffer.from(JSON.stringify(result));response.writeHead(upstream.status,{'content-type':'application/json; charset=utf-8','content-length':output.length});response.end(output);return;
         } catch(error) { await database.releaseUsage(principal,reservationId); throw error; }
       }
       return sendJson(response, 404, { error: 'not_found' });

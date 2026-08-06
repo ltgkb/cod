@@ -7,21 +7,31 @@ export interface ModelInfo {
   id: string;
   label: string;
   contextWindow: number;
-  inputPricePerMillionCents?: number;
-  outputPricePerMillionCents?: number;
+  inputPricePerMillionCents: number;
+  outputPricePerMillionCents: number;
+}
+
+export interface ModelSourceInfo {
+  id: string;
+  label: string;
+  status: 'live' | 'catalog' | 'demo' | 'unavailable';
+  callable: boolean;
+  paymentDirection: string;
+  models: ModelInfo[];
+  note: string;
 }
 
 export interface CodSession {
   token: string;
   account: AccountSummary;
-  models: ModelInfo[];
+  sources: ModelSourceInfo[];
 }
 
 export interface CapabilityReport {
   authentication: { mode: 'pilot'; accessCodeRequired: boolean };
   ai: { mode: 'live' | 'demo' | 'unavailable'; streaming: boolean };
   knowledge: { mode: 'live' | 'demo' };
-  payments: { topupEnabled: boolean };
+  payments: { topupEnabled: boolean; mode: 'pilot-credit' | 'unavailable' };
   synchronization: { transport: 'polling'; taskStatusVersioning: boolean };
 }
 
@@ -42,6 +52,9 @@ export interface LedgerEntry {
   amountCents: number;
   createdAt: string;
   reference: string;
+  sourceId: string | null;
+  model: string | null;
+  paymentDirection: string | null;
 }
 
 export class ApiError extends Error {
@@ -95,11 +108,11 @@ async function request<T>(path: string, token?: string, init?: RequestInit): Pro
 }
 
 async function hydrateSession(token: string): Promise<CodSession> {
-  const [account, models] = await Promise.all([
+  const [account, sources] = await Promise.all([
     request<AccountSummary>('/api/account', token),
-    request<ModelInfo[]>('/api/models', token),
+    request<ModelSourceInfo[]>('/api/model-sources', token),
   ]);
-  return { token, account, models };
+  return { token, account, sources };
 }
 
 export async function getCapabilities(): Promise<CapabilityReport> {
@@ -142,7 +155,7 @@ export async function topup(token: string, amountCents: number): Promise<Account
   const result = await request<{ account: AccountSummary }>('/api/topups', token, {
     method: 'POST',
     headers: { 'idempotency-key': createClientId() },
-    body: JSON.stringify({ amountCents, channel: 'mock' }),
+    body: JSON.stringify({ amountCents, channel: 'pilot' }),
   });
   return result.account;
 }
@@ -182,10 +195,10 @@ export async function listProducts(token: string): Promise<ProductManifest[]> {
   return request('/api/products', token);
 }
 
-export async function sendChat(token: string, model: string, content: string): Promise<{ content: string; mode: 'live' | 'demo' }> {
-  const result = await request<{ choices: Array<{ message: { content: string } }>; cod_mode?: 'demo' }>('/v1/chat/completions', token, {
+export async function sendChat(token: string, source: string, model: string, content: string): Promise<{ content: string; mode: 'live' | 'demo'; source: string; paymentDirection: string; chargeCents: number }> {
+  const result = await request<{ choices: Array<{ message: { content: string } }>; cod_mode?: 'demo'; cod_source?: string; cod_payment_direction?: string; cod_charge_cents?: number }>('/v1/chat/completions', token, {
     method: 'POST',
-    body: JSON.stringify({ model, messages: [{ role: 'user', content }], stream: false }),
+    body: JSON.stringify({ source, model, messages: [{ role: 'user', content }], max_tokens: 1024, stream: false }),
   });
-  return { content: result.choices[0]?.message.content ?? 'COD 没有返回内容。', mode: result.cod_mode === 'demo' ? 'demo' : 'live' };
+  return { content: result.choices[0]?.message.content ?? 'COD 没有返回内容。', mode: result.cod_mode === 'demo' ? 'demo' : 'live', source: result.cod_source ?? source, paymentDirection: result.cod_payment_direction ?? '', chargeCents: result.cod_charge_cents ?? 0 };
 }

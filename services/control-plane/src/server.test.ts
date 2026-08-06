@@ -26,7 +26,7 @@ describe('control-plane production rules', () => {
     expect(wrongCode.status).toBe(403);
     const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com', accessCode }) });
     const { token } = await login.json() as { token: string };
-    const topup = await fetch(`${base}/api/topups`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'idempotency-key': 'test' }, body: JSON.stringify({ amountCents: 1000, channel: 'mock' }) });
+    const topup = await fetch(`${base}/api/topups`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'idempotency-key': 'test' }, body: JSON.stringify({ amountCents: 1000, channel: 'pilot' }) });
     expect(topup.status).toBe(403);
   });
 
@@ -41,6 +41,19 @@ describe('control-plane production rules', () => {
     expect(forbiddenOrigin.status).toBe(403);
     const allowedOrigin = await fetch(`${base}/api/capabilities`, { headers: { origin: 'https://cod.example' } });
     expect(allowedOrigin.headers.get('access-control-allow-origin')).toBe('https://cod.example');
+  });
+
+  it('issues idempotent pilot wallet credit when the pilot preload is enabled', async () => {
+    const { base } = await start({ COD_DEVELOPMENT_TOPUP_ENABLED: 'true' });
+    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com' }) });
+    const { token } = await login.json() as { token: string };
+    const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'idempotency-key': 'pilot-credit-1' };
+    const first = await fetch(`${base}/api/topups`, { method: 'POST', headers, body: JSON.stringify({ amountCents: 1000, channel: 'pilot' }) });
+    const second = await fetch(`${base}/api/topups`, { method: 'POST', headers, body: JSON.stringify({ amountCents: 1000, channel: 'pilot' }) });
+    expect(first.status).toBe(201); expect(second.status).toBe(201);
+    expect((await first.json() as { account: { balanceCents: number } }).account.balanceCents).toBe(7840);
+    const ledger = await (await fetch(`${base}/api/ledger`, { headers: { authorization: `Bearer ${token}` } })).json() as Array<{ paymentDirection: string }>;
+    expect(ledger).toHaveLength(1); expect(ledger[0].paymentDirection).toBe('用户 → COD 钱包');
   });
 
   it('settles every non-stream demo request exactly once', async () => {

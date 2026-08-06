@@ -1,3 +1,13 @@
+export interface ModelSourceConfig {
+  id: string;
+  label: string;
+  baseUrl: string;
+  catalogUrl: string;
+  statusUrl: string;
+  paymentDirection: string;
+  apiKey: string | null;
+}
+
 export interface ControlPlaneConfig {
   port: number;
   sessionSecret: string;
@@ -9,10 +19,41 @@ export interface ControlPlaneConfig {
   pilotAccessCodeHash: string | null;
   developmentTopupEnabled: boolean;
   demoMode: boolean;
-  aiBaseUrl: string;
-  aiApiKey: string | null;
+  modelSources: ModelSourceConfig[];
   wikiBaseUrl: string;
   hongkongBaseUrl: string;
+}
+
+function defaultModelSources(environment: NodeJS.ProcessEnv): ModelSourceConfig[] {
+  const aiBaseUrl = environment.KAI_AI_BASE_URL ?? 'https://ai.kai.com/v1';
+  const chaseBaseUrl = environment.CHASE_AI_BASE_URL ?? 'https://chase.kai.com/v1';
+  return [
+    {
+      id: 'ai-kai', label: 'AI.KAI.COM', baseUrl: aiBaseUrl, catalogUrl: environment.KAI_AI_CATALOG_URL ?? 'https://ai.kai.com/api/pricing',
+      statusUrl: environment.KAI_AI_STATUS_URL ?? 'https://ai.kai.com/api/status', paymentDirection: '钱包 → ai.kai.com', apiKey: environment.KAI_API_KEY ?? null,
+    },
+    {
+      id: 'chase-kai', label: 'CHASE.KAI.COM', baseUrl: chaseBaseUrl, catalogUrl: environment.CHASE_AI_CATALOG_URL ?? 'https://chase.kai.com/api/pricing',
+      statusUrl: environment.CHASE_AI_STATUS_URL ?? 'https://chase.kai.com/api/status', paymentDirection: '钱包 → chase.kai.com', apiKey: environment.CHASE_API_KEY ?? null,
+    },
+  ];
+}
+
+function loadModelSources(environment: NodeJS.ProcessEnv): ModelSourceConfig[] {
+  if (!environment.COD_MODEL_SOURCES_JSON) return defaultModelSources(environment);
+  let raw: unknown;
+  try { raw = JSON.parse(environment.COD_MODEL_SOURCES_JSON); }
+  catch { throw new Error('COD_MODEL_SOURCES_JSON must be valid JSON'); }
+  if (!Array.isArray(raw) || raw.length === 0) throw new Error('COD_MODEL_SOURCES_JSON must contain at least one source');
+  return raw.map((item, index) => {
+    if (!item || typeof item !== 'object') throw new Error(`Model source ${index} is invalid`);
+    const source = item as Record<string, unknown>;
+    const id = String(source.id ?? '').trim(); const label = String(source.label ?? '').trim(); const baseUrl = String(source.baseUrl ?? '').trim();
+    const catalogUrl = String(source.catalogUrl ?? '').trim(); const statusUrl = String(source.statusUrl ?? '').trim();
+    const paymentDirection = String(source.paymentDirection ?? '').trim(); const apiKeyEnv = String(source.apiKeyEnv ?? '').trim();
+    if (!/^[a-z0-9-]{2,40}$/.test(id) || !label || !baseUrl || !catalogUrl || !statusUrl || !paymentDirection) throw new Error(`Model source ${index} is incomplete`);
+    return { id, label, baseUrl, catalogUrl, statusUrl, paymentDirection, apiKey: apiKeyEnv ? environment[apiKeyEnv] ?? null : null };
+  });
 }
 
 export function loadConfig(environment = process.env): ControlPlaneConfig {
@@ -27,8 +68,7 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     pilotAccessCodeHash: environment.COD_PILOT_ACCESS_CODE_HASH ?? null,
     developmentTopupEnabled: environment.COD_DEVELOPMENT_TOPUP_ENABLED === 'true',
     demoMode: environment.COD_DEMO_MODE === 'true' || environment.NODE_ENV !== 'production',
-    aiBaseUrl: environment.KAI_AI_BASE_URL ?? 'https://ai.kai.com/v1',
-    aiApiKey: environment.KAI_API_KEY ?? null,
+    modelSources: loadModelSources(environment),
     wikiBaseUrl: environment.KAI_WIKI_BASE_URL ?? 'https://wiki.kai.com',
     hongkongBaseUrl: environment.KAI_HONGKONG_BASE_URL ?? 'https://hongkong.kai.com',
   };

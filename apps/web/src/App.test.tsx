@@ -14,7 +14,7 @@ const capabilities = {
   authentication: { mode: 'pilot', accessCodeRequired: true },
   ai: { mode: 'demo', streaming: false },
   knowledge: { mode: 'demo' },
-  payments: { topupEnabled: false },
+  payments: { topupEnabled: false, mode: 'unavailable' as const },
   synchronization: { transport: 'polling', taskStatusVersioning: true },
 };
 
@@ -41,7 +41,10 @@ describe('COD workspace', () => {
       if (url.endsWith('/api/capabilities')) return json(capabilities);
       if (url.endsWith('/api/auth/login')) return json({ token: 'test-token' });
       if (url.endsWith('/api/account')) return json({ userId: 'user', displayName: 'developer', balanceCents: 6839, currency: 'CNY', plan: 'developer' });
-      if (url.endsWith('/api/models')) return json([{ id: 'coder-pro', label: 'KAI Coder Pro', contextWindow: 200000 }]);
+      if (url.endsWith('/api/model-sources')) return json([
+        { id: 'ai-kai', label: 'AI.KAI.COM', status: 'live', callable: true, paymentDirection: '钱包 → ai.kai.com', note: '已连接', models: [{ id: 'glm-5.2', label: 'glm-5.2', contextWindow: 0, inputPricePerMillionCents: 836, outputPricePerMillionCents: 2926 }] },
+        { id: 'chase-kai', label: 'CHASE.KAI.COM', status: 'catalog', callable: false, paymentDirection: '钱包 → chase.kai.com', note: '仅目录', models: [{ id: 'gpt-5.6-sol', label: 'gpt-5.6-sol', contextWindow: 0, inputPricePerMillionCents: 52500, outputPricePerMillionCents: 420000 }] },
+      ]);
       if (url.endsWith('/api/devices') && init?.method === 'POST') return json({ id: 'web-device', name: 'COD Web', platform: 'web', status: 'online', lastSeenAt: new Date().toISOString() }, 201);
       if (url.endsWith('/api/devices')) return json([{ id: 'desktop-device', name: 'COD Desktop', platform: 'linux', status: 'online', lastSeenAt: new Date().toISOString() }]);
       if (url.endsWith('/api/tasks')) return json([{ id: 'task-1', title: '真实同步任务', status: 'draft', deviceId: 'desktop-device', updatedAt: new Date().toISOString(), version: 1 }]);
@@ -54,6 +57,13 @@ describe('COD workspace', () => {
     fireEvent.change(screen.getByLabelText('访问码'), { target: { value: 'pilot' } });
     fireEvent.click(screen.getByRole('button', { name: '登录' }));
     expect(await screen.findByRole('heading', { name: '真实同步任务', level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: '模型源' })).toHaveValue('ai-kai');
+    expect(screen.getByRole('combobox', { name: '模型' })).toHaveValue('glm-5.2');
+    fireEvent.change(screen.getByRole('combobox', { name: '模型源' }), { target: { value: 'chase-kai' } });
+    expect(screen.getByRole('combobox', { name: '模型' })).toHaveValue('gpt-5.6-sol');
+    expect(screen.getAllByText('仅目录')).not.toHaveLength(0);
+    fireEvent.change(screen.getByPlaceholderText('让 COD 修改、检查或解释这个项目...'), { target: { value: '不能从目录源调用' } });
+    expect(screen.getByRole('button', { name: '发送' })).toBeDisabled();
 
     fireEvent.change(screen.getByLabelText('搜索任务'), { target: { value: '不存在' } });
     expect(screen.getByText('没有匹配的任务')).toBeInTheDocument();
