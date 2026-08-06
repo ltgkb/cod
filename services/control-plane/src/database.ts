@@ -34,7 +34,11 @@ export interface SyncedTask {
   deviceId: string;
   updatedAt: string;
   version: number;
+  result: string | null;
+  error: string | null;
 }
+
+export interface TaskOutcome { result?: string | null; error?: string | null }
 
 export interface TaskEvent {
   cursor: number;
@@ -69,7 +73,7 @@ export interface CodDatabase {
   heartbeat(principal: Principal, deviceId: string): Promise<DeviceRecord>;
   listTasks(principal: Principal): Promise<SyncedTask[]>;
   createTask(principal: Principal, input: Pick<SyncedTask, 'title' | 'deviceId'>): Promise<SyncedTask>;
-  updateTask(principal: Principal, taskId: string, status: TaskStatus, expectedVersion: number): Promise<SyncedTask>;
+  updateTask(principal: Principal, taskId: string, status: TaskStatus, expectedVersion: number, outcome?: TaskOutcome): Promise<SyncedTask>;
   eventsAfter(principal: Principal, cursor: number): Promise<TaskEvent[]>;
   audit(principal: Principal, action: string, entityType: string, entityId: string | null, data?: unknown): Promise<void>;
   listAudit(principal: Principal, limit: number): Promise<AuditEntry[]>;
@@ -119,8 +123,10 @@ CREATE TABLE IF NOT EXISTS cod_devices (
 );
 CREATE TABLE IF NOT EXISTS cod_tasks (
   id uuid PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL, title text NOT NULL, status text NOT NULL,
-  device_id uuid NOT NULL REFERENCES cod_devices(id), version integer NOT NULL DEFAULT 1, updated_at timestamptz NOT NULL DEFAULT now(), created_at timestamptz NOT NULL DEFAULT now()
+  device_id uuid NOT NULL REFERENCES cod_devices(id), version integer NOT NULL DEFAULT 1, result text, error text, updated_at timestamptz NOT NULL DEFAULT now(), created_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE cod_tasks ADD COLUMN IF NOT EXISTS result text;
+ALTER TABLE cod_tasks ADD COLUMN IF NOT EXISTS error text;
 CREATE TABLE IF NOT EXISTS cod_events (
   cursor bigserial PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL, type text NOT NULL, entity_id text NOT NULL,
   data jsonb NOT NULL DEFAULT '{}', created_at timestamptz NOT NULL DEFAULT now()
@@ -144,7 +150,7 @@ const deviceFromRow = (row: Record<string, unknown>): DeviceRecord => {
   const stale = Date.now() - new Date(lastSeenAt).getTime() > 45_000;
   return { id: String(row.id), name: String(row.name), platform: row.platform as DeviceRecord['platform'], status: stale ? 'offline' : row.status as DeviceRecord['status'], lastSeenAt };
 };
-const taskFromRow = (row: Record<string, unknown>): SyncedTask => ({ id: String(row.id), title: String(row.title), status: row.status as TaskStatus, deviceId: String(row.device_id), updatedAt: new Date(String(row.updated_at)).toISOString(), version: Number(row.version) });
+const taskFromRow = (row: Record<string, unknown>): SyncedTask => ({ id: String(row.id), title: String(row.title), status: row.status as TaskStatus, deviceId: String(row.device_id), updatedAt: new Date(String(row.updated_at)).toISOString(), version: Number(row.version), result: row.result === null || row.result === undefined ? null : String(row.result), error: row.error === null || row.error === undefined ? null : String(row.error) });
 
 export class PostgresDatabase implements CodDatabase {
   private readonly pool: Pool;
@@ -202,15 +208,19 @@ export class PostgresDatabase implements CodDatabase {
   async heartbeat(p: Principal,id:string) { const {rows}=await this.pool.query(`UPDATE cod_devices SET status='online',last_seen_at=now() WHERE id=$1 AND tenant_id=$2 AND user_id=$3 RETURNING *`,[id,p.tenantId,p.userId]); if(!rows[0]) throw new HttpError('Device not found',404,'device_not_found'); return deviceFromRow(rows[0]); }
   async listTasks(p: Principal) { const {rows}=await this.pool.query('SELECT * FROM cod_tasks WHERE tenant_id=$1 AND user_id=$2 ORDER BY updated_at DESC',[p.tenantId,p.userId]); return rows.map(taskFromRow); }
   async createTask(p: Principal,input:Pick<SyncedTask,'title'|'deviceId'>) { if(!input.title?.trim()) throw new HttpError('Task title is required',400,'invalid_task'); const device=await this.pool.query('SELECT 1 FROM cod_devices WHERE id=$1 AND tenant_id=$2 AND user_id=$3',[input.deviceId,p.tenantId,p.userId]); if(!device.rows[0]) throw new HttpError('Device not found',404,'device_not_found'); const id=randomUUID(); const {rows}=await this.pool.query(`INSERT INTO cod_tasks (id,tenant_id,user_id,title,status,device_id) VALUES ($1,$2,$3,$4,'draft',$5) RETURNING *`,[id,p.tenantId,p.userId,input.title.trim().slice(0,500),input.deviceId]); const task=taskFromRow(rows[0]); await this.append(p,'task.created',id,task); return task; }
-  async updateTask(p: Principal,id:string,status:TaskStatus,version:number) {
+  async updateTask(p: Principal,id:string,status:TaskStatus,version:number,outcome:TaskOutcome={}) {
     return this.transaction(async (client) => {
       const currentResult = await client.query('SELECT * FROM cod_tasks WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE', [id,p.tenantId,p.userId]);
       if (!currentResult.rows[0]) throw new HttpError('Task not found',404,'task_not_found');
       const current = taskFromRow(currentResult.rows[0]);
       if (current.version !== version) throw new HttpError('Task version conflict',409,'version_conflict');
       validateTaskTransition(current.status, status);
-      if (current.status === status) return current;
-      const { rows } = await client.query('UPDATE cod_tasks SET status=$1,version=version+1,updated_at=now() WHERE id=$2 RETURNING *', [status,id]);
+      if (outcome.result !== undefined && outcome.result !== null && outcome.result.length > 50_000) throw new HttpError('Task result is too large', 400, 'task_result_too_large');
+      if (outcome.error !== undefined && outcome.error !== null && outcome.error.length > 5_000) throw new HttpError('Task error is too large', 400, 'task_error_too_large');
+      if (current.status === status && outcome.result === undefined && outcome.error === undefined) return current;
+      const nextResult = outcome.result === undefined ? current.result : outcome.result;
+      const nextError = outcome.error === undefined ? current.error : outcome.error;
+      const { rows } = await client.query('UPDATE cod_tasks SET status=$1,result=$3,error=$4,version=version+1,updated_at=now() WHERE id=$2 RETURNING *', [status,id,nextResult,nextError]);
       const task = taskFromRow(rows[0]);
       await client.query('INSERT INTO cod_events (tenant_id,user_id,type,entity_id,data) VALUES ($1,$2,$3,$4,$5)', [p.tenantId,p.userId,'task.updated',id,JSON.stringify(task)]);
       return task;

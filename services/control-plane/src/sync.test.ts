@@ -13,7 +13,8 @@ describe('synchronization database contract', () => {
     expect(updated.version).toBe(2);
     expect(await database.eventsAfter(principal, 1)).toHaveLength(2);
     await expect(database.updateTask(principal, task.id, 'complete', 1)).rejects.toMatchObject({ status: 409 });
-    const completed = await database.updateTask(principal, task.id, 'complete', 2);
+    const completed = await database.updateTask(principal, task.id, 'complete', 2, { result: '构建通过', error: null });
+    expect(completed.result).toBe('构建通过');
     await expect(database.updateTask(principal, completed.id, 'draft', completed.version)).rejects.toMatchObject({ code: 'invalid_task_transition' });
   });
 

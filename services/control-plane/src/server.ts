@@ -2,7 +2,7 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { TaskStatus, UsageEvent } from '@cod/contracts';
 import { createSessionToken, verifySessionToken } from './auth.js';
-import { BotService, parseBotCommand, verifyWebhookSignature, type BotPlatform } from './bots.js';
+import { BotService, parseBotCommand, parseFeishuWebhook, replyFeishuMessage, verifyWebhookSignature, type BotPlatform } from './bots.js';
 import { loadConfig, type ControlPlaneConfig } from './config.js';
 import { type CodDatabase, type Principal, PostgresDatabase, type TopupRequest } from './database.js';
 import { errorResponse, HttpError } from './errors.js';
@@ -64,6 +64,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
   const gateway = new AiGateway(config);
   const knowledge = new KnowledgeAdapter(config);
   const products = new ProductRegistry(config);
+  const seenFeishuMessages = new Set<string>();
 
   return createServer(async (request, response) => {
     const requestId = /^[a-zA-Z0-9._-]{1,100}$/.test(String(request.headers['x-request-id'] ?? '')) ? String(request.headers['x-request-id']) : randomUUID();
@@ -95,8 +96,12 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         authentication: { mode: 'pilot', accessCodeRequired: Boolean(config.pilotAccessCodeHash) },
         ai: { mode: await gateway.mode(), streaming: false },
         knowledge: { mode: knowledge.mode() },
-        payments: { topupEnabled: config.developmentTopupEnabled, mode: config.developmentTopupEnabled ? 'pilot-credit' : 'unavailable' },
+        payments: { topupEnabled: config.developmentTopupEnabled, mode: config.paymentWebhookSecret ? 'verified-webhook' : config.developmentTopupEnabled ? 'pilot-credit' : 'unavailable' },
         synchronization: { transport: 'polling', taskStatusVersioning: true },
+        remote: {
+          feishu: config.feishuVerificationToken && config.feishuAppId && config.feishuAppSecret && Object.keys(config.feishuBindings).length ? 'live' : 'unavailable',
+          wecom: process.env.COD_BOT_WEBHOOK_SECRET ? 'adapter' : 'unavailable',
+        },
       });
       if (request.method === 'POST' && url.pathname === '/api/auth/login') {
         const body = await readJson<{ email?: string; accessCode?: string }>(request);
@@ -107,12 +112,39 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         const token = createSessionToken({ sub: principal.userId, tenantId: principal.tenantId, email, role: principal.role }, config.sessionSecret);
         return sendJson(response, 200, { token, user: { id: principal.userId, email } });
       }
-      if (request.method === 'POST' && url.pathname.match(/^\/api\/webhooks\/(feishu|wecom)$/)) {
+      if (request.method === 'POST' && url.pathname === '/api/webhooks/feishu') {
+        if (!config.feishuVerificationToken) throw new HttpError('Feishu integration is not configured', 503, 'feishu_unavailable');
+        const rawBody = await readText(request);
+        let event;
+        try {
+          event = parseFeishuWebhook(rawBody, {
+            timestamp: String(request.headers['x-lark-request-timestamp'] ?? ''),
+            nonce: String(request.headers['x-lark-request-nonce'] ?? ''),
+            signature: String(request.headers['x-lark-signature'] ?? ''),
+          }, { verificationToken: config.feishuVerificationToken, encryptKey: config.feishuEncryptKey, bindings: config.feishuBindings });
+        } catch (error) {
+          throw new HttpError(error instanceof Error ? error.message : 'Invalid Feishu event', 401, 'invalid_feishu_event');
+        }
+        if (event.kind === 'challenge') return sendJson(response, 200, { challenge: event.challenge });
+        if (!event.email || !event.messageId) throw new HttpError('Feishu event is incomplete', 400, 'invalid_feishu_event');
+        if (seenFeishuMessages.has(event.messageId)) return sendJson(response, 200, { ok: true, duplicate: true });
+        if (seenFeishuMessages.size >= 10_000) seenFeishuMessages.clear();
+        seenFeishuMessages.add(event.messageId);
+        const domain = event.email.split('@')[1] ?? '';
+        if (!config.allowedEmailDomains.includes(domain)) throw new HttpError('Feishu account is not allowed', 403, 'feishu_account_forbidden');
+        const principal: Principal = { userId: userIdFor(event.email), tenantId: tenantIdFor(event.email), email: event.email, role: 'member' };
+        await database.ensurePrincipal(principal);
+        const result = await new BotService(database, principal).execute('feishu', parseBotCommand(event.text ?? ''));
+        await database.audit(principal, 'feishu.message.received', 'message', event.messageId, { eventId: event.eventId });
+        if (config.feishuAppId && config.feishuAppSecret) void replyFeishuMessage(event.messageId, result.text, config.feishuAppId, config.feishuAppSecret).catch((error) => console.error(JSON.stringify({ level: 'error', event: 'feishu.reply.failed', messageId: event.messageId, error: error instanceof Error ? error.message : String(error) })));
+        return sendJson(response, 200, { ok: true });
+      }
+      if (request.method === 'POST' && url.pathname === '/api/webhooks/wecom') {
         const rawBody = await readText(request);
         let raw: { text?: string; userId?: string; tenantId?: string; email?: string };
         try { raw = JSON.parse(rawBody || '{}') as typeof raw; }
         catch { throw new HttpError('Request body must be valid JSON', 400, 'invalid_json'); }
-        const platform = url.pathname.split('/')[3] as BotPlatform;
+        const platform: BotPlatform = 'wecom';
         const timestamp = String(request.headers['x-cod-timestamp'] ?? '');
         const signature = String(request.headers['x-cod-signature'] ?? '');
         const secret = process.env.COD_BOT_WEBHOOK_SECRET;
@@ -120,6 +152,26 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         if (!raw.userId || !raw.tenantId || !raw.email) throw new HttpError('Bot identity binding is required', 400, 'bot_identity_required');
         const principal: Principal = { userId: raw.userId, tenantId: raw.tenantId, email: raw.email, role: 'member' };
         return sendJson(response, 200, await new BotService(database, principal).execute(platform, parseBotCommand(raw.text ?? '')));
+      }
+      if (request.method === 'POST' && url.pathname === '/api/webhooks/payments') {
+        const rawBody = await readText(request);
+        const timestamp = String(request.headers['x-cod-timestamp'] ?? '');
+        const signature = String(request.headers['x-cod-signature'] ?? '');
+        if (!config.paymentWebhookSecret || !verifyWebhookSignature(rawBody, timestamp, signature, config.paymentWebhookSecret)) return sendJson(response, 401, { error: 'invalid_signature' });
+        let event: { eventId?: string; status?: string; email?: string; amountCents?: number; currency?: string; channel?: string; providerPaymentId?: string };
+        try { event = JSON.parse(rawBody || '{}') as typeof event; }
+        catch { throw new HttpError('Request body must be valid JSON', 400, 'invalid_json'); }
+        if (event.status !== 'paid') return sendJson(response, 202, { accepted: true, credited: false });
+        const email = String(event.email ?? '').trim().toLowerCase();
+        const domain = email.split('@')[1] ?? '';
+        if (!/^\S+@\S+\.\S+$/.test(email) || !config.allowedEmailDomains.includes(domain)) throw new HttpError('Payment account is not allowed', 403, 'payment_account_forbidden');
+        const channel = event.channel === 'wechat' || event.channel === 'alipay' ? event.channel : null;
+        if (!channel || event.currency !== 'CNY' || !event.eventId || !event.providerPaymentId) throw new HttpError('Payment event is invalid', 400, 'invalid_payment_event');
+        const principal: Principal = { userId: userIdFor(email), tenantId: tenantIdFor(email), email, role: 'member' };
+        await database.ensurePrincipal(principal);
+        const entry = await database.topup(principal, { amountCents: Number(event.amountCents), channel, idempotencyKey: `payment:${channel}:${event.providerPaymentId}` });
+        await database.audit(principal, 'payment.credited', 'ledger', entry.id, { eventId: event.eventId, channel, providerPaymentId: event.providerPaymentId, amountCents: event.amountCents });
+        return sendJson(response, 200, { accepted: true, credited: true, ledgerId: entry.id });
       }
       const session = verifySessionToken(bearerToken(request) ?? '', config.sessionSecret);
       if (!session) return sendJson(response, 401, { error: 'unauthorized' });
@@ -130,13 +182,19 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       if (request.method === 'GET' && url.pathname === '/api/model-sources') return sendJson(response, 200, await gateway.listSources());
       if (request.method === 'GET' && url.pathname === '/api/models') return sendJson(response, 200, (await gateway.listSources()).flatMap((source) => source.models.map((model) => ({ ...model, sourceId: source.id }))));
       if (request.method === 'GET' && url.pathname === '/api/products') return sendJson(response, 200, products.list());
-      if (request.method === 'GET' && url.pathname === '/api/knowledge/search') return sendJson(response, 200, await knowledge.search(url.searchParams.get('q') ?? ''));
+      if (request.method === 'POST' && url.pathname.match(/^\/api\/products\/[^/]+\/launch$/)) {
+        const productId = decodeURIComponent(url.pathname.split('/')[3]);
+        const launch = products.launch(productId, principal);
+        await database.audit(principal, 'product.launch', 'product', productId, { mode: launch.mode });
+        return sendJson(response, 200, launch);
+      }
+      if (request.method === 'GET' && url.pathname === '/api/knowledge/search') return sendJson(response, 200, await knowledge.search(url.searchParams.get('q') ?? '', principal));
       if (request.method === 'GET' && url.pathname === '/api/devices') return sendJson(response, 200, await database.listDevices(principal));
       if (request.method === 'POST' && url.pathname === '/api/devices') { const device=await database.registerDevice(principal,await readJson(request)); await database.audit(principal,'device.register','device',device.id); return sendJson(response,201,device); }
       if (request.method === 'POST' && url.pathname.match(/^\/api\/devices\/[^/]+\/heartbeat$/)) return sendJson(response, 200, await database.heartbeat(principal, url.pathname.split('/')[3]));
       if (request.method === 'GET' && url.pathname === '/api/tasks') return sendJson(response, 200, await database.listTasks(principal));
       if (request.method === 'POST' && url.pathname === '/api/tasks') { const task=await database.createTask(principal,await readJson(request)); await database.audit(principal,'task.create','task',task.id); return sendJson(response,201,task); }
-      if (request.method === 'POST' && url.pathname.match(/^\/api\/tasks\/[^/]+\/status$/)) { const body=await readJson<{status:TaskStatus;expectedVersion:number}>(request); if(!validStatuses.has(body.status)) throw new HttpError('Invalid task status',400,'invalid_status'); const task=await database.updateTask(principal,url.pathname.split('/')[3],body.status,body.expectedVersion); await database.audit(principal,'task.status','task',task.id,{status:body.status}); return sendJson(response,200,task); }
+      if (request.method === 'POST' && url.pathname.match(/^\/api\/tasks\/[^/]+\/status$/)) { const body=await readJson<{status:TaskStatus;expectedVersion:number;result?:string|null;error?:string|null}>(request); if(!validStatuses.has(body.status)) throw new HttpError('Invalid task status',400,'invalid_status'); const task=await database.updateTask(principal,url.pathname.split('/')[3],body.status,body.expectedVersion,{result:body.result,error:body.error}); await database.audit(principal,'task.status','task',task.id,{status:body.status,hasResult:Boolean(body.result),hasError:Boolean(body.error)}); return sendJson(response,200,task); }
       if (request.method === 'GET' && url.pathname === '/api/events') return sendJson(response, 200, await database.eventsAfter(principal, queryInteger(url.searchParams.get('cursor'), 0)));
       if (request.method === 'POST' && url.pathname === '/api/topups') {
         if (!config.developmentTopupEnabled) throw new HttpError('Direct top-up is disabled; use a verified payment callback', 403, 'topup_disabled');
@@ -147,11 +205,17 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         if (principal.role !== 'admin') throw new HttpError('Usage ingestion requires a trusted service identity', 403, 'usage_forbidden');
         const event=await readJson<UsageEvent>(request); const entry=await database.recordUsage(principal,event); return sendJson(response,201,{entry,account:await database.getAccount(principal)});
       }
-      if (request.method === 'POST' && url.pathname === '/v1/chat/completions') {
+      const chatRoute = url.pathname.match(/^\/v1(?:\/sources\/([a-z0-9-]{2,40}))?\/chat\/completions$/);
+      if (request.method === 'POST' && chatRoute) {
         const body = await readJson<{ model?: string; source?: string } & Record<string, unknown>>(request);
         if(body.stream===true)throw new HttpError('Streaming through the billed gateway is not enabled yet',400,'streaming_not_supported');
         if(!Array.isArray(body.messages) || body.messages.length === 0)throw new HttpError('At least one chat message is required',400,'invalid_messages');
-        const sourceId=body.source??(config.modelSources.some((source)=>source.apiKey)?config.modelSources.find((source)=>source.apiKey)!.id:'demo');const model=body.model??'coder-pro';const selection=await gateway.getModel(sourceId,model);
+        const routeSource = chatRoute[1];
+        if (routeSource && body.source && routeSource !== body.source) throw new HttpError('Model source conflicts with the gateway route', 400, 'source_conflict');
+        const sourceId=routeSource??body.source??(config.modelSources.some((source)=>source.apiKey)?config.modelSources.find((source)=>source.apiKey)!.id:'demo');
+        const model=typeof body.model==='string'?body.model.trim():'';
+        if(!model)throw new HttpError('Model is required',400,'model_required');
+        const selection=await gateway.getModel(sourceId,model);
         const maxOutput=Number(body.max_completion_tokens??body.max_tokens??4096);if(!Number.isInteger(maxOutput)||maxOutput<1||maxOutput>65536)throw new HttpError('Invalid max output tokens',400,'invalid_max_tokens');
         const {source: _source, ...providerBody}=body;const reservationId=randomUUID();const reservedCost=gateway.costCents(selection.model,estimatedInputTokens(providerBody),maxOutput);await database.reserveUsage(principal,reservationId,reservedCost);
         try {
@@ -173,6 +237,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
 if (process.env.NODE_ENV !== 'test') {
   const config=loadConfig(); const database=config.databaseUrl?new PostgresDatabase(config.databaseUrl):new MemoryDatabase();
   if (process.env.NODE_ENV === 'production' && !config.databaseUrl) throw new Error('DATABASE_URL is required in production');
+  if (process.env.NODE_ENV === 'production' && (config.sessionSecret === 'cod-local-development-secret' || config.sessionSecret.length < 32)) throw new Error('COD_SESSION_SECRET must contain at least 32 characters in production');
   if (process.env.NODE_ENV === 'production' && config.developmentLoginEnabled && !config.pilotAccessCodeHash) throw new Error('COD_PILOT_ACCESS_CODE_HASH is required when pilot login is enabled in production');
   await database.initialize();
   const server=createControlPlane({config,database});

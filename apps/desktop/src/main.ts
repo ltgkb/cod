@@ -2,12 +2,12 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import { execFile } from 'node:child_process';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer as createNetServer } from 'node:net';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import type { TerminalResult, WorkspaceFile } from '@cod/contracts';
+import type { AgentGatewayConfig, TerminalResult, WorkspaceFile } from '@cod/contracts';
 
 const execFileAsync = promisify(execFile);
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -15,6 +15,7 @@ const developmentUrl = process.env.COD_DEV_SERVER_URL || 'http://127.0.0.1:5173'
 const allowedCommands = new Set(['npm', 'pnpm', 'cargo', 'git', 'node', 'just']);
 let gooseSidecar: ChildProcess | null = null;
 let gooseAcpUrl: string | null = null;
+let gooseConfigurationKey: string | null = null;
 
 async function availablePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -41,8 +42,27 @@ async function waitForGoose(port: number, attempts = 50): Promise<void> {
   throw new Error('Goose sidecar did not become ready');
 }
 
-async function ensureGooseSidecar(): Promise<string | null> {
-  if (gooseAcpUrl) return gooseAcpUrl;
+async function stopGooseSidecar(): Promise<void> {
+  const processToStop = gooseSidecar;
+  gooseSidecar = null;
+  gooseAcpUrl = null;
+  gooseConfigurationKey = null;
+  if (!processToStop || processToStop.exitCode !== null) return;
+  await new Promise<void>((resolve) => {
+    const timeout = setTimeout(() => { processToStop.kill('SIGKILL'); resolve(); }, 2_000);
+    processToStop.once('exit', () => { clearTimeout(timeout); resolve(); });
+    processToStop.kill();
+  });
+}
+
+function validateAgentGatewayConfig(config: AgentGatewayConfig): void {
+  if (!config?.token || config.token.length > 8_192) throw new Error('A valid COD session is required');
+  if (!/^[a-z0-9-]{2,40}$/.test(config.sourceId)) throw new Error('Invalid model source');
+  if (!config.modelId || config.modelId.length > 200 || /[\r\n]/.test(config.modelId)) throw new Error('Invalid model');
+}
+
+async function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | null> {
+  validateAgentGatewayConfig(config);
   const configuredBase = process.env.COD_GOOSE_ACP_URL;
   const configuredToken = process.env.COD_GOOSE_ACP_TOKEN;
   if (configuredBase && configuredToken) {
@@ -51,6 +71,10 @@ async function ensureGooseSidecar(): Promise<string | null> {
     gooseAcpUrl = configured.toString();
     return gooseAcpUrl;
   }
+
+  const configurationKey = createHash('sha256').update(`${config.token}\0${config.sourceId}\0${config.modelId}`).digest('hex');
+  if (gooseAcpUrl && gooseConfigurationKey === configurationKey) return gooseAcpUrl;
+  if (gooseSidecar) await stopGooseSidecar();
 
   const packagedBinary = path.join(process.resourcesPath, 'bin', process.platform === 'win32' ? 'goose.exe' : 'goose');
   const binary = process.env.COD_GOOSE_BINARY ?? packagedBinary;
@@ -61,20 +85,26 @@ async function ensureGooseSidecar(): Promise<string | null> {
   }
   const port = await availablePort();
   const secret = randomBytes(24).toString('hex');
+  const controlPlane = new URL(process.env.COD_CONTROL_PLANE_URL ?? 'http://95.41.23.60');
+  controlPlane.pathname = `${controlPlane.pathname.replace(/\/$/, '')}/v1/sources/${encodeURIComponent(config.sourceId)}`;
+  controlPlane.search = '';
+  controlPlane.hash = '';
   gooseSidecar = spawn(binary, ['serve', '--platform', 'desktop', '--host', '127.0.0.1', '--port', String(port)], {
     stdio: 'ignore',
     env: {
       ...process.env,
       GOOSE_SERVER__SECRET_KEY: secret,
       GOOSE_PROVIDER: process.env.GOOSE_PROVIDER ?? 'openai',
-      GOOSE_MODEL: process.env.GOOSE_MODEL ?? 'coder-pro',
-      OPENAI_MODEL: process.env.OPENAI_MODEL ?? 'coder-pro',
-      OPENAI_BASE_URL: process.env.OPENAI_BASE_URL ?? 'https://ai.kai.com',
+      GOOSE_MODEL: config.modelId,
+      OPENAI_MODEL: config.modelId,
+      OPENAI_BASE_URL: controlPlane.toString().replace(/\/$/, ''),
+      OPENAI_API_KEY: config.token,
     },
   });
   gooseSidecar.once('exit', () => {
     gooseSidecar = null;
     gooseAcpUrl = null;
+    gooseConfigurationKey = null;
   });
   try {
     await waitForGoose(port);
@@ -84,6 +114,7 @@ async function ensureGooseSidecar(): Promise<string | null> {
     throw error;
   }
   gooseAcpUrl = `ws://127.0.0.1:${port}/acp?token=${secret}`;
+  gooseConfigurationKey = configurationKey;
   return gooseAcpUrl;
 }
 
@@ -200,7 +231,8 @@ ipcMain.handle('cod:git-diff', async (_event, root: string) => {
   }
 });
 
-ipcMain.handle('cod:get-goose-acp-url', () => ensureGooseSidecar());
+ipcMain.handle('cod:get-goose-acp-url', (_event, config: AgentGatewayConfig) => ensureGooseSidecar(config));
+ipcMain.handle('cod:stop-goose', () => stopGooseSidecar());
 
 ipcMain.handle('cod:run-command', async (_event, root: string, rawCommand: string): Promise<TerminalResult> => {
   let parts: string[];
@@ -229,6 +261,6 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
-  gooseSidecar?.kill();
+  void stopGooseSidecar();
   if (process.platform !== 'darwin') app.quit();
 });

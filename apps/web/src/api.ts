@@ -31,8 +31,9 @@ export interface CapabilityReport {
   authentication: { mode: 'pilot'; accessCodeRequired: boolean };
   ai: { mode: 'live' | 'demo' | 'unavailable'; streaming: boolean };
   knowledge: { mode: 'live' | 'demo' };
-  payments: { topupEnabled: boolean; mode: 'pilot-credit' | 'unavailable' };
+  payments: { topupEnabled: boolean; mode: 'pilot-credit' | 'verified-webhook' | 'unavailable' };
   synchronization: { transport: 'polling'; taskStatusVersioning: boolean };
+  remote: { feishu: 'live' | 'unavailable'; wecom: 'adapter' | 'unavailable' };
 }
 
 export interface ApiErrorBody { error?: string; message?: string }
@@ -44,6 +45,8 @@ export interface RemoteTask {
   deviceId: string;
   updatedAt: string;
   version: number;
+  result: string | null;
+  error: string | null;
 }
 
 export interface LedgerEntry {
@@ -184,15 +187,19 @@ export async function createRemoteTask(token: string, title: string, deviceId: s
   return request('/api/tasks', token, { method: 'POST', body: JSON.stringify({ title, deviceId }) });
 }
 
-export async function updateRemoteTask(token: string, task: RemoteTask, status: TaskStatus): Promise<RemoteTask> {
+export async function updateRemoteTask(token: string, task: RemoteTask, status: TaskStatus, outcome: { result?: string | null; error?: string | null } = {}): Promise<RemoteTask> {
   return request(`/api/tasks/${encodeURIComponent(task.id)}/status`, token, {
     method: 'POST',
-    body: JSON.stringify({ status, expectedVersion: task.version }),
+    body: JSON.stringify({ status, expectedVersion: task.version, ...outcome }),
   });
 }
 
 export async function listProducts(token: string): Promise<ProductManifest[]> {
   return request('/api/products', token);
+}
+
+export async function launchProduct(token: string, productId: string): Promise<{ url: string; expiresAt: string; mode: 'external' | 'signed-sso' }> {
+  return request(`/api/products/${encodeURIComponent(productId)}/launch`, token, { method: 'POST' });
 }
 
 export async function sendChat(token: string, source: string, model: string, content: string): Promise<{ content: string; mode: 'live' | 'demo'; source: string; paymentDirection: string; chargeCents: number }> {

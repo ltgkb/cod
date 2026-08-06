@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { createControlPlane } from './server.js';
 import { loadConfig } from './config.js';
 import { MemoryDatabase } from './memory-database.js';
@@ -56,6 +56,24 @@ describe('control-plane production rules', () => {
     expect(ledger).toHaveLength(1); expect(ledger[0].paymentDirection).toBe('用户 → COD 钱包');
   });
 
+  it('credits only signed, paid, idempotent payment callbacks', async () => {
+    const secret = 'payment-secret';
+    const { base } = await start({ COD_PAYMENT_WEBHOOK_SECRET: secret });
+    const body = JSON.stringify({ eventId: 'event-1', status: 'paid', email: 'developer@kai.com', amountCents: 1200, currency: 'CNY', channel: 'wechat', providerPaymentId: 'wx-1' });
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const signature = createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex');
+    const headers = { 'content-type': 'application/json', 'x-cod-timestamp': timestamp, 'x-cod-signature': signature };
+    expect((await fetch(`${base}/api/webhooks/payments`, { method: 'POST', headers, body })).status).toBe(200);
+    expect((await fetch(`${base}/api/webhooks/payments`, { method: 'POST', headers, body })).status).toBe(200);
+    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com' }) });
+    const { token } = await login.json() as { token: string };
+    const account = await (await fetch(`${base}/api/account`, { headers: { authorization: `Bearer ${token}` } })).json() as { balanceCents: number };
+    const ledger = await (await fetch(`${base}/api/ledger`, { headers: { authorization: `Bearer ${token}` } })).json() as unknown[];
+    expect(account.balanceCents).toBe(8040);
+    expect(ledger).toHaveLength(1);
+    expect((await fetch(`${base}/api/webhooks/payments`, { method: 'POST', headers: { ...headers, 'x-cod-signature': '00' }, body })).status).toBe(401);
+  });
+
   it('settles every non-stream demo request exactly once', async () => {
     const { base, database } = await start();
     const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com' }) });
@@ -69,6 +87,19 @@ describe('control-plane production rules', () => {
     expect(await database.getLedger(principal)).toHaveLength(2);
     expect((await database.getAccount(principal)).balanceCents).toBe(6838);
     expect((await database.listAudit(principal, 10)).some((entry) => entry.action === 'chat.complete')).toBe(true);
+  });
+
+  it('binds desktop Agent requests to the source encoded in the gateway route', async () => {
+    const { base } = await start();
+    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com' }) });
+    const { token } = await login.json() as { token: string };
+    const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+    const response = await fetch(`${base}/v1/sources/demo/chat/completions`, { method: 'POST', headers, body: JSON.stringify({ model: 'coder-pro', messages: [{ role: 'user', content: 'desktop' }] }) });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ model: 'coder-pro', cod_source: 'demo', cod_payment_direction: '测试钱包 → COD Demo' });
+    const conflict = await fetch(`${base}/v1/sources/demo/chat/completions`, { method: 'POST', headers, body: JSON.stringify({ source: 'other', model: 'coder-pro', messages: [{ role: 'user', content: 'desktop' }] }) });
+    expect(conflict.status).toBe(400);
+    expect(await conflict.json()).toMatchObject({ error: 'source_conflict' });
   });
 
   it('exposes readiness, version, and Prometheus metrics', async () => {

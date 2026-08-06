@@ -6,7 +6,7 @@ import { createClientId } from './api';
 
 afterEach(() => {
   cleanup();
-  window.localStorage.clear();
+  try { window.localStorage?.clear(); } catch { /* Node can expose localStorage without a backing file. */ }
   vi.unstubAllGlobals();
 });
 
@@ -16,6 +16,7 @@ const capabilities = {
   knowledge: { mode: 'demo' },
   payments: { topupEnabled: false, mode: 'unavailable' as const },
   synchronization: { transport: 'polling', taskStatusVersioning: true },
+  remote: { feishu: 'unavailable' as const, wecom: 'unavailable' as const },
 };
 
 function json(value: unknown, status = 200): Response {

@@ -62,6 +62,13 @@ export interface ProductManifest {
   launchUrl: string;
   embedUrl: string | null;
   allowedOrigins: string[];
+  launchMode: 'external' | 'signed-sso';
+}
+
+export interface AgentGatewayConfig {
+  token: string;
+  sourceId: string;
+  modelId: string;
 }
 
 export interface DesktopBridge {
@@ -72,7 +79,8 @@ export interface DesktopBridge {
   readTextFile(root: string, relativePath: string): Promise<string>;
   gitDiff(root: string): Promise<string>;
   runCommand(root: string, command: string): Promise<TerminalResult>;
-  getGooseAcpUrl(): Promise<string | null>;
+  getGooseAcpUrl(config: AgentGatewayConfig): Promise<string | null>;
+  stopGoose(): Promise<void>;
 }
 
 declare global {

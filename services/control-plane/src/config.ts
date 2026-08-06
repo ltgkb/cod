@@ -18,10 +18,20 @@ export interface ControlPlaneConfig {
   developmentLoginEmail: string;
   pilotAccessCodeHash: string | null;
   developmentTopupEnabled: boolean;
+  paymentWebhookSecret: string | null;
+  feishuVerificationToken: string | null;
+  feishuEncryptKey: string | null;
+  feishuAppId: string | null;
+  feishuAppSecret: string | null;
+  feishuBindings: Record<string, string>;
   demoMode: boolean;
   modelSources: ModelSourceConfig[];
   wikiBaseUrl: string;
+  wikiSearchEndpoint: string | null;
+  wikiApiKey: string | null;
   hongkongBaseUrl: string;
+  hongkongEmbedEnabled: boolean;
+  hongkongSsoSecret: string | null;
 }
 
 function defaultModelSources(environment: NodeJS.ProcessEnv): ModelSourceConfig[] {
@@ -57,6 +67,14 @@ function loadModelSources(environment: NodeJS.ProcessEnv): ModelSourceConfig[] {
 }
 
 export function loadConfig(environment = process.env): ControlPlaneConfig {
+  let feishuBindings: Record<string, string> = {};
+  if (environment.COD_FEISHU_BINDINGS_JSON) {
+    try {
+      const parsed = JSON.parse(environment.COD_FEISHU_BINDINGS_JSON) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
+      feishuBindings = Object.fromEntries(Object.entries(parsed).map(([key, value]) => [key, String(value).trim().toLowerCase()]));
+    } catch { throw new Error('COD_FEISHU_BINDINGS_JSON must be a JSON object'); }
+  }
   return {
     port: Number(environment.COD_CONTROL_PORT ?? 8787),
     sessionSecret: environment.COD_SESSION_SECRET ?? 'cod-local-development-secret',
@@ -67,9 +85,19 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     developmentLoginEmail: (environment.COD_DEVELOPMENT_LOGIN_EMAIL ?? 'developer@kai.com').toLowerCase(),
     pilotAccessCodeHash: environment.COD_PILOT_ACCESS_CODE_HASH ?? null,
     developmentTopupEnabled: environment.COD_DEVELOPMENT_TOPUP_ENABLED === 'true',
+    paymentWebhookSecret: environment.COD_PAYMENT_WEBHOOK_SECRET ?? null,
+    feishuVerificationToken: environment.COD_FEISHU_VERIFICATION_TOKEN ?? null,
+    feishuEncryptKey: environment.COD_FEISHU_ENCRYPT_KEY ?? null,
+    feishuAppId: environment.COD_FEISHU_APP_ID ?? null,
+    feishuAppSecret: environment.COD_FEISHU_APP_SECRET ?? null,
+    feishuBindings,
     demoMode: environment.COD_DEMO_MODE === 'true' || environment.NODE_ENV !== 'production',
     modelSources: loadModelSources(environment),
     wikiBaseUrl: environment.KAI_WIKI_BASE_URL ?? 'https://wiki.kai.com',
+    wikiSearchEndpoint: environment.KAI_WIKI_SEARCH_ENDPOINT ?? null,
+    wikiApiKey: environment.KAI_WIKI_API_KEY ?? null,
     hongkongBaseUrl: environment.KAI_HONGKONG_BASE_URL ?? 'https://hongkong.kai.com',
+    hongkongEmbedEnabled: environment.KAI_HONGKONG_EMBED_ENABLED === 'true',
+    hongkongSsoSecret: environment.KAI_HONGKONG_SSO_SECRET ?? null,
   };
 }

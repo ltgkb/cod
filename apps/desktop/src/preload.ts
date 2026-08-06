@@ -9,7 +9,8 @@ const bridge: DesktopBridge = {
   readTextFile: (root, relativePath) => ipcRenderer.invoke('cod:read-text-file', root, relativePath),
   gitDiff: (root) => ipcRenderer.invoke('cod:git-diff', root),
   runCommand: (root, command) => ipcRenderer.invoke('cod:run-command', root, command),
-  getGooseAcpUrl: () => ipcRenderer.invoke('cod:get-goose-acp-url'),
+  getGooseAcpUrl: (config) => ipcRenderer.invoke('cod:get-goose-acp-url', config),
+  stopGoose: () => ipcRenderer.invoke('cod:stop-goose'),
 };
 
 contextBridge.exposeInMainWorld('codDesktop', bridge);
