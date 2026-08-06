@@ -43,16 +43,18 @@ describe('control-plane production rules', () => {
     expect(allowedOrigin.headers.get('access-control-allow-origin')).toBe('https://cod.example');
   });
 
-  it('settles non-stream chat usage exactly once', async () => {
+  it('settles every non-stream demo request exactly once', async () => {
     const { base, database } = await start();
     const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com' }) });
     const { token, user } = await login.json() as { token: string; user: { id: string; email: string } };
     const response = await fetch(`${base}/v1/chat/completions`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: 'coder-pro', messages: [{ role: 'user', content: 'hi' }], stream: false }) });
     expect(response.status).toBe(200);
     expect(await response.clone().json()).toMatchObject({ model: 'coder-pro', cod_mode: 'demo' });
+    const secondResponse = await fetch(`${base}/v1/chat/completions`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: 'coder-pro', messages: [{ role: 'user', content: 'again' }], stream: false }) });
+    expect(secondResponse.status).toBe(200);
     const principal = { userId: user.id, tenantId: 'tenant_kai_com', email: user.email, role: 'member' as const };
-    expect(await database.getLedger(principal)).toHaveLength(1);
-    expect((await database.getAccount(principal)).balanceCents).toBe(6839);
+    expect(await database.getLedger(principal)).toHaveLength(2);
+    expect((await database.getAccount(principal)).balanceCents).toBe(6838);
     expect((await database.listAudit(principal, 10)).some((entry) => entry.action === 'chat.complete')).toBe(true);
   });
 

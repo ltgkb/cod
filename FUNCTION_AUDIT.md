@@ -12,12 +12,12 @@ This remediation closes every internal workflow that can be completed without th
 - Task navigation now reads PostgreSQL state. Search, create, select, start, retry, complete, fail, remote dispatch, optimistic versions, polling, heartbeat, and offline-device presentation are connected end to end.
 - Task status transitions are enforced by both memory and PostgreSQL database implementations.
 - Conversations are stored per task on the current client. Sending a message moves the task through running to complete or failed and refreshes wallet/ledger state.
-- The account panel exposes balance, immutable ledger entries, and honest model, Wiki, payment, and sync capability state.
+- The account panel exposes balance, immutable ledger entries, and honest model, Wiki, payment, and sync capability state. Model reservations settle atomically, duplicate upstream IDs refund their reservation, and process restart recovers orphaned reservations.
 - Command palette, account, new-task, model selection, mobile task drawer, Wiki search, device dispatch, project refresh, file preview, Diff, and terminal controls all have explicit behavior.
 - Web no longer claims to read local files or execute terminal commands. Those surfaces explain that COD Desktop is required.
 - Desktop file reads resolve real paths to prevent symlink escapes. Embedded terminal parsing supports quoted arguments and blocks destructive Git commands.
 - API input now reports invalid JSON and oversized bodies correctly. Cursor/limit inputs, chat messages, device platforms, task versions, status transitions, upstream timeouts, and CORS origins are validated.
-- Demo model responses preserve the requested model and are explicitly tagged as demo. Production can instead fail closed when demo mode is disabled.
+- Demo model responses preserve the requested model, use a unique response ID, and are explicitly tagged as demo. Production can instead fail closed when demo mode is disabled.
 - PWA runtime caching now stores visited shell assets, removes old caches, excludes API/model responses, and includes an install icon.
 - Deployment installs safe runtime configuration, retains secrets in the root-only environment file, and adds CSP and browser permission headers.
 

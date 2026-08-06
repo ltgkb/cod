@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { ControlPlaneConfig } from './config.js';
 import { HttpError } from './errors.js';
 
@@ -43,7 +44,7 @@ export class AiGateway {
         ? `COD 当前处于演示模式，已收到：“${prompt}”。配置 KAI_API_KEY 后将由真实模型处理。`
         : 'COD 当前处于演示模式。配置 KAI_API_KEY 后将由真实模型处理。';
       return Response.json({
-        id: 'mock-chat',
+        id: `demo-${randomUUID()}`,
         model: input.model ?? 'coder-pro',
         choices: [{ message: { role: 'assistant', content }, finish_reason: 'stop' }],
         usage: { prompt_tokens: Math.max(1, Math.ceil(prompt.length / 4)), completion_tokens: Math.max(1, Math.ceil(content.length / 4)), total_tokens: Math.max(2, Math.ceil((prompt.length + content.length) / 4)) },

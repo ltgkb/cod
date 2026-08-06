@@ -21,6 +21,10 @@ describe('wallet database contract', () => {
     expect((await database.getAccount(principal)).balanceCents).toBe(6740);
     await database.settleUsage(principal, 'reserve-1', { idempotencyKey: 'settle-1', taskId: 'chat', model: 'coder-pro', inputTokens: 10, outputTokens: 20, costCents: 40 });
     expect((await database.getAccount(principal)).balanceCents).toBe(6800);
+    await database.reserveUsage(principal, 'reserve-duplicate', 100);
+    await database.settleUsage(principal, 'reserve-duplicate', { idempotencyKey: 'settle-1', taskId: 'chat', model: 'coder-pro', inputTokens: 10, outputTokens: 20, costCents: 40 });
+    expect((await database.getAccount(principal)).balanceCents).toBe(6800);
+    expect(await database.getLedger(principal)).toHaveLength(1);
     await database.reserveUsage(principal, 'reserve-2', 100);
     await database.releaseUsage(principal, 'reserve-2');
     expect((await database.getAccount(principal)).balanceCents).toBe(6800);
