@@ -17,6 +17,7 @@ Server files:
 ## Release and reliability
 
 - `scripts/deploy-server.sh` runs the complete verification suite, creates an immutable revision directory under `/opt/cod/releases`, switches `/opt/cod/current`, checks readiness, and rolls the service back if the new revision does not become ready.
+- Re-running the already active, complete revision is idempotent: verification still runs, but activation, service restart, and rollback-test injection are skipped.
 - The control plane and its runtime dependencies are bundled into one Node ESM artifact. A release is built under a staging directory and renamed only after all files are complete, preventing partial releases.
 - The release directory retains the active/previous revisions plus the newest recovery candidates instead of growing without bound.
 - `cod-backup.timer` creates a verified custom-format PostgreSQL backup every day and keeps 14 days.

@@ -7,6 +7,7 @@
 - Releases are assembled in staging directories and renamed only when complete.
 - The deployment gate runs clean install, typecheck, all tests, lint, production builds, and high-severity dependency audit before activation.
 - Activation has a global rollback trap. Any failure after the current link changes restores the previous release, revision metadata, Nginx, and the control-plane service.
+- Re-deploying the complete active revision is idempotent after the release gate and does not restart services or trigger activation-failure testing.
 - `/health`, PostgreSQL-aware `/ready`, localhost-only `/metrics`, and localhost-only `/version` endpoints.
 - Structured JSON request/error lifecycle logs with a request ID propagated from Nginx.
 - Nginx rate limiting for API and model routes, immutable asset caching, and private metrics/version routes.
@@ -19,6 +20,8 @@
 
 - Complete release gates passed with one Web test and 13 control-plane tests, zero lint warnings, successful production builds, and zero npm audit vulnerabilities.
 - A controlled post-activation failure returned a non-zero deployment result and automatically restored the old release, `/version`, and PostgreSQL readiness.
+- The rollback drill used two consecutive compact bundled releases, proving that the current release format can actually start after restoration rather than relying on a legacy recovery artifact.
+- An active-revision re-deploy completed successfully with an unchanged control-plane PID and systemd activation timestamp.
 - A backup completed with `Result=success`, SHA-256 verification, mode `0600`, and `postgres:postgres` ownership.
 - The backup restored into an isolated database; users, devices, tasks, ledger, and audit counts matched production exactly.
 - Metrics returned 200 on localhost and 403 through the public address.
