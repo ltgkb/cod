@@ -3,7 +3,7 @@ import type { UsageEvent } from '@cod/contracts';
 import { createSessionToken, verifySessionToken } from './auth.js';
 import { loadConfig } from './config.js';
 import { AiGateway } from './gateway.js';
-import { bearerToken, readJson, sendJson } from './http.js';
+import { bearerToken, readJson, readText, sendJson } from './http.js';
 import { KnowledgeAdapter } from './knowledge.js';
 import { AccountStore, type TopupRequest } from './store.js';
 import { SyncStore } from './sync.js';
@@ -25,13 +25,13 @@ export function createControlPlane() {
     try {
       if (request.method === 'GET' && url.pathname === '/health') return sendJson(response, 200, { status: 'ok', service: 'cod-control-plane' });
       if (request.method === 'POST' && url.pathname.match(/^\/api\/webhooks\/(feishu|wecom)$/)) {
-        const raw = await readJson<{ text?: string }>(request);
+        const rawBody = await readText(request);
+        const raw = JSON.parse(rawBody || '{}') as { text?: string };
         const platform = url.pathname.split('/')[3] as BotPlatform;
         const timestamp = String(request.headers['x-cod-timestamp'] ?? '');
         const signature = String(request.headers['x-cod-signature'] ?? '');
         const secret = process.env.COD_BOT_WEBHOOK_SECRET ?? 'cod-bot-development-secret';
-        const serialized = JSON.stringify(raw);
-        if (!verifyWebhookSignature(serialized, timestamp, signature, secret)) return sendJson(response, 401, { error: 'invalid_signature' });
+        if (!verifyWebhookSignature(rawBody, timestamp, signature, secret)) return sendJson(response, 401, { error: 'invalid_signature' });
         return sendJson(response, 200, bots.execute(platform, parseBotCommand(raw.text ?? '')));
       }
       if (request.method === 'POST' && url.pathname === '/api/auth/login') {

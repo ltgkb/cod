@@ -23,7 +23,7 @@ import {
   Warning,
 } from '@phosphor-icons/react';
 import type { CodTask, TaskStatus, WorkspaceFile } from '@cod/contracts';
-import { createRemoteTask, listDevices, listProducts, loadCodSession, registerDevice, searchKnowledge, topup, type CodSession } from './api';
+import { createRemoteTask, listDevices, listProducts, loadCodSession, registerDevice, searchKnowledge, sendChat, topup, type CodSession } from './api';
 import type { DeviceRecord, KnowledgeHit, ProductManifest } from '@cod/contracts';
 import { demoDiff, demoFiles, demoTasks, demoTimeline } from './demoData';
 import { hasDesktopBridge, openProject, readProjectFile } from './desktop';
@@ -122,6 +122,8 @@ export function App() {
   const [remoteNotice, setRemoteNotice] = useState('');
   const [products, setProducts] = useState<ProductManifest[]>([]);
   const [activeProduct, setActiveProduct] = useState<ProductManifest | null>(null);
+  const [chatReply, setChatReply] = useState('');
+  const [isSending, setIsSending] = useState(false);
   const [project, setProject] = useState<ProjectSnapshot>({
     root: '/home/ubuntu/cod-project/cod',
     files: demoFiles,
@@ -161,6 +163,17 @@ export function App() {
     const device = devices[0] ?? await registerDevice(session.token, 'COD Desktop', 'linux');
     const task = await createRemoteTask(session.token, prompt || '从手机继续当前任务', device.id);
     setRemoteNotice(`已发送到 ${device.name}，任务状态：${statusLabels[task.status]}`);
+  };
+
+  const handleSend = async () => {
+    if (!prompt.trim() || !session) return;
+    setIsSending(true);
+    try {
+      setChatReply(await sendChat(session.token, selectedModel, prompt));
+      setPrompt('');
+    } finally {
+      setIsSending(false);
+    }
   };
 
   const handleOpenProject = async () => {
@@ -247,6 +260,7 @@ export function App() {
               <div><strong>COD Agent</strong><small>正在执行</small></div>
               <span className="live-chip"><CircleNotch className="spin" /> running</span>
             </div>
+            {chatReply && <div className="agent-reply"><p>{chatReply}</p></div>}
             <div className="timeline">
               {demoTimeline.map((item, index) => (
                 <article className={`timeline-item ${item.kind}`} key={item.id}>
@@ -277,7 +291,7 @@ export function App() {
             {knowledgeHits.length > 0 && <div className="knowledge-strip">{knowledgeHits.map((hit) => <a href={hit.url} target="_blank" rel="noreferrer" key={hit.id}><strong>{hit.title}</strong><span>{hit.excerpt}</span></a>)}</div>}
             <div className="composer">
               <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={mode === 'code' ? '让 COD 修改、检查或解释这个项目...' : '问 COD 任何问题...'} />
-              <div className="composer-footer"><button className="composer-tool"><Plus /></button><span>⌘ ↵ 发送</span><button className="send" disabled={!prompt.trim()} onClick={() => setPrompt('')}><PaperPlaneTilt weight="fill" /></button></div>
+              <div className="composer-footer"><button className="composer-tool"><Plus /></button><span>⌘ ↵ 发送</span><button className="send" disabled={!prompt.trim() || !session || isSending} onClick={handleSend}>{isSending ? <CircleNotch className="spin" /> : <PaperPlaneTilt weight="fill" />}</button></div>
             </div>
           </div>
         </section>

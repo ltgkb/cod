@@ -76,3 +76,11 @@ export async function createRemoteTask(token: string, title: string, deviceId: s
 export async function listProducts(token: string): Promise<ProductManifest[]> {
   return request('/api/products', token);
 }
+
+export async function sendChat(token: string, model: string, content: string): Promise<string> {
+  const result = await request<{ choices: Array<{ message: { content: string } }> }>('/v1/chat/completions', token, {
+    method: 'POST',
+    body: JSON.stringify({ model, messages: [{ role: 'user', content }], stream: false }),
+  });
+  return result.choices[0]?.message.content ?? 'COD 没有返回内容。';
+}
