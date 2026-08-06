@@ -70,6 +70,7 @@ export interface CodDatabase {
   eventsAfter(principal: Principal, cursor: number): Promise<TaskEvent[]>;
   audit(principal: Principal, action: string, entityType: string, entityId: string | null, data?: unknown): Promise<void>;
   listAudit(principal: Principal, limit: number): Promise<AuditEntry[]>;
+  close(): Promise<void>;
 }
 
 const schema = `
@@ -120,6 +121,7 @@ export class PostgresDatabase implements CodDatabase {
   private readonly pool: Pool;
   constructor(databaseUrl: string) { this.pool = new Pool({ connectionString: databaseUrl, max: 10, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 5_000 }); }
   async initialize() { await this.pool.query(schema); }
+  async close() { await this.pool.end(); }
   async health() { try { await this.pool.query('SELECT 1'); return true; } catch { return false; } }
   async ensurePrincipal(p: Principal) {
     await this.pool.query(`INSERT INTO cod_users (tenant_id,user_id,email,display_name) VALUES ($1,$2,$3,$4) ON CONFLICT (tenant_id,user_id) DO UPDATE SET email=EXCLUDED.email,updated_at=now()`, [p.tenantId,p.userId,p.email,p.email.split('@')[0]]);

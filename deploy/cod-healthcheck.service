@@ -1,0 +1,7 @@
+[Unit]
+Description=Check COD service health
+After=cod-control-plane.service nginx.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/cod/current/scripts/healthcheck.sh

@@ -17,6 +17,7 @@ interface UserState {
 export class MemoryDatabase implements CodDatabase {
   private readonly users = new Map<string, UserState>();
   async initialize() {}
+  async close() {}
   async health() { return true; }
   async ensurePrincipal(p: Principal) { this.state(p); }
   async getAccount(p: Principal) { return { ...this.state(p).account }; }

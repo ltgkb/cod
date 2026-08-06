@@ -37,4 +37,14 @@ describe('control-plane production rules', () => {
     expect((await database.getAccount(principal)).balanceCents).toBe(6839);
     expect((await database.listAudit(principal, 10)).some((entry) => entry.action === 'chat.complete')).toBe(true);
   });
+
+  it('exposes readiness, version, and Prometheus metrics', async () => {
+    const { base } = await start();
+    expect(await (await fetch(`${base}/ready`)).json()).toMatchObject({ status: 'ready', database: 'memory' });
+    expect(await (await fetch(`${base}/version`)).json()).toHaveProperty('node');
+    await fetch(`${base}/health`);
+    const metrics = await (await fetch(`${base}/metrics`)).text();
+    expect(metrics).toContain('cod_database_ready 1');
+    expect(metrics).toContain('cod_http_requests_total');
+  });
 });

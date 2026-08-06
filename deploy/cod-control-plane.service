@@ -7,16 +7,23 @@ Wants=network-online.target
 Type=simple
 User=ubuntu
 Group=ubuntu
-WorkingDirectory=/home/ubuntu/cod-project/cod
+WorkingDirectory=/opt/cod/current
 Environment=NODE_ENV=production
 Environment=COD_CONTROL_PORT=8787
 EnvironmentFile=/etc/cod/runtime.env
 EnvironmentFile=-/etc/cod/control-plane.env
-ExecStart=/home/ubuntu/.cache/hermit/pkg/node-24.10.0/bin/node services/control-plane/dist/server.js
+EnvironmentFile=-/etc/cod/revision.env
+ExecStart=/home/ubuntu/.cache/hermit/pkg/node-24.10.0/bin/node /opt/cod/current/services/control-plane/dist/server.js
 Restart=always
 RestartSec=3
+TimeoutStopSec=15
+StartLimitIntervalSec=60
+StartLimitBurst=10
 NoNewPrivileges=true
 PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/opt/cod/current
 
 [Install]
 WantedBy=multi-user.target

@@ -6,10 +6,18 @@ Server files:
 
 - `/etc/systemd/system/cod-control-plane.service`
 - `/etc/nginx/sites-available/cod`
-- `/var/www/cod`
+- `/opt/cod/current/web`
 - `/etc/cod/control-plane.env`
 - `/etc/cod/runtime.env`
 
 `control-plane.env` contains secrets, including `DATABASE_URL`. `runtime.env` contains only versioned non-secret settings such as the restricted pilot login account.
 
 `cod.kai.com` must have an A record pointing to `95.41.23.60` before issuing a public TLS certificate.
+
+## Release and reliability
+
+- `scripts/deploy-server.sh` runs the complete verification suite, creates an immutable revision directory under `/opt/cod/releases`, switches `/opt/cod/current`, checks readiness, and rolls the service back if the new revision does not become ready.
+- `cod-backup.timer` creates a verified custom-format PostgreSQL backup every day and keeps 14 days.
+- `scripts/restore-database.sh` restores only into an explicitly named `cod_restore_*` database so recovery drills cannot overwrite production accidentally.
+- `cod-healthcheck.timer` checks the control plane, PostgreSQL readiness, and Nginx every minute.
+- `/metrics` and `/version` are available only through localhost at Nginx; public callers receive 403.

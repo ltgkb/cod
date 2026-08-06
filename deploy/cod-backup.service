@@ -1,0 +1,15 @@
+[Unit]
+Description=Backup COD PostgreSQL database
+After=postgresql.service
+
+[Service]
+Type=oneshot
+User=postgres
+Group=postgres
+ExecStart=/opt/cod/current/scripts/backup-database.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/cod/backups

@@ -11,6 +11,7 @@ import { bearerToken, readJson, readText, sendJson } from './http.js';
 import { KnowledgeAdapter } from './knowledge.js';
 import { MemoryDatabase } from './memory-database.js';
 import { ProductRegistry } from './products.js';
+import { beginRequest, recordRequest, renderMetrics } from './metrics.js';
 
 export interface ControlPlaneOptions {
   config?: ControlPlaneConfig;
@@ -53,11 +54,23 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
   const products = new ProductRegistry(config);
 
   return createServer(async (request, response) => {
+    const requestId = /^[a-zA-Z0-9._-]{1,100}$/.test(String(request.headers['x-request-id'] ?? '')) ? String(request.headers['x-request-id']) : randomUUID();
+    const started = process.hrtime.bigint();
+    const finishInflight = beginRequest();
+    response.setHeader('x-request-id', requestId);
+    response.once('finish', () => {
+      finishInflight();
+      const durationSeconds = Number(process.hrtime.bigint() - started) / 1_000_000_000;
+      recordRequest(request.method ?? 'UNKNOWN', new URL(request.url ?? '/', 'http://localhost').pathname, response.statusCode, durationSeconds);
+      console.log(JSON.stringify({ level: 'info', event: 'http.request', requestId, method: request.method, path: new URL(request.url ?? '/', 'http://localhost').pathname, status: response.statusCode, durationMs: Math.round(durationSeconds * 1000) }));
+    });
     if (request.method === 'OPTIONS') return sendJson(response, 204, null);
     const url = new URL(request.url ?? '/', 'http://localhost');
     try {
       if (request.method === 'GET' && url.pathname === '/health') return sendJson(response, 200, { status: 'ok', service: 'cod-control-plane' });
       if (request.method === 'GET' && url.pathname === '/ready') { const ready=await database.health(); return sendJson(response, ready ? 200 : 503, { status: ready ? 'ready' : 'not_ready', database: config.databaseUrl ? 'postgres' : 'memory' }); }
+      if (request.method === 'GET' && url.pathname === '/metrics') { const ready=await database.health(); response.writeHead(200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8' }); response.end(renderMetrics(ready)); return; }
+      if (request.method === 'GET' && url.pathname === '/version') return sendJson(response, 200, { revision: process.env.COD_REVISION ?? 'development', node: process.version });
       if (request.method === 'POST' && url.pathname === '/api/auth/login') {
         const body = await readJson<{ email?: string }>(request);
         const email = validateLoginEmail(body.email, config);
@@ -120,7 +133,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       }
       return sendJson(response, 404, { error: 'not_found' });
     } catch (error) {
-      console.error('request_failed', { method: request.method, path: url.pathname, error: error instanceof Error ? error.message : String(error) });
+      console.error(JSON.stringify({ level: 'error', event: 'http.error', requestId, method: request.method, path: url.pathname, error: error instanceof Error ? error.message : String(error) }));
       const result=errorResponse(error); return sendJson(response,result.status,result.body);
     }
   });
@@ -130,5 +143,8 @@ if (process.env.NODE_ENV !== 'test') {
   const config=loadConfig(); const database=config.databaseUrl?new PostgresDatabase(config.databaseUrl):new MemoryDatabase();
   if (process.env.NODE_ENV === 'production' && !config.databaseUrl) throw new Error('DATABASE_URL is required in production');
   await database.initialize();
-  createControlPlane({config,database}).listen(config.port,'127.0.0.1',()=>console.log(`COD control plane listening on http://127.0.0.1:${config.port}`));
+  const server=createControlPlane({config,database});
+  server.listen(config.port,'127.0.0.1',()=>console.log(JSON.stringify({level:'info',event:'service.started',port:config.port,revision:process.env.COD_REVISION??'development'})));
+  const shutdown=async(signal:string)=>{console.log(JSON.stringify({level:'info',event:'service.stopping',signal}));server.close(async()=>{await database.close();process.exit(0);});setTimeout(()=>process.exit(1),10_000).unref();};
+  process.once('SIGTERM',()=>void shutdown('SIGTERM'));process.once('SIGINT',()=>void shutdown('SIGINT'));
 }
