@@ -316,9 +316,34 @@ button:active { transform: translateY(1px); }
 .modal > header strong { color: var(--ink); font-size: 12px; }
 .modal-form, .account-panel { padding: 16px; }
 .account-panel { display: grid; gap: 14px; }
+.balance-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .account-balance { display: grid; gap: 4px; padding: 16px; background: var(--accent-soft); border-left: 3px solid var(--accent); border-radius: 0; }
+.account-balance.credit { background: var(--success-soft); border-left-color: var(--success); }
+.account-balance.credit strong { color: var(--success); }
 .account-balance small, .account-balance span { color: var(--muted-foreground); font-size: 9px; }
 .account-balance strong { color: var(--accent); font: 24px var(--mono); }
+.credit-pack-section, .credit-grants { border: 1px solid var(--border-subtle); }
+.credit-pack-section > header, .credit-grants > header { display: flex; justify-content: space-between; padding: 12px; background: var(--field-01); border-bottom: 1px solid var(--border-subtle); }
+.credit-pack-section > header strong, .credit-pack-section > header small, .credit-grants > header strong, .credit-grants > header small { display: block; }
+.credit-pack-section > header strong, .credit-grants > header strong { color: var(--ink); font-size: 10px; }
+.credit-pack-section > header small, .credit-grants > header small { margin-top: 4px; color: var(--muted-foreground); font-size: 8px; line-height: 1.5; }
+.credit-pack-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--border-subtle); }
+.credit-pack-grid article { display: grid; align-content: start; gap: 8px; min-width: 0; padding: 13px; background: var(--layer-01); }
+.credit-pack-grid article > span { width: max-content; padding: 3px 5px; color: var(--accent); background: var(--accent-soft); font: 8px var(--mono); }
+.credit-pack-grid article > strong { color: var(--ink); font-size: 10px; }
+.credit-pack-grid article > b { color: var(--accent); font: 18px var(--mono); }
+.credit-pack-grid article > b small { color: var(--muted-foreground); font-size: 8px; font-weight: 400; }
+.credit-pack-grid article > p { min-height: 28px; margin: 0; color: var(--muted-foreground); font-size: 8px; line-height: 1.5; }
+.credit-pack-grid article > button { display: flex; align-items: center; justify-content: center; gap: 5px; min-height: 32px; margin-top: auto; color: var(--text-on-color); background: var(--brand); font-size: 9px; }
+.credit-pack-grid article > button:disabled { color: var(--muted-foreground); background: var(--field-01); cursor: not-allowed; }
+.credit-pack-grid article > button svg { width: 12px; }
+.credit-grants > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--border-subtle); }
+.credit-grants > div:last-child { border-bottom: 0; }
+.credit-grants > div span, .credit-grants > div strong, .credit-grants > div small { display: block; }
+.credit-grants > div strong { color: var(--ink); font-size: 9px; }
+.credit-grants > div small { margin-top: 3px; color: var(--muted-foreground); font-size: 8px; }
+.credit-grants > div > b { color: var(--success); font: 9px var(--mono); }
+.credit-grants > div > b.depleted, .credit-grants > div > b.expired { color: var(--muted-foreground); }
 .service-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--border-subtle); border: 1px solid var(--border-subtle); }
 .service-grid span { display: flex; justify-content: space-between; gap: 8px; padding: 10px; color: var(--muted-foreground); background: var(--layer-01); font-size: 9px; }
 .service-grid strong { color: var(--ink); }
@@ -424,6 +449,7 @@ button:active { transform: translateY(1px); }
   .workspace-header { padding: 0 12px; }
   .source-picker, .model-picker { display: none; }
   .inspector-toggle { display: none; }
+  .credit-pack-grid { grid-template-columns: repeat(2, 1fr); }
 }
 
 @media (max-width: 600px) {
@@ -446,6 +472,7 @@ button:active { transform: translateY(1px); }
   .login-shell { padding: 16px; }
   .login-card { width: 100%; padding: 24px 20px; }
   .service-grid { grid-template-columns: 1fr; }
+  .balance-grid, .credit-pack-grid { grid-template-columns: 1fr; }
   .modal-backdrop { padding: 8px; }
   .modal { max-height: calc(100dvh - 16px); }
   .model-library { padding: 14px; }

@@ -4,7 +4,7 @@ import type { TaskStatus, UsageEvent } from '@cod/contracts';
 import { createSessionToken, verifySessionToken } from './auth.js';
 import { BotService, parseBotCommand, parseFeishuWebhook, replyFeishuMessage, verifyWebhookSignature, type BotPlatform } from './bots.js';
 import { loadConfig, type ControlPlaneConfig } from './config.js';
-import { type CodDatabase, type Principal, PostgresDatabase, type TopupRequest } from './database.js';
+import { creditPackCatalog, type CodDatabase, type Principal, PostgresDatabase, type TopupRequest } from './database.js';
 import { errorResponse, HttpError } from './errors.js';
 import { AiGateway } from './gateway.js';
 import { bearerToken, readJson, readText, sendJson } from './http.js';
@@ -183,6 +183,13 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       const principal = principalFromSession(session);
       if (request.method === 'GET' && url.pathname === '/api/account') return sendJson(response, 200, await database.getAccount(principal));
       if (request.method === 'GET' && url.pathname === '/api/ledger') return sendJson(response, 200, await database.getLedger(principal));
+      if (request.method === 'GET' && url.pathname === '/api/credit-packs') return sendJson(response,200,{packs:creditPackCatalog,summary:await database.getCreditSummary(principal)});
+      if (request.method === 'POST' && url.pathname.match(/^\/api\/credit-packs\/[^/]+\/purchase$/)) {
+        const key=String(request.headers['idempotency-key']??'');if(!key)throw new HttpError('idempotency-key is required',400,'idempotency_required');
+        const packId=decodeURIComponent(url.pathname.split('/')[3]);const result=await database.purchaseCreditPack(principal,packId,key);
+        await database.audit(principal,'credit_pack.purchase','credit_grant',result.grant.id,{packId,creditCents:result.grant.originalCents,expiresAt:result.grant.expiresAt});
+        return sendJson(response,201,result);
+      }
       if (request.method === 'POST' && url.pathname === '/api/payment-orders') {
         const key=String(request.headers['idempotency-key']??'');if(!key)throw new HttpError('idempotency-key is required',400,'idempotency_required');
         const body=await readJson<{amountCents?:number;channel?:'wechat'|'alipay'}>(request);

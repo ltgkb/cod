@@ -51,14 +51,38 @@ export interface RemoteTask {
 
 export interface LedgerEntry {
   id: string;
-  type: 'topup' | 'usage';
+  type: 'topup' | 'usage' | 'pack_purchase' | 'credit_grant' | 'trial_credit';
   amountCents: number;
+  walletAmountCents: number;
+  creditAmountCents: number;
   createdAt: string;
   reference: string;
   sourceId: string | null;
   model: string | null;
   paymentDirection: string | null;
 }
+
+export interface CreditPackDefinition {
+  id: 'starter' | 'standard' | 'pro' | 'team';
+  name: string;
+  priceCents: number;
+  creditCents: number;
+  bonusPercent: number;
+  validityDays: 180;
+}
+
+export interface CreditGrant {
+  id: string;
+  packId: string;
+  name: string;
+  originalCents: number;
+  remainingCents: number;
+  purchasedAt: string;
+  expiresAt: string;
+  status: 'active' | 'depleted' | 'expired';
+}
+
+export interface CreditPackState { packs: CreditPackDefinition[]; summary: { availableCents: number; grants: CreditGrant[] } }
 
 export interface PaymentOrder {
   id: string;
@@ -169,6 +193,12 @@ export async function refreshAccount(token: string): Promise<AccountSummary> {
 
 export async function listLedger(token: string): Promise<LedgerEntry[]> {
   return request('/api/ledger', token);
+}
+
+export async function getCreditPacks(token:string):Promise<CreditPackState>{return request('/api/credit-packs',token);}
+
+export async function purchaseCreditPack(token:string,packId:string):Promise<{grant:CreditGrant;account:AccountSummary;summary:CreditPackState['summary']}>{
+  return request(`/api/credit-packs/${encodeURIComponent(packId)}/purchase`,token,{method:'POST',headers:{'idempotency-key':createClientId()}});
 }
 
 export async function topup(token: string, amountCents: number): Promise<AccountSummary> {

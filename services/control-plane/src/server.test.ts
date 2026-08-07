@@ -67,9 +67,9 @@ describe('control-plane production rules', () => {
     const first = await fetch(`${base}/api/topups`, { method: 'POST', headers, body: JSON.stringify({ amountCents: 1000, channel: 'pilot' }) });
     const second = await fetch(`${base}/api/topups`, { method: 'POST', headers, body: JSON.stringify({ amountCents: 1000, channel: 'pilot' }) });
     expect(first.status).toBe(201); expect(second.status).toBe(201);
-    expect((await first.json() as { account: { balanceCents: number } }).account.balanceCents).toBe(7840);
+    expect((await first.json() as { account: { balanceCents: number } }).account.balanceCents).toBe(1000);
     const ledger = await (await fetch(`${base}/api/ledger`, { headers: { authorization: `Bearer ${token}` } })).json() as Array<{ paymentDirection: string }>;
-    expect(ledger).toHaveLength(1); expect(ledger[0].paymentDirection).toBe('用户 → COD 钱包');
+    expect(ledger).toHaveLength(2); expect(ledger[0].paymentDirection).toBe('用户 → COD 钱包');
   });
 
   it('credits only signed, paid, idempotent payment callbacks', async () => {
@@ -89,8 +89,8 @@ describe('control-plane production rules', () => {
     expect((await fetch(`${base}/api/webhooks/payments`, { method: 'POST', headers, body })).status).toBe(200);
     const account = await (await fetch(`${base}/api/account`, { headers: { authorization: `Bearer ${token}` } })).json() as { balanceCents: number };
     const ledger = await (await fetch(`${base}/api/ledger`, { headers: { authorization: `Bearer ${token}` } })).json() as unknown[];
-    expect(account.balanceCents).toBe(8040);
-    expect(ledger).toHaveLength(1);
+    expect(account.balanceCents).toBe(1200);
+    expect(ledger).toHaveLength(2);
     expect(await (await fetch(`${base}/api/payment-orders/${order.id}`, { headers: { authorization: `Bearer ${token}` } })).json()).toMatchObject({ status: 'paid', providerPaymentId: 'wx-1' });
     expect((await fetch(`${base}/api/webhooks/payments`, { method: 'POST', headers: { ...headers, 'x-cod-signature': '00' }, body })).status).toBe(401);
   });
@@ -105,9 +105,17 @@ describe('control-plane production rules', () => {
     const secondResponse = await fetch(`${base}/v1/chat/completions`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: 'coder-pro', messages: [{ role: 'user', content: 'again' }], stream: false }) });
     expect(secondResponse.status).toBe(200);
     const principal = { userId: user.id, tenantId: 'tenant_kai_com', email: user.email, role: 'member' as const };
-    expect(await database.getLedger(principal)).toHaveLength(2);
-    expect((await database.getAccount(principal)).balanceCents).toBe(6838);
+    expect(await database.getLedger(principal)).toHaveLength(3);
+    expect((await database.getAccount(principal)).balanceCents).toBe(0);
+    expect((await database.getCreditSummary(principal)).availableCents).toBe(998);
     expect((await database.listAudit(principal, 10)).some((entry) => entry.action === 'chat.complete')).toBe(true);
+  });
+
+  it('exposes the credit pack catalog and purchases a pack from wallet exactly once', async()=>{
+    const {base}=await start({COD_DEVELOPMENT_TOPUP_ENABLED:'true'});const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com'})});const {token}=await login.json() as {token:string};const auth={authorization:`Bearer ${token}`,'content-type':'application/json'};
+    await fetch(`${base}/api/topups`,{method:'POST',headers:{...auth,'idempotency-key':'pack-funds'},body:JSON.stringify({amountCents:10000,channel:'pilot'})});
+    const catalog=await (await fetch(`${base}/api/credit-packs`,{headers:auth})).json() as {packs:Array<{id:string;validityDays:number}>;summary:{availableCents:number}};expect(catalog.packs).toHaveLength(4);expect(catalog.packs.every((pack)=>pack.validityDays===180)).toBe(true);expect(catalog.summary.availableCents).toBe(1000);
+    const headers={...auth,'idempotency-key':'purchase-1'};const first=await fetch(`${base}/api/credit-packs/standard/purchase`,{method:'POST',headers});const second=await fetch(`${base}/api/credit-packs/standard/purchase`,{method:'POST',headers});expect(first.status).toBe(201);expect(second.status).toBe(201);const result=await first.json() as {account:{balanceCents:number};summary:{availableCents:number};grant:{expiresAt:string;purchasedAt:string}};expect(result.account.balanceCents).toBe(0);expect(result.summary.availableCents).toBe(11400);expect(Math.round((new Date(result.grant.expiresAt).getTime()-new Date(result.grant.purchasedAt).getTime())/86400000)).toBe(180);
   });
 
   it('binds desktop Agent requests to the source encoded in the gateway route', async () => {

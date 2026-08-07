@@ -18,6 +18,7 @@ const capabilities = {
   synchronization: { transport: 'polling', taskStatusVersioning: true },
   remote: { feishu: 'unavailable' as const, wecom: 'unavailable' as const },
 };
+const creditPacks = { packs: [{ id: 'starter', name: '入门额度包', priceCents: 2000, creditCents: 2000, bonusPercent: 0, validityDays: 180 }], summary: { availableCents: 1000, grants: [{ id: 'trial', packId: 'trial', name: '新用户试用金', originalCents: 1000, remainingCents: 1000, purchasedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 30 * 86400000).toISOString(), status: 'active' }] } };
 
 function json(value: unknown, status = 200): Response {
   return Response.json(value, { status });
@@ -113,6 +114,7 @@ describe('COD workspace', () => {
       if (url.endsWith('/api/devices')) return json([]);
       if (url.endsWith('/api/tasks') && init?.method === 'POST') return json({ id: 'task-new', title: '登录后自动发送', status: 'draft', deviceId: 'web-device', updatedAt: new Date().toISOString(), version: taskVersion }, 201);
       if (url.endsWith('/api/tasks')) return json([]);
+      if (url.endsWith('/api/credit-packs')) return json(creditPacks);
       if (/\/api\/tasks\/task-new\/status$/.test(url)) {
         const body = JSON.parse(String(init?.body)) as { status: 'running' | 'complete' };
         taskVersion += 1;
@@ -151,6 +153,7 @@ describe('COD workspace', () => {
       if (url.endsWith('/api/devices') && init?.method === 'POST') return json({ id: 'web-device', name: 'COD Web', platform: 'web', status: 'online', lastSeenAt: new Date().toISOString() }, 201);
       if (url.endsWith('/api/devices')) return json([{ id: 'desktop-device', name: 'COD Desktop', platform: 'linux', status: 'online', lastSeenAt: new Date().toISOString() }]);
       if (url.endsWith('/api/tasks')) return json([{ id: 'task-1', title: '真实同步任务', status: 'draft', deviceId: 'desktop-device', updatedAt: new Date().toISOString(), version: 1 }]);
+      if (url.endsWith('/api/credit-packs')) return json(creditPacks);
       if (url.endsWith('/api/products') || url.endsWith('/api/ledger')) return json([]);
       throw new Error(`Unexpected request: ${url}`);
     });
