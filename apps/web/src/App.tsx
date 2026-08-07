@@ -16,12 +16,14 @@ import {
   Lightning,
   ListChecks,
   MagnifyingGlass,
+  Moon,
   PaperPlaneTilt,
   Play,
   Plus,
   ShieldCheck,
   SidebarSimple,
   SignOut,
+  Sun,
   TerminalWindow,
   UserCircle,
   Warning,
@@ -61,6 +63,7 @@ const statusLabels: Record<TaskStatus, string> = {
 const emptyProject: ProjectSnapshot = { root: '', files: [], diff: '', selectedFile: null, selectedContent: '' };
 type Overlay = 'new-task' | 'account' | 'commands' | null;
 type AuthState = 'loading' | 'signed-out' | 'signed-in';
+type ColorMode = 'light' | 'dark';
 interface ChatMessage { id: string; role: 'user' | 'assistant'; content: string; mode?: 'live' | 'demo'; sourceLabel?: string; model?: string; chargeCents?: number; createdAt: string }
 
 function storageGet(key: string): string | null {
@@ -68,6 +71,11 @@ function storageGet(key: string): string | null {
 }
 function storageSet(key: string, value: string): void {
   try { window.localStorage.setItem(key, value); } catch { /* Storage can be unavailable in private contexts. */ }
+}
+function initialColorMode(): ColorMode {
+  const stored = storageGet('kai.color-mode.v1');
+  if (stored === 'light' || stored === 'dark') return stored;
+  return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 }
 function formatTime(value: string): string {
   const date = new Date(value);
@@ -87,6 +95,10 @@ function devicePlatform(): DeviceRecord['platform'] {
 
 function Brand() {
   return <div className="brand" aria-label="COD"><div className="brand-mark"><span>C</span></div><div><strong>COD</strong><small>agent workspace</small></div></div>;
+}
+function ThemeToggle({ colorMode, onChange, className = '' }: { colorMode: ColorMode; onChange: (mode: ColorMode) => void; className?: string }) {
+  const nextMode = colorMode === 'dark' ? 'light' : 'dark';
+  return <button className={`icon-button theme-toggle ${className}`.trim()} title={`切换到${nextMode === 'dark' ? '深色' : '浅色'}模式`} aria-label={`切换到${nextMode === 'dark' ? '深色' : '浅色'}模式`} onClick={() => onChange(nextMode)}>{colorMode === 'dark' ? <Sun /> : <Moon />}</button>;
 }
 function StatusGlyph({ status }: { status: TaskStatus }) {
   if (status === 'running') return <CircleNotch className="spin status-running" weight="bold" />;
@@ -118,7 +130,7 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="modal" role="dialog" aria-modal="true" aria-label={title}><header><strong>{title}</strong><button className="icon-button" title="关闭" onClick={onClose}><X /></button></header>{children}</section></div>;
 }
 
-function LoginScreen({ capabilities, capabilityError, onLogin }: { capabilities: CapabilityReport | null; capabilityError: string; onLogin: (email: string, accessCode: string) => Promise<void> }) {
+function LoginScreen({ capabilities, capabilityError, colorMode, onColorModeChange, onLogin }: { capabilities: CapabilityReport | null; capabilityError: string; colorMode: ColorMode; onColorModeChange: (mode: ColorMode) => void; onLogin: (email: string, accessCode: string) => Promise<void> }) {
   const [email, setEmail] = useState('developer@kai.com');
   const [accessCode, setAccessCode] = useState('');
   const [error, setError] = useState('');
@@ -127,10 +139,11 @@ function LoginScreen({ capabilities, capabilityError, onLogin }: { capabilities:
     event.preventDefault(); setSubmitting(true); setError('');
     try { await onLogin(email, accessCode); } catch (nextError) { setError(nextError instanceof Error ? nextError.message : '登录失败'); } finally { setSubmitting(false); }
   };
-  return <main className="login-shell"><section className="login-card"><Brand /><div className="login-copy"><span className="eyebrow">PRIVATE PILOT</span><h1>进入 COD 工作区</h1><p>使用获批的 KAI 账号和试点访问码登录。会话仅保存在当前设备。</p></div>{capabilityError && <div className="notice error">{capabilityError}</div>}<form onSubmit={submit}><label>邮箱<input aria-label="邮箱" type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" required /></label><label>访问码<input aria-label="访问码" type="password" value={accessCode} onChange={(event) => setAccessCode(event.target.value)} autoComplete="current-password" required={capabilities?.authentication.accessCodeRequired ?? true} /></label>{error && <div className="notice error">{error}</div>}<button className="primary-button" disabled={submitting}>{submitting ? <CircleNotch className="spin" /> : <Key />} 登录</button></form><div className="capability-summary"><span className={capabilities?.ai.mode === 'live' ? 'live' : 'demo'}>模型：{capabilities?.ai.mode === 'live' ? '已连接' : capabilities?.ai.mode === 'demo' ? '演示模式' : '待检测'}</span><span>同步：{capabilities ? '可用' : '待检测'}</span></div></section></main>;
+  return <main className="login-shell"><ThemeToggle colorMode={colorMode} onChange={onColorModeChange} className="login-theme" /><section className="login-card"><Brand /><div className="login-copy"><span className="eyebrow">PRIVATE PILOT</span><h1>进入 COD 工作区</h1><p>使用获批的 KAI 账号和试点访问码登录。会话仅保存在当前设备。</p></div>{capabilityError && <div className="notice error">{capabilityError}</div>}<form onSubmit={submit}><label>邮箱<input aria-label="邮箱" type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" required /></label><label>访问码<input aria-label="访问码" type="password" value={accessCode} onChange={(event) => setAccessCode(event.target.value)} autoComplete="current-password" required={capabilities?.authentication.accessCodeRequired ?? true} /></label>{error && <div className="notice error">{error}</div>}<button className="primary-button" disabled={submitting}>{submitting ? <CircleNotch className="spin" /> : <Key />} 登录</button></form><div className="capability-summary"><span className={capabilities?.ai.mode === 'live' ? 'live' : 'demo'}>模型：{capabilities?.ai.mode === 'live' ? '已连接' : capabilities?.ai.mode === 'demo' ? '演示模式' : '待检测'}</span><span>同步：{capabilities ? '可用' : '待检测'}</span></div></section></main>;
 }
 
 export function App() {
+  const [colorMode, setColorMode] = useState<ColorMode>(initialColorMode);
   const [authState, setAuthState] = useState<AuthState>('loading');
   const [capabilities, setCapabilities] = useState<CapabilityReport | null>(null);
   const [capabilityError, setCapabilityError] = useState('');
@@ -162,6 +175,13 @@ export function App() {
   const [pendingPermission, setPendingPermission] = useState<{ title: string; options: Array<{ optionId: string; name: string; kind: string }> } | null>(null);
   const [project, setProject] = useState<ProjectSnapshot>(emptyProject);
   const permissionResolver = useRef<((optionId: string | null) => void) | null>(null);
+
+  useEffect(() => {
+    document.documentElement.dataset.colorMode = colorMode;
+    document.documentElement.style.colorScheme = colorMode;
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', colorMode === 'dark' ? '#0b1416' : '#fbfdfd');
+    storageSet('kai.color-mode.v1', colorMode);
+  }, [colorMode]);
 
   const activeTask = useMemo(() => tasks.find((task) => task.id === activeTaskId) ?? null, [tasks, activeTaskId]);
   const selectedSource = session?.sources.find((source) => source.id === selectedSourceId) ?? session?.sources[0] ?? null;
@@ -384,11 +404,11 @@ export function App() {
     setTerminalOutput(`$ ${result.command}\n${result.output}\nexit ${result.exitCode ?? 'unknown'}`);
   };
 
-  if (authState === 'loading') return <main className="loading-shell"><Brand /><CircleNotch className="spin" /><span>正在连接控制平面…</span></main>;
-  if (authState === 'signed-out' || !session) return <LoginScreen capabilities={capabilities} capabilityError={capabilityError} onLogin={handleLogin} />;
+  if (authState === 'loading') return <main className="loading-shell"><ThemeToggle colorMode={colorMode} onChange={setColorMode} className="login-theme" /><Brand /><CircleNotch className="spin" /><span>正在连接控制平面…</span></main>;
+  if (authState === 'signed-out' || !session) return <LoginScreen capabilities={capabilities} capabilityError={capabilityError} colorMode={colorMode} onColorModeChange={setColorMode} onLogin={handleLogin} />;
 
   return <div className="app-shell">
-    <aside className="rail"><Brand /><div className="rail-actions"><button className={`icon-button ${mode === 'code' ? 'active' : ''}`} title="任务" onClick={() => { setMode('code'); setSidebarOpen(true); }}><ListChecks weight="fill" /></button><button className={`icon-button ${mode === 'chat' ? 'active' : ''}`} title="普通对话" onClick={() => setMode('chat')}><ChatCircleDots /></button><button className="icon-button" title="命令面板" onClick={() => setOverlay('commands')}><Command /></button>{products.map((product) => <button className="icon-button" title={product.name} key={product.id} onClick={() => void handleProductLaunch(product)}><ArrowSquareOut /></button>)}</div><div className="rail-footer"><button className="icon-button" title="账户" onClick={() => setOverlay('account')}><UserCircle /></button></div></aside>
+    <aside className="rail"><Brand /><div className="rail-actions"><button className={`icon-button ${mode === 'code' ? 'active' : ''}`} title="任务" onClick={() => { setMode('code'); setSidebarOpen(true); }}><ListChecks weight="fill" /></button><button className={`icon-button ${mode === 'chat' ? 'active' : ''}`} title="普通对话" onClick={() => setMode('chat')}><ChatCircleDots /></button><button className="icon-button" title="命令面板" onClick={() => setOverlay('commands')}><Command /></button>{products.map((product) => <button className="icon-button" title={product.name} key={product.id} onClick={() => void handleProductLaunch(product)}><ArrowSquareOut /></button>)}</div><div className="rail-footer"><ThemeToggle colorMode={colorMode} onChange={setColorMode} /><button className="icon-button" title="账户" onClick={() => setOverlay('account')}><UserCircle /></button></div></aside>
     {sidebarOpen && <button className="sidebar-scrim" aria-label="关闭任务栏" onClick={() => setSidebarOpen(false)} />}
     <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}><div className="sidebar-head"><div><small>工作区</small><strong>{mode === 'code' ? '代码任务' : '对话'}</strong></div><button className="new-task" onClick={() => setOverlay('new-task')}><Plus weight="bold" /> 新任务</button></div><div className="search"><MagnifyingGlass /><input aria-label="搜索任务" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="搜索任务或状态" /></div><TaskList tasks={filteredTasks} devices={devices} activeId={activeTaskId} onSelect={(id) => { setActiveTaskId(id); setSidebarOpen(false); }} /><div className="sidebar-bottom">{notice && <div className="remote-notice">{notice}</div>}<button className="project-switch" onClick={handleOpenProject}><span className="project-icon"><Folder weight="fill" /></span><span><small>当前项目</small><strong>{projectName}</strong></span><CaretDown /></button><div className="balance-preview"><Lightning weight="fill" /><span><small>KAI Token</small><strong>¥ {(session.account.balanceCents / 100).toFixed(2)}</strong></span><button onClick={() => setOverlay('account')}>{capabilities?.payments.topupEnabled ? '预存' : '明细'}</button></div></div></aside>
     <main className="workspace"><header className="workspace-header"><div className="task-heading"><button className="mobile-only icon-button" title="打开任务栏" onClick={() => setSidebarOpen(true)}><SidebarSimple /></button><div><h1>{activeTask?.title ?? '新建或选择任务'}</h1><p>{project.root || 'Web 远程工作区'}</p></div></div><div className="header-actions">{activeTask && <span className={`header-status ${activeTask.status}`}>{statusLabels[activeTask.status]}</span>}<div className="mode-switch" aria-label="工作模式"><button className={mode === 'code' ? 'active' : ''} onClick={() => setMode('code')}><Code /> 代码</button><button className={mode === 'chat' ? 'active' : ''} onClick={() => setMode('chat')}><ChatCircleDots /> 对话</button></div><select className="source-picker" aria-label="模型源" value={selectedSource?.id ?? ''} onChange={(event) => handleSourceChange(event.target.value)}>{session.sources.map((source) => <option key={source.id} value={source.id}>{source.label} · {source.callable ? '已连接' : source.status === 'catalog' ? '目录' : '不可用'}</option>)}</select><select className="model-picker" aria-label="模型" value={selectedModelInfo?.id ?? ''} onChange={(event) => handleModelChange(event.target.value)} disabled={!sourceModels.length}>{sourceModels.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}</select></div></header>

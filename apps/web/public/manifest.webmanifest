@@ -4,8 +4,8 @@
   "description": "Control code tasks and ask COD from any device.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0d100f",
-  "theme_color": "#101412",
+  "background_color": "#fbfdfd",
+  "theme_color": "#177777",
   "icons": [
     {
       "src": "/cod-icon.svg",

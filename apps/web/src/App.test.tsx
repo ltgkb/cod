@@ -47,6 +47,17 @@ describe('COD workspace', () => {
     expect(screen.getByLabelText('访问码')).toBeRequired();
   });
 
+  it('persists the KAI semantic color mode', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => json(capabilities)));
+    render(<App />);
+    await screen.findByRole('heading', { name: '进入 COD 工作区' });
+    const toggle = screen.getByRole('button', { name: '切换到深色模式' });
+    fireEvent.click(toggle);
+    await waitFor(() => expect(document.documentElement).toHaveAttribute('data-color-mode', 'dark'));
+    expect(window.localStorage.getItem('kai.color-mode.v1')).toBe('dark');
+    expect(screen.getByRole('button', { name: '切换到浅色模式' })).toBeInTheDocument();
+  });
+
   it('loads synchronized tasks, filters them, and does not fake Web terminal output', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);

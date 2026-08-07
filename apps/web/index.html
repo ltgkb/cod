@@ -3,10 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#101412" />
+    <meta name="theme-color" content="#fbfdfd" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <link rel="manifest" href="/manifest.webmanifest" />
+    <script>
+      try {
+        const storedMode = localStorage.getItem('kai.color-mode.v1');
+        document.documentElement.dataset.colorMode = storedMode === 'light' || storedMode === 'dark'
+          ? storedMode
+          : matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      } catch {
+        document.documentElement.dataset.colorMode = 'light';
+      }
+    </script>
     <title>COD</title>
   </head>
   <body>
