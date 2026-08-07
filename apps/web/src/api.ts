@@ -133,6 +133,12 @@ export async function getCapabilities(): Promise<CapabilityReport> {
   return request('/api/capabilities');
 }
 
+export async function listModelCatalog(): Promise<ModelSourceInfo[]> {
+  const catalog = await request<unknown>('/api/model-catalog');
+  if (!Array.isArray(catalog)) throw new ApiError('模型目录返回格式无效', 502, 'invalid_model_catalog');
+  return catalog as ModelSourceInfo[];
+}
+
 export async function resumeCodSession(): Promise<CodSession | null> {
   const token = storageGet(sessionStorageKey);
   if (!token) return null;
@@ -228,7 +234,9 @@ export async function launchProduct(token: string, productId: string): Promise<{
 export async function sendChat(token: string, source: string, model: string, messages: Array<{ role: 'user' | 'assistant'; content: string }>): Promise<{ content: string; mode: 'live' | 'demo'; source: string; paymentDirection: string; chargeCents: number }> {
   const result = await request<{ choices: Array<{ message: { content: string } }>; cod_mode?: 'demo'; cod_source?: string; cod_payment_direction?: string; cod_charge_cents?: number }>('/v1/chat/completions', token, {
     method: 'POST',
-    body: JSON.stringify({ source, model, messages: messages.slice(-20), max_tokens: 1024, stream: false }),
+    body: JSON.stringify({ source, model, messages: messages.slice(-20), max_tokens: 20_000, stream: false }),
   });
-  return { content: result.choices[0]?.message.content ?? 'COD 没有返回内容。', mode: result.cod_mode === 'demo' ? 'demo' : 'live', source: result.cod_source ?? source, paymentDirection: result.cod_payment_direction ?? '', chargeCents: result.cod_charge_cents ?? 0 };
+  const content = result.choices[0]?.message.content?.trim();
+  if (!content) throw new ApiError('模型返回了空内容，本次回复不可用，请重试或切换模型。', 502, 'empty_model_response');
+  return { content, mode: result.cod_mode === 'demo' ? 'demo' : 'live', source: result.cod_source ?? source, paymentDirection: result.cod_payment_direction ?? '', chargeCents: result.cod_charge_cents ?? 0 };
 }

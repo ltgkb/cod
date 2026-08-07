@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createHash, createHmac } from 'node:crypto';
-import { createControlPlane } from './server.js';
+import { assistantContentFromResponse, createControlPlane } from './server.js';
 import { loadConfig } from './config.js';
 import { MemoryDatabase } from './memory-database.js';
 
@@ -17,6 +17,12 @@ async function start(overrides: Record<string, string> = {}) {
 }
 
 describe('control-plane production rules', () => {
+  it('rejects empty assistant content before it can be settled as a successful reply', () => {
+    expect(assistantContentFromResponse({ choices: [{ message: { content: '回答' } }] })).toBe('回答');
+    expect(assistantContentFromResponse({ choices: [{ message: { content: '   ' } }] })).toBeNull();
+    expect(assistantContentFromResponse({ choices: [] })).toBeNull();
+  });
+
   it('restricts development login and disables direct topups', async () => {
     const accessCode = 'pilot-access';
     const { base } = await start({ COD_PILOT_ACCESS_CODE_HASH: createHash('sha256').update(accessCode).digest('hex') });
@@ -41,6 +47,16 @@ describe('control-plane production rules', () => {
     expect(forbiddenOrigin.status).toBe(403);
     const allowedOrigin = await fetch(`${base}/api/capabilities`, { headers: { origin: 'https://cod.example' } });
     expect(allowedOrigin.headers.get('access-control-allow-origin')).toBe('https://cod.example');
+  });
+
+  it('publishes a read-only model price catalog without requiring a session', async () => {
+    const { base } = await start();
+    const response = await fetch(`${base}/api/model-catalog`);
+    expect(response.status).toBe(200);
+    const catalog = await response.json() as Array<{ id: string; callable: boolean; models: Array<{ id: string; inputPricePerMillionCents: number; outputPricePerMillionCents: number }> }>;
+    expect(catalog).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'demo', callable: true })]));
+    expect(catalog[0]?.models[0]).toEqual(expect.objectContaining({ id: expect.any(String), inputPricePerMillionCents: expect.any(Number), outputPricePerMillionCents: expect.any(Number) }));
+    expect(JSON.stringify(catalog)).not.toMatch(/api[_-]?key|authorization|secret/i);
   });
 
   it('issues idempotent pilot wallet credit when the pilot preload is enabled', async () => {

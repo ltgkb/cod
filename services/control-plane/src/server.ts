@@ -47,6 +47,16 @@ function usageFromResponse(body: unknown): { inputTokens: number; outputTokens: 
   return Number.isInteger(inputTokens) && Number.isInteger(outputTokens) && inputTokens >= 0 && outputTokens >= 0 ? { inputTokens, outputTokens } : null;
 }
 
+export function assistantContentFromResponse(body: unknown): string | null {
+  if (!body || typeof body !== 'object') return null;
+  const choices = (body as { choices?: unknown }).choices;
+  if (!Array.isArray(choices) || !choices[0] || typeof choices[0] !== 'object') return null;
+  const message = (choices[0] as { message?: unknown }).message;
+  if (!message || typeof message !== 'object') return null;
+  const content = (message as { content?: unknown }).content;
+  return typeof content === 'string' && content.trim() ? content.trim() : null;
+}
+
 function estimatedInputTokens(body: unknown): number {
   return Math.max(1, Math.ceil(Buffer.byteLength(JSON.stringify(body), 'utf8') / 4));
 }
@@ -103,6 +113,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
           wecom: process.env.COD_BOT_WEBHOOK_SECRET ? 'adapter' : 'unavailable',
         },
       });
+      if (request.method === 'GET' && url.pathname === '/api/model-catalog') return sendJson(response, 200, await gateway.listSources());
       if (request.method === 'POST' && url.pathname === '/api/auth/login') {
         const body = await readJson<{ email?: string; accessCode?: string }>(request);
         const email = validateLoginEmail(body.email, body.accessCode, config);
@@ -229,7 +240,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         try {
           const upstream=await gateway.proxyChat(sourceId,providerBody);const raw=Buffer.from(await upstream.arrayBuffer());
           if(!upstream.ok){await database.releaseUsage(principal,reservationId);response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}
-          const parsed=JSON.parse(raw.toString('utf8')) as unknown;const usage=usageFromResponse(parsed);if(!usage){await database.releaseUsage(principal,reservationId);throw new HttpError('Upstream response did not include billable usage',502,'usage_missing');}
+          const parsed=JSON.parse(raw.toString('utf8')) as unknown;const content=assistantContentFromResponse(parsed);if(!content){await database.releaseUsage(principal,reservationId);throw new HttpError('Model returned an empty response',502,'empty_model_response');}const usage=usageFromResponse(parsed);if(!usage){await database.releaseUsage(principal,reservationId);throw new HttpError('Upstream response did not include billable usage',502,'usage_missing');}
           const costCents=gateway.costCents(selection.model,usage.inputTokens,usage.outputTokens);await database.settleUsage(principal,reservationId,{idempotencyKey:`chat:${sourceId}:${(parsed as {id?:string}).id??createHash('sha256').update(raw).digest('hex')}`,taskId:'chat',sourceId,paymentDirection:selection.source.paymentDirection,model,inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,costCents});await database.audit(principal,'chat.complete','model',model,{sourceId,paymentDirection:selection.source.paymentDirection,...usage,costCents});
           const result={...(parsed as Record<string,unknown>),cod_source:sourceId,cod_payment_direction:selection.source.paymentDirection,cod_charge_cents:costCents};const output=Buffer.from(JSON.stringify(result));response.writeHead(upstream.status,{'content-type':'application/json; charset=utf-8','content-length':output.length});response.end(output);return;
         } catch(error) { await database.releaseUsage(principal,reservationId); throw error; }
