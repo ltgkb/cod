@@ -286,9 +286,11 @@ export async function launchProduct(token: string, productId: string): Promise<{
 }
 
 export async function sendChat(token: string, source: string, model: string, messages: Array<{ role: 'user' | 'assistant'; content: string }>): Promise<{ content: string; mode: 'live' | 'demo'; source: string; paymentDirection: string; inputTokens: number; outputTokens: number }> {
+  const sanitizedMessages = messages.filter((message) => typeof message.content === 'string' && message.content.trim().length > 0).slice(-20).map((message) => ({ ...message, content: message.content.trim() }));
+  if (!sanitizedMessages.length) throw new ApiError('消息内容不能为空。', 400, 'empty_messages');
   const result = await request<{ choices: Array<{ message: { content: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number; input_tokens?: number; output_tokens?: number }; cod_mode?: 'demo'; cod_source?: string; cod_payment_direction?: string }>('/v1/chat/completions', token, {
     method: 'POST',
-    body: JSON.stringify({ source, model, messages: messages.slice(-20), max_tokens: 20_000, stream: false }),
+    body: JSON.stringify({ source, model, messages: sanitizedMessages, max_tokens: 20_000, stream: false }),
   });
   const content = result.choices[0]?.message.content?.trim();
   if (!content) throw new ApiError('模型返回了空内容，本次回复不可用，请重试或切换模型。', 502, 'empty_model_response');

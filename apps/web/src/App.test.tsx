@@ -36,7 +36,7 @@ describe('COD workspace', () => {
       return json({ choices: [{ message: { content: '继续回答' } }], usage: { prompt_tokens: 12, completion_tokens: 34 }, cod_source: 'ai-kai' });
     });
     vi.stubGlobal('fetch', fetchMock);
-    expect(await sendChat('token', 'ai-kai', 'model-1', [{ role: 'user', content: '第一问' }, { role: 'assistant', content: '第一答' }, { role: 'user', content: '继续' }])).toMatchObject({ inputTokens: 12, outputTokens: 34 });
+    expect(await sendChat('token', 'ai-kai', 'model-1', [{ role: 'user', content: '第一问' }, { role: 'assistant', content: '   ' }, { role: 'assistant', content: '第一答' }, { role: 'user', content: '继续' }])).toMatchObject({ inputTokens: 12, outputTokens: 34 });
     const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as { messages: Array<{ role: string; content: string }>; max_tokens: number };
     expect(body.messages).toEqual([{ role: 'user', content: '第一问' }, { role: 'assistant', content: '第一答' }, { role: 'user', content: '继续' }]);
     expect(body).toMatchObject({ max_tokens: 20_000 });

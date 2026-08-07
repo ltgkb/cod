@@ -84,6 +84,10 @@ type ColorMode = 'light' | 'dark';
 interface ComparisonResult { sourceId: string; sourceLabel: string; model: string; content: string; inputTokens?: number; outputTokens?: number; durationMs: number; error?: string }
 interface ChatMessage { id: string; role: 'user' | 'assistant' | 'comparison'; content: string; mode?: 'live' | 'demo'; sourceLabel?: string; model?: string; inputTokens?: number; outputTokens?: number; comparisonResults?: ComparisonResult[]; createdAt: string }
 
+function sanitizeChatHistory(messages: ChatMessage[]): ChatMessage[] {
+  return messages.filter((message) => message.role === 'comparison' ? Boolean(message.comparisonResults?.length) : typeof message.content === 'string' && message.content.trim().length > 0);
+}
+
 function storageGet(key: string): string | null {
   try { return window.localStorage.getItem(key); } catch { return null; }
 }
@@ -357,7 +361,12 @@ export function App() {
     if (!activeTaskId || messagesByTask[activeTaskId]) return;
     const raw = storageGet(`cod.messages.${activeTaskId}`);
     if (!raw) { setMessagesByTask((current) => ({ ...current, [activeTaskId]: [] })); return; }
-    try { setMessagesByTask((current) => ({ ...current, [activeTaskId]: JSON.parse(raw) as ChatMessage[] })); }
+    try {
+      const parsed = JSON.parse(raw) as ChatMessage[];
+      const sanitized = Array.isArray(parsed) ? sanitizeChatHistory(parsed) : [];
+      if (sanitized.length !== parsed.length) storageSet(`cod.messages.${activeTaskId}`, JSON.stringify(sanitized));
+      setMessagesByTask((current) => ({ ...current, [activeTaskId]: sanitized }));
+    }
     catch { setMessagesByTask((current) => ({ ...current, [activeTaskId]: [] })); }
   }, [activeTaskId, messagesByTask]);
 
@@ -471,7 +480,7 @@ export function App() {
       const submittedPrompt = promptText;
       const taskMessages = messagesByTask[task.id] ?? [];
       const conversationMessages = [
-        ...taskMessages.filter((message)=>message.role==='user'||message.role==='assistant').slice(-19).map(({ role, content }) => ({ role:role as 'user'|'assistant', content })),
+        ...taskMessages.filter((message)=>(message.role==='user'||message.role==='assistant')&&message.content.trim().length>0).slice(-19).map(({ role, content }) => ({ role:role as 'user'|'assistant', content:content.trim() })),
         { role: 'user' as const, content: submittedPrompt },
       ];
       appendMessage(task.id, { id: createClientId(), role: 'user', content: submittedPrompt, createdAt: new Date().toISOString() });
