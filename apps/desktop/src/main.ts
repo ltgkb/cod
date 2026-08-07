@@ -13,6 +13,7 @@ const execFileAsync = promisify(execFile);
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const developmentUrl = process.env.COD_DEV_SERVER_URL || 'http://127.0.0.1:5173';
 const allowedCommands = new Set(['npm', 'pnpm', 'cargo', 'git', 'node', 'just']);
+const approvedProjectRoots = new Set<string>();
 let gooseSidecar: ChildProcess | null = null;
 let gooseAcpUrl: string | null = null;
 let gooseConfigurationKey: string | null = null;
@@ -85,7 +86,10 @@ async function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | 
   }
   const port = await availablePort();
   const secret = randomBytes(24).toString('hex');
-  const controlPlane = new URL(process.env.COD_CONTROL_PLANE_URL ?? 'http://95.41.23.60');
+  const controlPlane = new URL(process.env.COD_CONTROL_PLANE_URL ?? 'https://cod.kai.com');
+  if (controlPlane.protocol !== 'https:' && process.env.NODE_ENV === 'production') {
+    throw new Error('COD_CONTROL_PLANE_URL must use HTTPS in production');
+  }
   controlPlane.pathname = `${controlPlane.pathname.replace(/\/$/, '')}/v1/sources/${encodeURIComponent(config.sourceId)}`;
   controlPlane.search = '';
   controlPlane.hash = '';
@@ -127,6 +131,12 @@ async function resolveProjectRoot(root: string): Promise<string> {
   const resolved = await fs.realpath(root);
   const stats = await fs.stat(resolved);
   if (!stats.isDirectory()) throw new Error('Selected project is not a directory');
+  return resolved;
+}
+
+async function approvedProjectRoot(root: string): Promise<string> {
+  const resolved = await resolveProjectRoot(root);
+  if (!approvedProjectRoots.has(resolved)) throw new Error('Project access has not been approved in COD Desktop');
   return resolved;
 }
 
@@ -204,16 +214,19 @@ async function createWindow() {
 
 ipcMain.handle('cod:select-project', async () => {
   const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] });
-  return result.canceled ? null : result.filePaths[0];
+  if (result.canceled) return null;
+  const root = await resolveProjectRoot(result.filePaths[0]);
+  approvedProjectRoots.add(root);
+  return root;
 });
 
 ipcMain.handle('cod:list-files', async (_event, root: string) => {
-  const resolvedRoot = await resolveProjectRoot(root);
+  const resolvedRoot = await approvedProjectRoot(root);
   return collectFiles(resolvedRoot);
 });
 
 ipcMain.handle('cod:read-text-file', async (_event, root: string, relativePath: string) => {
-  const resolvedRoot = await resolveProjectRoot(root);
+  const resolvedRoot = await approvedProjectRoot(root);
   const target = await fs.realpath(path.join(resolvedRoot, relativePath));
   if (!isWithinRoot(resolvedRoot, target)) throw new Error('File is outside the selected project');
   const stats = await fs.stat(target);
@@ -223,9 +236,12 @@ ipcMain.handle('cod:read-text-file', async (_event, root: string, relativePath: 
 
 ipcMain.handle('cod:git-diff', async (_event, root: string) => {
   try {
-    const resolvedRoot = await resolveProjectRoot(root);
-    const { stdout } = await execFileAsync('git', ['diff', '--no-ext-diff', '--'], { cwd: resolvedRoot, maxBuffer: 2 * 1024 * 1024 });
-    return stdout;
+    const resolvedRoot = await approvedProjectRoot(root);
+    const [{ stdout: unstaged }, { stdout: staged }] = await Promise.all([
+      execFileAsync('git', ['diff', '--no-ext-diff', '--'], { cwd: resolvedRoot, maxBuffer: 2 * 1024 * 1024 }),
+      execFileAsync('git', ['diff', '--cached', '--no-ext-diff', '--'], { cwd: resolvedRoot, maxBuffer: 2 * 1024 * 1024 }),
+    ]);
+    return [unstaged && '# Unstaged changes\n' + unstaged, staged && '# Staged changes\n' + staged].filter(Boolean).join('\n');
   } catch (error) {
     return error instanceof Error ? error.message : 'Unable to read git diff';
   }
@@ -244,7 +260,7 @@ ipcMain.handle('cod:run-command', async (_event, root: string, rawCommand: strin
   }
   if (isDestructiveGitCommand([executable, ...parts])) return { command: rawCommand, output: 'Destructive Git commands are blocked in the embedded terminal.', exitCode: 126 };
   try {
-    const resolvedRoot = await resolveProjectRoot(root);
+    const resolvedRoot = await approvedProjectRoot(root);
     const { stdout, stderr } = await execFileAsync(executable, parts, { cwd: resolvedRoot, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
     return { command: rawCommand, output: `${stdout}${stderr}`.trim(), exitCode: 0 };
   } catch (error) {

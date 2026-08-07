@@ -2,7 +2,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
-import { createClientId } from './api';
+import { createClientId, sendChat } from './api';
 
 afterEach(() => {
   cleanup();
@@ -14,7 +14,7 @@ const capabilities = {
   authentication: { mode: 'pilot', accessCodeRequired: true },
   ai: { mode: 'demo', streaming: false },
   knowledge: { mode: 'demo' },
-  payments: { topupEnabled: false, mode: 'unavailable' as const },
+  payments: { topupEnabled: false, orderApi: true, mode: 'unavailable' as const },
   synchronization: { transport: 'polling', taskStatusVersioning: true },
   remote: { feishu: 'unavailable' as const, wecom: 'unavailable' as const },
 };
@@ -27,6 +27,17 @@ describe('COD workspace', () => {
   it('creates client IDs when randomUUID is unavailable on HTTP origins', () => {
     vi.stubGlobal('crypto', { getRandomValues: (bytes: Uint8Array) => { bytes.fill(7); return bytes; } });
     expect(createClientId()).toBe('07'.repeat(16));
+  });
+
+  it('sends recent multi-turn context to the model gateway', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void input; void init;
+      return json({ choices: [{ message: { content: '继续回答' } }], cod_source: 'ai-kai' });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    await sendChat('token', 'ai-kai', 'model-1', [{ role: 'user', content: '第一问' }, { role: 'assistant', content: '第一答' }, { role: 'user', content: '继续' }]);
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as { messages: Array<{ role: string; content: string }> };
+    expect(body.messages).toEqual([{ role: 'user', content: '第一问' }, { role: 'assistant', content: '第一答' }, { role: 'user', content: '继续' }]);
   });
 
   it('shows a real pilot login gate instead of silently creating a session', async () => {

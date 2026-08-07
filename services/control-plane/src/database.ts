@@ -27,6 +27,32 @@ export interface TopupRequest {
   channel: 'pilot' | 'wechat' | 'alipay';
 }
 
+export interface PaymentOrder {
+  id: string;
+  amountCents: number;
+  currency: 'CNY';
+  channel: 'wechat' | 'alipay';
+  status: 'pending' | 'paid' | 'failed' | 'expired' | 'refunded';
+  providerPaymentId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PaymentOrderRequest {
+  amountCents: number;
+  channel: PaymentOrder['channel'];
+  idempotencyKey: string;
+}
+
+export interface PaymentCompletion {
+  orderId: string;
+  amountCents: number;
+  currency: 'CNY';
+  channel: PaymentOrder['channel'];
+  providerPaymentId: string;
+  providerEventId: string;
+}
+
 export interface SyncedTask {
   id: string;
   title: string;
@@ -64,6 +90,9 @@ export interface CodDatabase {
   getAccount(principal: Principal): Promise<AccountSummary>;
   getLedger(principal: Principal): Promise<LedgerEntry[]>;
   topup(principal: Principal, request: TopupRequest): Promise<LedgerEntry>;
+  createPaymentOrder(principal: Principal, request: PaymentOrderRequest): Promise<PaymentOrder>;
+  getPaymentOrder(principal: Principal, orderId: string): Promise<PaymentOrder>;
+  completePaymentOrder(event: PaymentCompletion): Promise<{ order: PaymentOrder; entry: LedgerEntry }>;
   recordUsage(principal: Principal, event: UsageEvent): Promise<LedgerEntry>;
   reserveUsage(principal: Principal, reservationId: string, amountCents: number): Promise<void>;
   settleUsage(principal: Principal, reservationId: string, event: UsageEvent): Promise<LedgerEntry>;
@@ -117,6 +146,14 @@ CREATE TABLE IF NOT EXISTS cod_usage_reservations (
   id uuid PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL, amount_cents bigint NOT NULL CHECK (amount_cents >= 0),
   status text NOT NULL CHECK (status IN ('reserved','settled','released')), created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS cod_payment_orders (
+  id uuid PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL,
+  amount_cents bigint NOT NULL CHECK (amount_cents >= 100), currency text NOT NULL CHECK (currency = 'CNY'),
+  channel text NOT NULL CHECK (channel IN ('wechat','alipay')), status text NOT NULL CHECK (status IN ('pending','paid','failed','expired','refunded')),
+  idempotency_key text NOT NULL, provider_payment_id text, provider_event_id text,
+  created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (tenant_id,user_id,idempotency_key)
+);
 CREATE TABLE IF NOT EXISTS cod_devices (
   id uuid PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL, name text NOT NULL, platform text NOT NULL,
   status text NOT NULL, last_seen_at timestamptz NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
@@ -139,12 +176,16 @@ CREATE INDEX IF NOT EXISTS cod_devices_owner_idx ON cod_devices(tenant_id, user_
 CREATE INDEX IF NOT EXISTS cod_tasks_owner_idx ON cod_tasks(tenant_id, user_id);
 CREATE INDEX IF NOT EXISTS cod_events_owner_cursor_idx ON cod_events(tenant_id, user_id, cursor);
 CREATE INDEX IF NOT EXISTS cod_audit_owner_created_idx ON cod_audit(tenant_id, user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS cod_payment_orders_owner_created_idx ON cod_payment_orders(tenant_id, user_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS cod_payment_orders_provider_payment_idx ON cod_payment_orders(channel, provider_payment_id) WHERE provider_payment_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS cod_payment_orders_provider_event_idx ON cod_payment_orders(provider_event_id) WHERE provider_event_id IS NOT NULL;
 `;
 
 const accountFromRow = (row: Record<string, unknown>): AccountSummary => ({
   userId: String(row.user_id), displayName: String(row.display_name), balanceCents: Number(row.balance_cents), currency: 'CNY', plan: row.plan === 'team' ? 'team' : 'developer',
 });
 const ledgerFromRow = (row: Record<string, unknown>): LedgerEntry => ({ id: String(row.id), type: row.type as LedgerEntry['type'], amountCents: Number(row.amount_cents), reference: String(row.reference), sourceId: row.source_id ? String(row.source_id) : null, model: row.model_id ? String(row.model_id) : null, paymentDirection: row.payment_direction ? String(row.payment_direction) : null, createdAt: new Date(String(row.created_at)).toISOString() });
+const paymentOrderFromRow = (row: Record<string, unknown>): PaymentOrder => ({ id: String(row.id), amountCents: Number(row.amount_cents), currency: 'CNY', channel: row.channel as PaymentOrder['channel'], status: row.status as PaymentOrder['status'], providerPaymentId: row.provider_payment_id ? String(row.provider_payment_id) : null, createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString() });
 const deviceFromRow = (row: Record<string, unknown>): DeviceRecord => {
   const lastSeenAt = new Date(String(row.last_seen_at)).toISOString();
   const stale = Date.now() - new Date(lastSeenAt).getTime() > 45_000;
@@ -182,6 +223,49 @@ export class PostgresDatabase implements CodDatabase {
       const id=randomUUID(); const reference=`${request.channel}:${request.idempotencyKey}`;
       const inserted=await client.query(`INSERT INTO cod_ledger (id,tenant_id,user_id,type,amount_cents,reference,idempotency_key,payment_direction) VALUES ($1,$2,$3,'topup',$4,$5,$6,$7) RETURNING *`,[id,p.tenantId,p.userId,request.amountCents,reference,request.idempotencyKey,'用户 → COD 钱包']);
       await client.query('UPDATE cod_users SET balance_cents=balance_cents+$3,updated_at=now() WHERE tenant_id=$1 AND user_id=$2',[p.tenantId,p.userId,request.amountCents]); return ledgerFromRow(inserted.rows[0]);
+    });
+  }
+  async createPaymentOrder(p: Principal, request: PaymentOrderRequest) {
+    if (!Number.isInteger(request.amountCents) || request.amountCents < 100 || request.amountCents > 1_000_000) throw new HttpError('Payment amount must be between 100 and 1000000 cents',400,'invalid_payment_amount');
+    if (request.channel !== 'wechat' && request.channel !== 'alipay') throw new HttpError('Payment channel is invalid',400,'invalid_payment_channel');
+    if (!request.idempotencyKey || request.idempotencyKey.length > 200) throw new HttpError('Payment idempotency key is invalid',400,'invalid_idempotency_key');
+    return this.transaction(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`payment:${p.tenantId}:${p.userId}:${request.idempotencyKey}`]);
+      const existing = await client.query('SELECT * FROM cod_payment_orders WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3',[p.tenantId,p.userId,request.idempotencyKey]);
+      if (existing.rows[0]) {
+        const order = paymentOrderFromRow(existing.rows[0]);
+        if (order.amountCents !== request.amountCents || order.channel !== request.channel) throw new HttpError('Idempotency key was already used with different payment parameters',409,'idempotency_conflict');
+        return order;
+      }
+      const { rows } = await client.query(`INSERT INTO cod_payment_orders (id,tenant_id,user_id,amount_cents,currency,channel,status,idempotency_key) VALUES ($1,$2,$3,$4,'CNY',$5,'pending',$6) RETURNING *`,[randomUUID(),p.tenantId,p.userId,request.amountCents,request.channel,request.idempotencyKey]);
+      return paymentOrderFromRow(rows[0]);
+    });
+  }
+  async getPaymentOrder(p: Principal, orderId: string) {
+    const { rows } = await this.pool.query('SELECT * FROM cod_payment_orders WHERE id=$1 AND tenant_id=$2 AND user_id=$3',[orderId,p.tenantId,p.userId]);
+    if (!rows[0]) throw new HttpError('Payment order not found',404,'payment_order_not_found');
+    return paymentOrderFromRow(rows[0]);
+  }
+  async completePaymentOrder(event: PaymentCompletion) {
+    return this.transaction(async (client) => {
+      const result = await client.query('SELECT * FROM cod_payment_orders WHERE id=$1 FOR UPDATE',[event.orderId]);
+      if (!result.rows[0]) throw new HttpError('Payment order not found',404,'payment_order_not_found');
+      const current = paymentOrderFromRow(result.rows[0]);
+      if (current.amountCents !== event.amountCents || current.currency !== event.currency || current.channel !== event.channel) throw new HttpError('Payment event does not match the order',409,'payment_order_mismatch');
+      const reused = await client.query('SELECT id FROM cod_payment_orders WHERE id<>$1 AND (provider_event_id=$2 OR (channel=$3 AND provider_payment_id=$4))',[current.id,event.providerEventId,event.channel,event.providerPaymentId]);
+      if (reused.rows[0]) throw new HttpError('Provider payment or event was already used for another order',409,'payment_provider_reused');
+      const ledgerKey = `payment-order:${current.id}`;
+      if (current.status === 'paid') {
+        if (current.providerPaymentId !== event.providerPaymentId) throw new HttpError('Payment order is already bound to another provider payment',409,'payment_provider_conflict');
+        const existing = await client.query('SELECT * FROM cod_ledger WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3',[result.rows[0].tenant_id,result.rows[0].user_id,ledgerKey]);
+        if (!existing.rows[0]) throw new HttpError('Paid order ledger entry is missing',500,'payment_ledger_missing');
+        return { order: current, entry: ledgerFromRow(existing.rows[0]) };
+      }
+      if (current.status !== 'pending') throw new HttpError(`Payment order cannot be completed from ${current.status}`,409,'payment_order_not_pending');
+      const inserted = await client.query(`INSERT INTO cod_ledger (id,tenant_id,user_id,type,amount_cents,reference,idempotency_key,payment_direction) VALUES ($1,$2,$3,'topup',$4,$5,$6,$7) RETURNING *`,[randomUUID(),result.rows[0].tenant_id,result.rows[0].user_id,current.amountCents,`${event.channel}:${event.providerPaymentId}`,ledgerKey,'用户 → 支付渠道 → COD 钱包']);
+      await client.query('UPDATE cod_users SET balance_cents=balance_cents+$3,updated_at=now() WHERE tenant_id=$1 AND user_id=$2',[result.rows[0].tenant_id,result.rows[0].user_id,current.amountCents]);
+      const updated = await client.query(`UPDATE cod_payment_orders SET status='paid',provider_payment_id=$2,provider_event_id=$3,updated_at=now() WHERE id=$1 RETURNING *`,[current.id,event.providerPaymentId,event.providerEventId]);
+      return { order: paymentOrderFromRow(updated.rows[0]), entry: ledgerFromRow(inserted.rows[0]) };
     });
   }
   async recordUsage(p: Principal, event: UsageEvent) {

@@ -45,4 +45,17 @@ describe('wallet database contract', () => {
     expect((await database.getAccount(principal)).balanceCents).toBe(7840);
     expect((await database.getAccount(other)).balanceCents).toBe(8840);
   });
+
+  it('credits an exact payment order once and rejects mismatched callbacks', async () => {
+    const database = new MemoryDatabase();
+    const order = await database.createPaymentOrder(principal, { amountCents: 2500, channel: 'alipay', idempotencyKey: 'order-1' });
+    await expect(database.completePaymentOrder({ orderId: order.id, amountCents: 2501, currency: 'CNY', channel: 'alipay', providerPaymentId: 'ali-1', providerEventId: 'event-bad' })).rejects.toMatchObject({ code: 'payment_order_mismatch' });
+    const first = await database.completePaymentOrder({ orderId: order.id, amountCents: 2500, currency: 'CNY', channel: 'alipay', providerPaymentId: 'ali-1', providerEventId: 'event-1' });
+    const duplicate = await database.completePaymentOrder({ orderId: order.id, amountCents: 2500, currency: 'CNY', channel: 'alipay', providerPaymentId: 'ali-1', providerEventId: 'event-1-retry' });
+    expect(first.entry.id).toBe(duplicate.entry.id);
+    const otherOrder = await database.createPaymentOrder(principal, { amountCents: 2500, channel: 'alipay', idempotencyKey: 'order-2' });
+    await expect(database.completePaymentOrder({ orderId: otherOrder.id, amountCents: 2500, currency: 'CNY', channel: 'alipay', providerPaymentId: 'ali-1', providerEventId: 'event-2' })).rejects.toMatchObject({ code: 'payment_provider_reused' });
+    expect((await database.getAccount(principal)).balanceCents).toBe(9340);
+    expect(await database.getLedger(principal)).toHaveLength(1);
+  });
 });

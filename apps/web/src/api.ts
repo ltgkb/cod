@@ -31,7 +31,7 @@ export interface CapabilityReport {
   authentication: { mode: 'pilot'; accessCodeRequired: boolean };
   ai: { mode: 'live' | 'demo' | 'unavailable'; streaming: boolean };
   knowledge: { mode: 'live' | 'demo' };
-  payments: { topupEnabled: boolean; mode: 'pilot-credit' | 'verified-webhook' | 'unavailable' };
+  payments: { topupEnabled: boolean; orderApi: boolean; mode: 'pilot-credit' | 'verified-webhook' | 'unavailable' };
   synchronization: { transport: 'polling'; taskStatusVersioning: boolean };
   remote: { feishu: 'live' | 'unavailable'; wecom: 'adapter' | 'unavailable' };
 }
@@ -58,6 +58,17 @@ export interface LedgerEntry {
   sourceId: string | null;
   model: string | null;
   paymentDirection: string | null;
+}
+
+export interface PaymentOrder {
+  id: string;
+  amountCents: number;
+  currency: 'CNY';
+  channel: 'wechat' | 'alipay';
+  status: 'pending' | 'paid' | 'failed' | 'expired' | 'refunded';
+  providerPaymentId: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export class ApiError extends Error {
@@ -163,6 +174,18 @@ export async function topup(token: string, amountCents: number): Promise<Account
   return result.account;
 }
 
+export async function createPaymentOrder(token: string, amountCents: number, channel: PaymentOrder['channel']): Promise<PaymentOrder> {
+  return request('/api/payment-orders', token, {
+    method: 'POST',
+    headers: { 'idempotency-key': createClientId() },
+    body: JSON.stringify({ amountCents, channel }),
+  });
+}
+
+export async function getPaymentOrder(token: string, orderId: string): Promise<PaymentOrder> {
+  return request(`/api/payment-orders/${encodeURIComponent(orderId)}`, token);
+}
+
 export async function searchKnowledge(token: string, query: string): Promise<KnowledgeHit[]> {
   return request(`/api/knowledge/search?q=${encodeURIComponent(query)}`, token);
 }
@@ -202,10 +225,10 @@ export async function launchProduct(token: string, productId: string): Promise<{
   return request(`/api/products/${encodeURIComponent(productId)}/launch`, token, { method: 'POST' });
 }
 
-export async function sendChat(token: string, source: string, model: string, content: string): Promise<{ content: string; mode: 'live' | 'demo'; source: string; paymentDirection: string; chargeCents: number }> {
+export async function sendChat(token: string, source: string, model: string, messages: Array<{ role: 'user' | 'assistant'; content: string }>): Promise<{ content: string; mode: 'live' | 'demo'; source: string; paymentDirection: string; chargeCents: number }> {
   const result = await request<{ choices: Array<{ message: { content: string } }>; cod_mode?: 'demo'; cod_source?: string; cod_payment_direction?: string; cod_charge_cents?: number }>('/v1/chat/completions', token, {
     method: 'POST',
-    body: JSON.stringify({ source, model, messages: [{ role: 'user', content }], max_tokens: 1024, stream: false }),
+    body: JSON.stringify({ source, model, messages: messages.slice(-20), max_tokens: 1024, stream: false }),
   });
   return { content: result.choices[0]?.message.content ?? 'COD 没有返回内容。', mode: result.cod_mode === 'demo' ? 'demo' : 'live', source: result.cod_source ?? source, paymentDirection: result.cod_payment_direction ?? '', chargeCents: result.cod_charge_cents ?? 0 };
 }

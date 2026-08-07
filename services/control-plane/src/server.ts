@@ -96,7 +96,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         authentication: { mode: 'pilot', accessCodeRequired: Boolean(config.pilotAccessCodeHash) },
         ai: { mode: await gateway.mode(), streaming: false },
         knowledge: { mode: knowledge.mode() },
-        payments: { topupEnabled: config.developmentTopupEnabled, mode: config.paymentWebhookSecret ? 'verified-webhook' : config.developmentTopupEnabled ? 'pilot-credit' : 'unavailable' },
+        payments: { topupEnabled: config.developmentTopupEnabled, orderApi: true, mode: config.paymentWebhookSecret ? 'verified-webhook' : config.developmentTopupEnabled ? 'pilot-credit' : 'unavailable' },
         synchronization: { transport: 'polling', taskStatusVersioning: true },
         remote: {
           feishu: config.feishuVerificationToken && config.feishuAppId && config.feishuAppSecret && Object.keys(config.feishuBindings).length ? 'live' : 'unavailable',
@@ -158,26 +158,28 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         const timestamp = String(request.headers['x-cod-timestamp'] ?? '');
         const signature = String(request.headers['x-cod-signature'] ?? '');
         if (!config.paymentWebhookSecret || !verifyWebhookSignature(rawBody, timestamp, signature, config.paymentWebhookSecret)) return sendJson(response, 401, { error: 'invalid_signature' });
-        let event: { eventId?: string; status?: string; email?: string; amountCents?: number; currency?: string; channel?: string; providerPaymentId?: string };
+        let event: { eventId?: string; orderId?: string; status?: string; amountCents?: number; currency?: string; channel?: string; providerPaymentId?: string };
         try { event = JSON.parse(rawBody || '{}') as typeof event; }
         catch { throw new HttpError('Request body must be valid JSON', 400, 'invalid_json'); }
         if (event.status !== 'paid') return sendJson(response, 202, { accepted: true, credited: false });
-        const email = String(event.email ?? '').trim().toLowerCase();
-        const domain = email.split('@')[1] ?? '';
-        if (!/^\S+@\S+\.\S+$/.test(email) || !config.allowedEmailDomains.includes(domain)) throw new HttpError('Payment account is not allowed', 403, 'payment_account_forbidden');
         const channel = event.channel === 'wechat' || event.channel === 'alipay' ? event.channel : null;
-        if (!channel || event.currency !== 'CNY' || !event.eventId || !event.providerPaymentId) throw new HttpError('Payment event is invalid', 400, 'invalid_payment_event');
-        const principal: Principal = { userId: userIdFor(email), tenantId: tenantIdFor(email), email, role: 'member' };
-        await database.ensurePrincipal(principal);
-        const entry = await database.topup(principal, { amountCents: Number(event.amountCents), channel, idempotencyKey: `payment:${channel}:${event.providerPaymentId}` });
-        await database.audit(principal, 'payment.credited', 'ledger', entry.id, { eventId: event.eventId, channel, providerPaymentId: event.providerPaymentId, amountCents: event.amountCents });
-        return sendJson(response, 200, { accepted: true, credited: true, ledgerId: entry.id });
+        if (!channel || event.currency !== 'CNY' || !event.eventId || !event.orderId || !event.providerPaymentId || !Number.isInteger(event.amountCents)) throw new HttpError('Payment event is invalid', 400, 'invalid_payment_event');
+        const completed = await database.completePaymentOrder({ orderId: event.orderId, amountCents: Number(event.amountCents), currency: 'CNY', channel, providerPaymentId: event.providerPaymentId, providerEventId: event.eventId });
+        return sendJson(response, 200, { accepted: true, credited: true, order: completed.order, ledgerId: completed.entry.id });
       }
       const session = verifySessionToken(bearerToken(request) ?? '', config.sessionSecret);
       if (!session) return sendJson(response, 401, { error: 'unauthorized' });
       const principal = principalFromSession(session);
       if (request.method === 'GET' && url.pathname === '/api/account') return sendJson(response, 200, await database.getAccount(principal));
       if (request.method === 'GET' && url.pathname === '/api/ledger') return sendJson(response, 200, await database.getLedger(principal));
+      if (request.method === 'POST' && url.pathname === '/api/payment-orders') {
+        const key=String(request.headers['idempotency-key']??'');if(!key)throw new HttpError('idempotency-key is required',400,'idempotency_required');
+        const body=await readJson<{amountCents?:number;channel?:'wechat'|'alipay'}>(request);
+        const order=await database.createPaymentOrder(principal,{amountCents:Number(body.amountCents),channel:body.channel as 'wechat'|'alipay',idempotencyKey:key});
+        await database.audit(principal,'payment.order.created','payment_order',order.id,{amountCents:order.amountCents,channel:order.channel});
+        return sendJson(response,201,order);
+      }
+      if (request.method === 'GET' && url.pathname.match(/^\/api\/payment-orders\/[^/]+$/)) return sendJson(response,200,await database.getPaymentOrder(principal,url.pathname.split('/')[3]));
       if (request.method === 'GET' && url.pathname === '/api/audit') return sendJson(response, 200, await database.listAudit(principal, queryInteger(url.searchParams.get('limit'), 50, 200)));
       if (request.method === 'GET' && url.pathname === '/api/model-sources') return sendJson(response, 200, await gateway.listSources());
       if (request.method === 'GET' && url.pathname === '/api/models') return sendJson(response, 200, (await gateway.listSources()).flatMap((source) => source.models.map((model) => ({ ...model, sourceId: source.id }))));
@@ -209,7 +211,13 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       if (request.method === 'POST' && chatRoute) {
         const body = await readJson<{ model?: string; source?: string } & Record<string, unknown>>(request);
         if(body.stream===true)throw new HttpError('Streaming through the billed gateway is not enabled yet',400,'streaming_not_supported');
-        if(!Array.isArray(body.messages) || body.messages.length === 0)throw new HttpError('At least one chat message is required',400,'invalid_messages');
+        if(!Array.isArray(body.messages) || body.messages.length === 0 || body.messages.length > 40)throw new HttpError('Chat must contain between 1 and 40 messages',400,'invalid_messages');
+        const validMessages = body.messages.every((message) => {
+          if (!message || typeof message !== 'object') return false;
+          const value = message as { role?: unknown; content?: unknown };
+          return (value.role === 'user' || value.role === 'assistant' || value.role === 'system') && typeof value.content === 'string' && value.content.length > 0 && value.content.length <= 50_000;
+        });
+        if (!validMessages) throw new HttpError('Chat messages are invalid',400,'invalid_messages');
         const routeSource = chatRoute[1];
         if (routeSource && body.source && routeSource !== body.source) throw new HttpError('Model source conflicts with the gateway route', 400, 'source_conflict');
         const sourceId=routeSource??body.source??(config.modelSources.some((source)=>source.apiKey)?config.modelSources.find((source)=>source.apiKey)!.id:'demo');

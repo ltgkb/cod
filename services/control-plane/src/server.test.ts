@@ -59,18 +59,23 @@ describe('control-plane production rules', () => {
   it('credits only signed, paid, idempotent payment callbacks', async () => {
     const secret = 'payment-secret';
     const { base } = await start({ COD_PAYMENT_WEBHOOK_SECRET: secret });
-    const body = JSON.stringify({ eventId: 'event-1', status: 'paid', email: 'developer@kai.com', amountCents: 1200, currency: 'CNY', channel: 'wechat', providerPaymentId: 'wx-1' });
+    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com' }) });
+    const { token } = await login.json() as { token: string };
+    const orderResponse = await fetch(`${base}/api/payment-orders`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'idempotency-key': 'checkout-1' }, body: JSON.stringify({ amountCents: 1200, channel: 'wechat' }) });
+    expect(orderResponse.status).toBe(201);
+    const order = await orderResponse.json() as { id: string; status: string };
+    expect(order.status).toBe('pending');
+    const body = JSON.stringify({ eventId: 'event-1', orderId: order.id, status: 'paid', amountCents: 1200, currency: 'CNY', channel: 'wechat', providerPaymentId: 'wx-1' });
     const timestamp = String(Math.floor(Date.now() / 1000));
     const signature = createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex');
     const headers = { 'content-type': 'application/json', 'x-cod-timestamp': timestamp, 'x-cod-signature': signature };
     expect((await fetch(`${base}/api/webhooks/payments`, { method: 'POST', headers, body })).status).toBe(200);
     expect((await fetch(`${base}/api/webhooks/payments`, { method: 'POST', headers, body })).status).toBe(200);
-    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com' }) });
-    const { token } = await login.json() as { token: string };
     const account = await (await fetch(`${base}/api/account`, { headers: { authorization: `Bearer ${token}` } })).json() as { balanceCents: number };
     const ledger = await (await fetch(`${base}/api/ledger`, { headers: { authorization: `Bearer ${token}` } })).json() as unknown[];
     expect(account.balanceCents).toBe(8040);
     expect(ledger).toHaveLength(1);
+    expect(await (await fetch(`${base}/api/payment-orders/${order.id}`, { headers: { authorization: `Bearer ${token}` } })).json()).toMatchObject({ status: 'paid', providerPaymentId: 'wx-1' });
     expect((await fetch(`${base}/api/webhooks/payments`, { method: 'POST', headers: { ...headers, 'x-cod-signature': '00' }, body })).status).toBe(401);
   });
 

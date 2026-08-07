@@ -137,6 +137,7 @@ export function App() {
   const [session, setSession] = useState<CodSession | null>(null);
   const [tasks, setTasks] = useState<RemoteTask[]>([]);
   const [devices, setDevices] = useState<DeviceRecord[]>([]);
+  const [currentDeviceId, setCurrentDeviceId] = useState('');
   const [ledger, setLedger] = useState<LedgerEntry[]>([]);
   const [products, setProducts] = useState<ProductManifest[]>([]);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
@@ -196,6 +197,7 @@ export function App() {
       nextDevices = nextDevices.map((device) => device.id === currentDevice!.id ? currentDevice! : device);
     }
     setDevices(nextDevices); setTasks(nextTasks); setProducts(nextProducts); setLedger(nextLedger);
+    setCurrentDeviceId(currentDevice.id);
     setTargetDeviceId((current) => current || nextDevices.find((device) => device.status === 'online' && !['web', 'mobile'].includes(device.platform))?.id || currentDevice!.id);
     setActiveTaskId((current) => current && nextTasks.some((task) => task.id === current) ? current : nextTasks[0]?.id ?? null);
     const storedSourceId = storageGet('cod.model.source');
@@ -250,7 +252,7 @@ export function App() {
     const nextSession = await loginCod(email, accessCode);
     await loadWorkspace(nextSession); setSession(nextSession); setAuthState('signed-in');
   };
-  const handleLogout = () => { void window.codDesktop?.stopGoose(); logoutCod(); setSession(null); setTasks([]); setDevices([]); setOverlay(null); setAuthState('signed-out'); };
+  const handleLogout = () => { void window.codDesktop?.stopGoose(); logoutCod(); setSession(null); setTasks([]); setDevices([]); setCurrentDeviceId(''); setOverlay(null); setAuthState('signed-out'); };
   const refreshWallet = async () => {
     if (!session) return;
     const [account, nextLedger] = await Promise.all([refreshAccount(session.token), listLedger(session.token)]);
@@ -304,35 +306,43 @@ export function App() {
       window.open(launch.url, '_blank', 'noopener,noreferrer');
     } catch (error) { setNotice(error instanceof Error ? error.message : '产品打开失败'); }
   };
-  const handleSend = async () => {
-    if (!prompt.trim() || !session || isSending) return;
+  const handleSend = async (requestedPrompt = prompt, requestedTask: RemoteTask | null = activeTask, requestedMode: WorkspaceMode = mode) => {
+    const promptText = requestedPrompt.trim();
+    if (!promptText || !session || isSending) return;
     if (!selectedSource?.callable || !selectedModelInfo) { setNotice('当前模型源仅供查看目录，配置该源密钥后才能调用。'); return; }
-    let task = activeTask;
+    let task = requestedTask;
+    if (task && task.deviceId !== currentDeviceId) { setNotice(`该任务应在 ${devices.find((device) => device.id === task!.deviceId)?.name ?? '目标设备'} 上执行`); return; }
     try {
       if (!task) {
-        if (!targetDeviceId) throw new Error('没有可用的目标设备');
-        task = await createRemoteTask(session.token, prompt.trim().slice(0, 80), targetDeviceId);
+        if (!currentDeviceId) throw new Error('当前设备尚未完成注册');
+        task = await createRemoteTask(session.token, promptText.slice(0, 80), currentDeviceId);
         setTasks((current) => [task!, ...current]); setActiveTaskId(task.id);
       }
       if (task.status !== 'running') task = await changeTaskStatus(task, 'running');
-      const submittedPrompt = prompt.trim();
+      const submittedPrompt = promptText;
+      const taskMessages = messagesByTask[task.id] ?? [];
+      const conversationMessages = [
+        ...taskMessages.slice(-19).map(({ role, content }) => ({ role, content })),
+        { role: 'user' as const, content: submittedPrompt },
+      ];
       appendMessage(task.id, { id: createClientId(), role: 'user', content: submittedPrompt, createdAt: new Date().toISOString() });
       setPrompt(''); setIsSending(true); setAgentStatus('正在执行'); setNotice('');
       let reply = '';
       let replyMode: 'live' | 'demo' = capabilities?.ai.mode === 'demo' ? 'demo' : 'live';
-      const acpUrl = mode === 'code' ? await window.codDesktop?.getGooseAcpUrl({ token: session.token, sourceId: selectedSource.id, modelId: selectedModelInfo.id }) : null;
-      if (mode === 'code' && hasDesktopBridge() && project.root && acpUrl) {
+      const acpUrl = requestedMode === 'code' ? await window.codDesktop?.getGooseAcpUrl({ token: session.token, sourceId: selectedSource.id, modelId: selectedModelInfo.id }) : null;
+      if (requestedMode === 'code' && hasDesktopBridge() && project.root && acpUrl) {
         const { runGooseTask } = await import('./goose');
         setAgentStatus('连接本机 Goose');
-        reply = await runGooseTask({ acpUrl, cwd: project.root, prompt: submittedPrompt, onUpdate: (update) => { if (update.kind === 'message') reply += update.text; if (update.kind === 'tool' || update.kind === 'status') setAgentStatus(update.text); }, requestPermission: (request) => new Promise((resolve) => { permissionResolver.current = resolve; setPendingPermission({ title: request.toolCall.title ?? '工具权限请求', options: request.options }); }) });
+        const contextualPrompt = conversationMessages.length === 1 ? submittedPrompt : `Continue this conversation using the current project.\n\n${conversationMessages.map((message) => `${message.role === 'user' ? 'User' : 'Assistant'}: ${message.content}`).join('\n\n')}`;
+        reply = await runGooseTask({ acpUrl, cwd: project.root, prompt: contextualPrompt, onUpdate: (update) => { if (update.kind === 'message') reply += update.text; if (update.kind === 'tool' || update.kind === 'status') setAgentStatus(update.text); }, requestPermission: (request) => new Promise((resolve) => { permissionResolver.current = resolve; setPendingPermission({ title: request.toolCall.title ?? '工具权限请求', options: request.options }); }) });
         if (!reply) reply = 'Goose 已完成任务，请在右侧刷新文件与 Diff。';
       } else {
-        if (mode === 'code' && !hasDesktopBridge()) setNotice('Web 端仅提供代码问答；修改本机文件请使用 COD Desktop。');
+        if (requestedMode === 'code' && !hasDesktopBridge()) setNotice('Web 端仅提供代码问答；修改本机文件请使用 COD Desktop。');
         if (!selectedSource?.callable || !selectedModelInfo) throw new Error('当前模型源仅供查看目录，配置该源密钥后才能调用。');
-        const result = await sendChat(session.token, selectedSource.id, selectedModelInfo.id, submittedPrompt); reply = result.content; replyMode = result.mode;
+        const result = await sendChat(session.token, selectedSource.id, selectedModelInfo.id, conversationMessages); reply = result.content; replyMode = result.mode;
         appendMessage(task.id, { id: createClientId(), role: 'assistant', content: reply, mode: replyMode, sourceLabel: selectedSource.label, model: selectedModelInfo.id, chargeCents: result.chargeCents, createdAt: new Date().toISOString() });
       }
-      if (mode === 'code' && hasDesktopBridge() && project.root) appendMessage(task.id, { id: createClientId(), role: 'assistant', content: reply, mode: replyMode, sourceLabel: selectedSource.label, model: selectedModelInfo.id, createdAt: new Date().toISOString() });
+      if (requestedMode === 'code' && hasDesktopBridge() && project.root) appendMessage(task.id, { id: createClientId(), role: 'assistant', content: reply, mode: replyMode, sourceLabel: selectedSource.label, model: selectedModelInfo.id, createdAt: new Date().toISOString() });
       if (task.status === 'running' || task.status === 'waiting') task = await changeTaskStatus(task, 'complete', { result: reply, error: null });
       setAgentStatus('已完成'); await refreshWallet();
       if (hasDesktopBridge() && project.root) { const snapshot = await loadProject(project.root); if (snapshot) setProject(snapshot); }
@@ -340,6 +350,16 @@ export function App() {
       setAgentStatus('执行失败'); setNotice(error instanceof Error ? error.message : 'COD 执行失败');
       if (task && session && (task.status === 'draft' || task.status === 'running' || task.status === 'waiting')) { try { await changeTaskStatus(task, 'failed', { error: error instanceof Error ? error.message : 'COD 执行失败' }); } catch { /* Preserve the original error. */ } }
     } finally { setIsSending(false); }
+  };
+  const executeSynchronizedTask = (task: RemoteTask) => {
+    if (task.deviceId !== currentDeviceId) { setNotice('请在任务指定的目标设备上执行。'); return; }
+    if (hasDesktopBridge() && !project.root) { setNotice('请先在 COD Desktop 中选择该任务要操作的项目。'); return; }
+    const instruction = task.status === 'draft' ? task.title : prompt.trim() || task.title;
+    void handleSend(instruction, task, hasDesktopBridge() ? 'code' : 'chat');
+  };
+  const completeSynchronizedTask = (task: RemoteTask) => {
+    if (task.deviceId !== currentDeviceId) { setNotice('请在任务指定的目标设备上更新状态。'); return; }
+    void changeTaskStatus(task, 'complete').catch((error) => setNotice(error.message));
   };
   const resolvePermission = (optionId: string | null) => { permissionResolver.current?.(optionId); permissionResolver.current = null; setPendingPermission(null); };
   const handleOpenProject = async () => {
@@ -373,7 +393,7 @@ export function App() {
     <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}><div className="sidebar-head"><div><small>工作区</small><strong>{mode === 'code' ? '代码任务' : '对话'}</strong></div><button className="new-task" onClick={() => setOverlay('new-task')}><Plus weight="bold" /> 新任务</button></div><div className="search"><MagnifyingGlass /><input aria-label="搜索任务" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="搜索任务或状态" /></div><TaskList tasks={filteredTasks} devices={devices} activeId={activeTaskId} onSelect={(id) => { setActiveTaskId(id); setSidebarOpen(false); }} /><div className="sidebar-bottom">{notice && <div className="remote-notice">{notice}</div>}<button className="project-switch" onClick={handleOpenProject}><span className="project-icon"><Folder weight="fill" /></span><span><small>当前项目</small><strong>{projectName}</strong></span><CaretDown /></button><div className="balance-preview"><Lightning weight="fill" /><span><small>KAI Token</small><strong>¥ {(session.account.balanceCents / 100).toFixed(2)}</strong></span><button onClick={() => setOverlay('account')}>{capabilities?.payments.topupEnabled ? '预存' : '明细'}</button></div></div></aside>
     <main className="workspace"><header className="workspace-header"><div className="task-heading"><button className="mobile-only icon-button" title="打开任务栏" onClick={() => setSidebarOpen(true)}><SidebarSimple /></button><div><h1>{activeTask?.title ?? '新建或选择任务'}</h1><p>{project.root || 'Web 远程工作区'}</p></div></div><div className="header-actions">{activeTask && <span className={`header-status ${activeTask.status}`}>{statusLabels[activeTask.status]}</span>}<div className="mode-switch" aria-label="工作模式"><button className={mode === 'code' ? 'active' : ''} onClick={() => setMode('code')}><Code /> 代码</button><button className={mode === 'chat' ? 'active' : ''} onClick={() => setMode('chat')}><ChatCircleDots /> 对话</button></div><select className="source-picker" aria-label="模型源" value={selectedSource?.id ?? ''} onChange={(event) => handleSourceChange(event.target.value)}>{session.sources.map((source) => <option key={source.id} value={source.id}>{source.label} · {source.callable ? '已连接' : source.status === 'catalog' ? '目录' : '不可用'}</option>)}</select><select className="model-picker" aria-label="模型" value={selectedModelInfo?.id ?? ''} onChange={(event) => handleModelChange(event.target.value)} disabled={!sourceModels.length}>{sourceModels.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}</select></div></header>
       <section className="conversation"><div className="conversation-scroll">{!activeTask && <div className="empty-state"><div className="agent-avatar"><span>C</span></div><h2>从一个真实任务开始</h2><p>新建任务后，状态、目标设备和执行结果会同步保存。</p><button className="primary-button" onClick={() => setOverlay('new-task')}><Plus /> 新建任务</button></div>}{activeTask && !activeMessages.length && !activeTask.result && !activeTask.error && <div className="empty-state compact"><StatusGlyph status={activeTask.status} /><h2>{activeTask.title}</h2><p>任务已同步到 {devices.find((device) => device.id === activeTask.deviceId)?.name ?? '目标设备'}。输入内容开始执行。</p></div>}{activeTask && !activeMessages.length && (activeTask.result || activeTask.error) && <article className="agent-message"><div className="agent-avatar"><span>C</span></div><div><header><strong>{activeTask.error ? '远程任务失败' : '远程任务结果'}</strong></header><p>{activeTask.error ?? activeTask.result}</p><small>{formatTime(activeTask.updatedAt)}</small></div></article>}{activeMessages.map((message) => message.role === 'user' ? <article className="user-message" key={message.id}><p>{message.content}</p><small>{formatTime(message.createdAt)}</small></article> : <article className="agent-message" key={message.id}><div className="agent-avatar"><span>C</span></div><div><header><strong>COD Agent</strong>{message.mode === 'demo' && <span className="demo-chip">演示响应</span>}{message.sourceLabel && <span className="source-chip">{message.sourceLabel} · {message.model}{message.chargeCents !== undefined ? ` · ¥${(message.chargeCents / 100).toFixed(2)}` : ''}</span>}</header><p>{message.content}</p><small>{formatTime(message.createdAt)}</small></div></article>)}{isSending && <div className="agent-intro"><div className="agent-avatar"><span>C</span></div><div><strong>COD Agent</strong><small>{agentStatus}</small></div><span className="live-chip"><CircleNotch className="spin" /> running</span></div>}{pendingPermission && <div className="live-permission"><strong>{pendingPermission.title}</strong><p>Goose 请求执行权限，请确认本次操作。</p><div>{pendingPermission.options.map((option) => <button className={option.kind.startsWith('allow') ? 'approve' : ''} key={option.optionId} onClick={() => resolvePermission(option.optionId)}>{option.name}</button>)}<button onClick={() => resolvePermission(null)}>取消</button></div></div>}</div>
-        <div className="composer-wrap">{activeTask && <div className="task-actions">{(activeTask.status === 'draft' || activeTask.status === 'failed' || activeTask.status === 'complete') && <button onClick={() => changeTaskStatus(activeTask, 'running').catch((error) => setNotice(error.message))}><Play /> {activeTask.status === 'failed' ? '重试任务' : activeTask.status === 'complete' ? '继续任务' : '开始任务'}</button>}{(activeTask.status === 'running' || activeTask.status === 'waiting') && <button onClick={() => changeTaskStatus(activeTask, 'complete').catch((error) => setNotice(error.message))}><Check /> 标记完成</button>}</div>}<div className="context-strip"><span><Folder weight="fill" /> {projectName}</span><span><GitDiff /> {changeCount} 个改动</span><span><ShieldCheck /> 受控模式</span>{selectedSource && <span><Lightning weight="fill" /> {selectedSource.paymentDirection}</span>}{selectedModelInfo && <span>输入 ¥{(selectedModelInfo.inputPricePerMillionCents / 100).toFixed(2)} / 输出 ¥{(selectedModelInfo.outputPricePerMillionCents / 100).toFixed(2)} 每百万 Token</span>}<button onClick={handleKnowledge} disabled={knowledgeLoading}>{knowledgeLoading ? <CircleNotch className="spin" /> : <MagnifyingGlass />} 公司 Wiki</button><button onClick={handleRemoteTask}><PaperPlaneTilt /> 发送到设备</button></div>{notice && <div className="remote-notice"><span>{notice}</span><button title="关闭提示" onClick={() => setNotice('')}><X /></button></div>}{knowledgeHits.length > 0 && <div className="knowledge-strip">{knowledgeHits.map((hit) => <a href={hit.url} target="_blank" rel="noreferrer" key={hit.id}><strong>{hit.title}</strong><span>{hit.excerpt}</span></a>)}</div>}<div className="composer"><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) handleSend(); }} placeholder={mode === 'code' ? '让 COD 修改、检查或解释这个项目...' : '问 COD 任何问题...'} /><div className="composer-footer"><button className="composer-tool" title="查看项目文件" onClick={() => { if (hasDesktopBridge()) setInspectorTab('files'); else setNotice('项目文件仅在 COD Desktop 中可用。'); }}><Plus /></button><span>⌘ ↵ 发送</span><button className="send" title="发送" disabled={!prompt.trim() || isSending || (!selectedSource?.callable && !(mode === 'code' && hasDesktopBridge() && project.root))} onClick={handleSend}>{isSending ? <CircleNotch className="spin" /> : <PaperPlaneTilt weight="fill" />}</button></div></div></div></section>
+        <div className="composer-wrap">{activeTask && <div className="task-actions">{(activeTask.status === 'draft' || activeTask.status === 'failed' || activeTask.status === 'complete') && <button onClick={() => executeSynchronizedTask(activeTask)}><Play /> {activeTask.status === 'failed' ? '重试任务' : activeTask.status === 'complete' ? '继续任务' : '执行任务'}</button>}{(activeTask.status === 'running' || activeTask.status === 'waiting') && <button onClick={() => completeSynchronizedTask(activeTask)}><Check /> 标记完成</button>}</div>}<div className="context-strip"><span><Folder weight="fill" /> {projectName}</span><span><GitDiff /> {changeCount} 个改动</span><span><ShieldCheck /> 受控模式</span>{selectedSource && <span><Lightning weight="fill" /> {selectedSource.paymentDirection}</span>}{selectedModelInfo && <span>输入 ¥{(selectedModelInfo.inputPricePerMillionCents / 100).toFixed(2)} / 输出 ¥{(selectedModelInfo.outputPricePerMillionCents / 100).toFixed(2)} 每百万 Token</span>}<button onClick={handleKnowledge} disabled={knowledgeLoading}>{knowledgeLoading ? <CircleNotch className="spin" /> : <MagnifyingGlass />} 公司 Wiki</button><button onClick={handleRemoteTask}><PaperPlaneTilt /> 发送到设备</button></div>{notice && <div className="remote-notice"><span>{notice}</span><button title="关闭提示" onClick={() => setNotice('')}><X /></button></div>}{knowledgeHits.length > 0 && <div className="knowledge-strip">{knowledgeHits.map((hit) => <a href={hit.url} target="_blank" rel="noreferrer" key={hit.id}><strong>{hit.title}</strong><span>{hit.excerpt}</span></a>)}</div>}<div className="composer"><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void handleSend(); }} placeholder={mode === 'code' ? '让 COD 修改、检查或解释这个项目...' : '问 COD 任何问题...'} /><div className="composer-footer"><button className="composer-tool" title="查看项目文件" onClick={() => { if (hasDesktopBridge()) setInspectorTab('files'); else setNotice('项目文件仅在 COD Desktop 中可用。'); }}><Plus /></button><span>⌘ ↵ 发送</span><button className="send" title="发送" disabled={!prompt.trim() || isSending || (!selectedSource?.callable && !(mode === 'code' && hasDesktopBridge() && project.root))} onClick={() => void handleSend()}>{isSending ? <CircleNotch className="spin" /> : <PaperPlaneTilt weight="fill" />}</button></div></div></div></section>
     </main>
     <aside className="inspector"><div className="inspector-tabs"><button className={inspectorTab === 'changes' ? 'active' : ''} onClick={() => setInspectorTab('changes')}><GitDiff /> 改动</button><button className={inspectorTab === 'files' ? 'active' : ''} onClick={() => setInspectorTab('files')}><Folder /> 文件</button><button className={inspectorTab === 'terminal' ? 'active' : ''} onClick={() => setInspectorTab('terminal')}><TerminalWindow /> 终端</button></div><div className="inspector-body">{inspectorTab === 'changes' && <><div className="panel-title"><span><GitDiff /> 未提交改动</span><button title="刷新" onClick={refreshProject}><ArrowClockwise /></button></div>{project.root ? <CodeBlock text={project.diff || '当前项目没有未提交改动。'} /> : <div className="panel-empty">Web 端不伪造 Diff。请在 COD Desktop 中选择本机项目。</div>}</>}{inspectorTab === 'files' && <>{project.root ? <><div className="panel-title"><span><Folder /> 项目文件</span><small>{project.files.length}</small></div><FileTree files={project.files} selected={project.selectedFile} onSelect={handleFileSelect} />{project.selectedFile && <div className="file-preview"><strong>{project.selectedFile}</strong><CodeBlock text={project.selectedContent} /></div>}</> : <div className="panel-empty">本机文件仅在 COD Desktop 中可用。</div>}</>}{inspectorTab === 'terminal' && <>{window.codDesktop && project.root ? <><div className="panel-title"><span><TerminalWindow /> 本地终端</span><small>desktop</small></div><div className="terminal"><pre>{terminalOutput}</pre><div className="terminal-command"><span>$</span><input aria-label="终端命令" value={command} onChange={(event) => setCommand(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && handleRun()} /><button onClick={handleRun}>运行</button></div></div></> : <div className="panel-empty">Web 端不会执行或伪造终端结果。请使用 COD Desktop。</div>}</>}</div></aside>
     {overlay === 'new-task' && <Modal title="新建任务" onClose={() => setOverlay(null)}><form className="modal-form" onSubmit={handleCreateTask}><label>任务标题<input aria-label="任务标题" value={newTaskTitle} onChange={(event) => setNewTaskTitle(event.target.value)} placeholder="例如：审计登录流程" required autoFocus /></label><label>目标设备<select aria-label="目标设备" value={targetDeviceId} onChange={(event) => setTargetDeviceId(event.target.value)} required>{devices.map((device) => <option key={device.id} value={device.id}>{device.name} · {device.status}</option>)}</select></label><button className="primary-button" disabled={!newTaskTitle.trim() || !targetDeviceId}><Plus /> 创建并同步</button></form></Modal>}
