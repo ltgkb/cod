@@ -217,7 +217,7 @@ button:active { transform: translateY(1px); }
 .compare-picker { padding: 0 10px 10px; border-top: 1px solid var(--border-subtle); }
 .compare-picker > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 1px; color: var(--ink); font-size: 9px; }
 .compare-picker > header small { color: var(--warning); font-size: 8px; }
-.compare-picker > div { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 6px; }
+.compare-picker > div { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 6px; max-height: 188px; overflow: auto; padding-right: 3px; }
 .compare-picker label { display: grid; grid-template-columns: 14px minmax(0,1fr) 14px; align-items: center; gap: 7px; min-width: 0; padding: 8px; background: var(--field-01); border: 1px solid var(--border-subtle); cursor: pointer; }
 .compare-picker label.selected { background: var(--accent-soft); border-color: var(--border-interactive); }
 .compare-picker label input { accent-color: var(--accent); }
