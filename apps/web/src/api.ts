@@ -231,12 +231,15 @@ export async function launchProduct(token: string, productId: string): Promise<{
   return request(`/api/products/${encodeURIComponent(productId)}/launch`, token, { method: 'POST' });
 }
 
-export async function sendChat(token: string, source: string, model: string, messages: Array<{ role: 'user' | 'assistant'; content: string }>): Promise<{ content: string; mode: 'live' | 'demo'; source: string; paymentDirection: string; chargeCents: number }> {
-  const result = await request<{ choices: Array<{ message: { content: string } }>; cod_mode?: 'demo'; cod_source?: string; cod_payment_direction?: string; cod_charge_cents?: number }>('/v1/chat/completions', token, {
+export async function sendChat(token: string, source: string, model: string, messages: Array<{ role: 'user' | 'assistant'; content: string }>): Promise<{ content: string; mode: 'live' | 'demo'; source: string; paymentDirection: string; inputTokens: number; outputTokens: number }> {
+  const result = await request<{ choices: Array<{ message: { content: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number; input_tokens?: number; output_tokens?: number }; cod_mode?: 'demo'; cod_source?: string; cod_payment_direction?: string }>('/v1/chat/completions', token, {
     method: 'POST',
     body: JSON.stringify({ source, model, messages: messages.slice(-20), max_tokens: 20_000, stream: false }),
   });
   const content = result.choices[0]?.message.content?.trim();
   if (!content) throw new ApiError('模型返回了空内容，本次回复不可用，请重试或切换模型。', 502, 'empty_model_response');
-  return { content, mode: result.cod_mode === 'demo' ? 'demo' : 'live', source: result.cod_source ?? source, paymentDirection: result.cod_payment_direction ?? '', chargeCents: result.cod_charge_cents ?? 0 };
+  const inputTokens = Number(result.usage?.prompt_tokens ?? result.usage?.input_tokens);
+  const outputTokens = Number(result.usage?.completion_tokens ?? result.usage?.output_tokens);
+  if (![inputTokens, outputTokens].every((value) => Number.isInteger(value) && value >= 0)) throw new ApiError('模型没有返回有效的 Token 用量，请重试。', 502, 'invalid_model_usage');
+  return { content, mode: result.cod_mode === 'demo' ? 'demo' : 'live', source: result.cod_source ?? source, paymentDirection: result.cod_payment_direction ?? '', inputTokens, outputTokens };
 }

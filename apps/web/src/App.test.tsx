@@ -32,17 +32,17 @@ describe('COD workspace', () => {
   it('sends recent multi-turn context to the model gateway', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void input; void init;
-      return json({ choices: [{ message: { content: '继续回答' } }], cod_source: 'ai-kai' });
+      return json({ choices: [{ message: { content: '继续回答' } }], usage: { prompt_tokens: 12, completion_tokens: 34 }, cod_source: 'ai-kai' });
     });
     vi.stubGlobal('fetch', fetchMock);
-    await sendChat('token', 'ai-kai', 'model-1', [{ role: 'user', content: '第一问' }, { role: 'assistant', content: '第一答' }, { role: 'user', content: '继续' }]);
+    expect(await sendChat('token', 'ai-kai', 'model-1', [{ role: 'user', content: '第一问' }, { role: 'assistant', content: '第一答' }, { role: 'user', content: '继续' }])).toMatchObject({ inputTokens: 12, outputTokens: 34 });
     const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as { messages: Array<{ role: string; content: string }>; max_tokens: number };
     expect(body.messages).toEqual([{ role: 'user', content: '第一问' }, { role: 'assistant', content: '第一答' }, { role: 'user', content: '继续' }]);
     expect(body).toMatchObject({ max_tokens: 20_000 });
   });
 
   it('rejects empty model responses instead of rendering a blank reply', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => json({ choices: [{ message: { content: '   ' } }], cod_source: 'ai-kai', cod_charge_cents: 4 })));
+    vi.stubGlobal('fetch', vi.fn(async () => json({ choices: [{ message: { content: '   ' } }], usage: { prompt_tokens: 12, completion_tokens: 34 }, cod_source: 'ai-kai', cod_charge_cents: 4 })));
     await expect(sendChat('token', 'ai-kai', 'glm-5.2', [{ role: 'user', content: '问题' }])).rejects.toMatchObject({ code: 'empty_model_response' });
   });
 
@@ -118,7 +118,7 @@ describe('COD workspace', () => {
         taskVersion += 1;
         return json({ id: 'task-new', title: '登录后自动发送', status: body.status, deviceId: 'web-device', updatedAt: new Date().toISOString(), version: taskVersion, result: body.status === 'complete' ? '自动回复' : null, error: null });
       }
-      if (url.endsWith('/v1/chat/completions')) return json({ choices: [{ message: { content: '自动回复' } }], cod_source: 'ai-kai', cod_charge_cents: 1 });
+      if (url.endsWith('/v1/chat/completions')) return json({ choices: [{ message: { content: '自动回复' } }], usage: { prompt_tokens: 12, completion_tokens: 34 }, cod_source: 'ai-kai', cod_charge_cents: 1 });
       if (url.endsWith('/api/products') || url.endsWith('/api/ledger')) return json([]);
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -132,6 +132,8 @@ describe('COD workspace', () => {
     fireEvent.change(within(dialog).getByLabelText('访问码'), { target: { value: 'pilot' } });
     fireEvent.click(within(dialog).getByRole('button', { name: '登录并继续' }));
     expect(await screen.findByText('自动回复')).toBeInTheDocument();
+    expect(screen.getByText(/输入 12 \/ 输出 34 Token/)).toBeInTheDocument();
+    expect(screen.queryByText('¥0.01')).not.toBeInTheDocument();
     const chatCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/v1/chat/completions'));
     expect(JSON.parse(String(chatCall?.[1]?.body)).messages).toEqual([{ role: 'user', content: '登录后自动发送' }]);
   });
