@@ -12,6 +12,7 @@ import { KnowledgeAdapter } from './knowledge.js';
 import { MemoryDatabase } from './memory-database.js';
 import { ProductRegistry } from './products.js';
 import { beginRequest, recordRequest, renderMetrics } from './metrics.js';
+import { computeOfferCatalog, validateComputeRequest } from './compute-market.js';
 
 export interface ControlPlaneOptions {
   config?: ControlPlaneConfig;
@@ -114,6 +115,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         },
       });
       if (request.method === 'GET' && url.pathname === '/api/model-catalog') return sendJson(response, 200, await gateway.listSources());
+      if (request.method === 'GET' && url.pathname === '/api/compute/offers') return sendJson(response, 200, computeOfferCatalog);
       if (request.method === 'POST' && url.pathname === '/api/auth/login') {
         const body = await readJson<{ email?: string; accessCode?: string }>(request);
         const email = validateLoginEmail(body.email, body.accessCode, config);
@@ -183,6 +185,13 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       const principal = principalFromSession(session);
       if (request.method === 'GET' && url.pathname === '/api/account') return sendJson(response, 200, await database.getAccount(principal));
       if (request.method === 'GET' && url.pathname === '/api/ledger') return sendJson(response, 200, await database.getLedger(principal));
+      if (request.method === 'GET' && url.pathname === '/api/compute/requests') return sendJson(response,200,await database.listComputeRequests(principal));
+      if (request.method === 'POST' && url.pathname === '/api/compute/requests') {
+        const key=String(request.headers['idempotency-key']??'');if(!key)throw new HttpError('idempotency-key is required',400,'idempotency_required');
+        const input=validateComputeRequest(await readJson(request));const result=await database.createComputeRequest(principal,input,key);
+        await database.audit(principal,'compute.request.created','compute_request',result.id,{kind:result.kind,offerId:result.offerId,gpuModel:result.gpuModel,quantity:result.quantity});
+        return sendJson(response,201,result);
+      }
       if (request.method === 'GET' && url.pathname === '/api/credit-packs') return sendJson(response,200,{packs:creditPackCatalog,summary:await database.getCreditSummary(principal)});
       if (request.method === 'POST' && url.pathname.match(/^\/api\/credit-packs\/[^/]+\/purchase$/)) {
         const key=String(request.headers['idempotency-key']??'');if(!key)throw new HttpError('idempotency-key is required',400,'idempotency_required');

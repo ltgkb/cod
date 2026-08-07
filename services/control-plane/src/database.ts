@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Pool, type PoolClient } from 'pg';
 import type { AccountSummary, DeviceRecord, TaskStatus, UsageEvent } from '@cod/contracts';
 import { HttpError } from './errors.js';
+import type { ComputeRequest, ComputeRequestInput } from './compute-market.js';
 
 export interface Principal {
   userId: string;
@@ -133,6 +134,8 @@ export interface CodDatabase {
   reserveUsage(principal: Principal, reservationId: string, amountCents: number): Promise<void>;
   settleUsage(principal: Principal, reservationId: string, event: UsageEvent): Promise<LedgerEntry>;
   releaseUsage(principal: Principal, reservationId: string): Promise<void>;
+  createComputeRequest(principal: Principal, input: ComputeRequestInput, idempotencyKey: string): Promise<ComputeRequest>;
+  listComputeRequests(principal: Principal): Promise<ComputeRequest[]>;
   listDevices(principal: Principal): Promise<DeviceRecord[]>;
   registerDevice(principal: Principal, input: Pick<DeviceRecord, 'name' | 'platform'>): Promise<DeviceRecord>;
   heartbeat(principal: Principal, deviceId: string): Promise<DeviceRecord>;
@@ -209,6 +212,14 @@ CREATE TABLE IF NOT EXISTS cod_payment_orders (
   created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (tenant_id,user_id,idempotency_key)
 );
+CREATE TABLE IF NOT EXISTS cod_compute_requests (
+  id uuid PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL, email text NOT NULL,
+  kind text NOT NULL CHECK (kind IN ('rental','supply','installment')), offer_id text,
+  status text NOT NULL CHECK (status IN ('submitted','contacting','quoted','closed')) DEFAULT 'submitted',
+  payload jsonb NOT NULL DEFAULT '{}', idempotency_key text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (tenant_id,user_id,idempotency_key)
+);
 CREATE TABLE IF NOT EXISTS cod_devices (
   id uuid PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL, name text NOT NULL, platform text NOT NULL,
   status text NOT NULL, last_seen_at timestamptz NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
@@ -233,6 +244,7 @@ CREATE INDEX IF NOT EXISTS cod_events_owner_cursor_idx ON cod_events(tenant_id, 
 CREATE INDEX IF NOT EXISTS cod_audit_owner_created_idx ON cod_audit(tenant_id, user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS cod_payment_orders_owner_created_idx ON cod_payment_orders(tenant_id, user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS cod_credit_grants_owner_expiry_idx ON cod_credit_grants(tenant_id, user_id, expires_at);
+CREATE INDEX IF NOT EXISTS cod_compute_requests_owner_created_idx ON cod_compute_requests(tenant_id, user_id, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS cod_payment_orders_provider_payment_idx ON cod_payment_orders(channel, provider_payment_id) WHERE provider_payment_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS cod_payment_orders_provider_event_idx ON cod_payment_orders(provider_event_id) WHERE provider_event_id IS NOT NULL;
 `;
@@ -251,6 +263,10 @@ const parseGrantAllocations = (value: unknown): GrantAllocation[] => Array.isArr
   return grantId && Number.isInteger(amountCents) && amountCents > 0 ? [{ grantId, amountCents }] : [];
 }) : [];
 const paymentOrderFromRow = (row: Record<string, unknown>): PaymentOrder => ({ id: String(row.id), amountCents: Number(row.amount_cents), currency: 'CNY', channel: row.channel as PaymentOrder['channel'], status: row.status as PaymentOrder['status'], providerPaymentId: row.provider_payment_id ? String(row.provider_payment_id) : null, createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString() });
+const computeRequestFromRow = (row: Record<string, unknown>): ComputeRequest => {
+  const payload = row.payload && typeof row.payload === 'object' ? row.payload as ComputeRequestInput : {} as ComputeRequestInput;
+  return { ...payload, id: String(row.id), email: String(row.email), kind: row.kind as ComputeRequest['kind'], offerId: row.offer_id ? String(row.offer_id) : null, durationHours: payload.durationHours ?? null, termMonths: payload.termMonths ?? null, status: row.status as ComputeRequest['status'], createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString() };
+};
 const deviceFromRow = (row: Record<string, unknown>): DeviceRecord => {
   const lastSeenAt = new Date(String(row.last_seen_at)).toISOString();
   const stale = Date.now() - new Date(lastSeenAt).getTime() > 45_000;
@@ -398,6 +414,17 @@ export class PostgresDatabase implements CodDatabase {
     });
   }
   async releaseUsage(p:Principal,reservationId:string) { await this.transaction(async(client)=>{const reservation=await client.query(`SELECT * FROM cod_usage_reservations WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE`,[reservationId,p.tenantId,p.userId]);if(!reservation.rows[0]||reservation.rows[0].status!=='reserved')return;await this.releaseReservation(client,p,reservation.rows[0],reservationId);}); }
+  async createComputeRequest(p:Principal,input:ComputeRequestInput,idempotencyKey:string) {
+    if(!idempotencyKey||idempotencyKey.length>200)throw new HttpError('Compute request idempotency key is invalid',400,'invalid_idempotency_key');
+    return this.transaction(async(client)=>{
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`compute:${p.tenantId}:${p.userId}:${idempotencyKey}`]);
+      const existing=await client.query('SELECT * FROM cod_compute_requests WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3',[p.tenantId,p.userId,idempotencyKey]);
+      if(existing.rows[0])return computeRequestFromRow(existing.rows[0]);
+      const {rows}=await client.query(`INSERT INTO cod_compute_requests (id,tenant_id,user_id,email,kind,offer_id,payload,idempotency_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,[randomUUID(),p.tenantId,p.userId,p.email,input.kind,input.offerId??null,JSON.stringify(input),idempotencyKey]);
+      return computeRequestFromRow(rows[0]);
+    });
+  }
+  async listComputeRequests(p:Principal) { const {rows}=await this.pool.query('SELECT * FROM cod_compute_requests WHERE tenant_id=$1 AND user_id=$2 ORDER BY created_at DESC LIMIT 100',[p.tenantId,p.userId]);return rows.map(computeRequestFromRow); }
   async listDevices(p: Principal) { const {rows}=await this.pool.query('SELECT * FROM cod_devices WHERE tenant_id=$1 AND user_id=$2 ORDER BY created_at',[p.tenantId,p.userId]); return rows.map(deviceFromRow); }
   async registerDevice(p: Principal,input:Pick<DeviceRecord,'name'|'platform'>) { validateDeviceInput(input); const id=randomUUID(); const {rows}=await this.pool.query(`INSERT INTO cod_devices (id,tenant_id,user_id,name,platform,status,last_seen_at) VALUES ($1,$2,$3,$4,$5,'online',now()) RETURNING *`,[id,p.tenantId,p.userId,input.name.trim().slice(0,100),input.platform]); const device=deviceFromRow(rows[0]); await this.append(p,'device.registered',id,device); return device; }
   async heartbeat(p: Principal,id:string) { const {rows}=await this.pool.query(`UPDATE cod_devices SET status='online',last_seen_at=now() WHERE id=$1 AND tenant_id=$2 AND user_id=$3 RETURNING *`,[id,p.tenantId,p.userId]); if(!rows[0]) throw new HttpError('Device not found',404,'device_not_found'); return deviceFromRow(rows[0]); }

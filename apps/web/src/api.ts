@@ -95,6 +95,22 @@ export interface PaymentOrder {
   updatedAt: string;
 }
 
+export interface ComputeOffer {
+  id: string; title: string; gpuModel: string; gpuMemoryGb: number; gpuCount: number; region: string; provider: string;
+  priceCents: number | null; priceUnit: 'card-hour' | 'server-hour' | 'month' | 'quote'; minimumUnits: number;
+  delivery: string; network: string; availability: 'ready' | 'limited' | 'quote'; verified: boolean; tags: string[];
+}
+
+export interface ComputeRequestInput {
+  kind: 'rental' | 'supply' | 'installment'; offerId?: string | null; company: string; contactName: string; contactPhone: string;
+  city: string; gpuModel: string; quantity: number; durationHours?: number | null; termMonths?: number | null; requirements: string;
+}
+
+export interface ComputeRequest extends ComputeRequestInput {
+  id: string; email: string; offerId: string | null; durationHours: number | null; termMonths: number | null;
+  status: 'submitted' | 'contacting' | 'quoted' | 'closed'; createdAt: string; updatedAt: string;
+}
+
 export class ApiError extends Error {
   constructor(message: string, readonly status: number, readonly code: string) {
     super(message);
@@ -220,6 +236,14 @@ export async function createPaymentOrder(token: string, amountCents: number, cha
 
 export async function getPaymentOrder(token: string, orderId: string): Promise<PaymentOrder> {
   return request(`/api/payment-orders/${encodeURIComponent(orderId)}`, token);
+}
+
+export async function listComputeOffers(): Promise<ComputeOffer[]> { return request('/api/compute/offers'); }
+
+export async function listComputeRequests(token: string): Promise<ComputeRequest[]> { return request('/api/compute/requests', token); }
+
+export async function createComputeRequest(token: string, input: ComputeRequestInput): Promise<ComputeRequest> {
+  return request('/api/compute/requests', token, { method: 'POST', headers: { 'idempotency-key': createClientId() }, body: JSON.stringify(input) });
 }
 
 export async function searchKnowledge(token: string, query: string): Promise<KnowledgeHit[]> {

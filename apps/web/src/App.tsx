@@ -3,15 +3,19 @@ import type { FormEvent, ReactNode } from 'react';
 import {
   ArrowClockwise,
   ArrowSquareOut,
+  Buildings,
   CaretDown,
   ChatCircleDots,
   Check,
   CircleNotch,
   Code,
   Command,
+  CreditCard,
   File,
   Folder,
   GitDiff,
+  Handshake,
+  HardDrives,
   Key,
   Lightning,
   ListChecks,
@@ -24,6 +28,7 @@ import {
   SidebarSimple,
   SignOut,
   Stack,
+  Storefront,
   Sun,
   TerminalWindow,
   UserCircle,
@@ -33,11 +38,14 @@ import {
 import type { DeviceRecord, KnowledgeHit, ProductManifest, TaskStatus, WorkspaceFile } from '@cod/contracts';
 import {
   createRemoteTask,
+  createComputeRequest,
   createClientId,
   getCapabilities,
   getCreditPacks,
   heartbeatDevice,
   listDevices,
+  listComputeOffers,
+  listComputeRequests,
   listLedger,
   listProducts,
   launchProduct,
@@ -55,6 +63,9 @@ import {
   updateRemoteTask,
   type CapabilityReport,
   type CodSession,
+  type ComputeOffer,
+  type ComputeRequest,
+  type ComputeRequestInput,
   type CreditPackState,
   type LedgerEntry,
   type ModelSourceInfo,
@@ -67,7 +78,7 @@ const statusLabels: Record<TaskStatus, string> = {
   draft: '草稿', running: '运行中', waiting: '待确认', complete: '已完成', failed: '失败',
 };
 const emptyProject: ProjectSnapshot = { root: '', files: [], diff: '', selectedFile: null, selectedContent: '' };
-type Overlay = 'login' | 'new-task' | 'account' | 'commands' | 'models' | null;
+type Overlay = 'login' | 'new-task' | 'account' | 'commands' | 'models' | 'compute' | null;
 type AuthState = 'loading' | 'signed-out' | 'signed-in';
 type ColorMode = 'light' | 'dark';
 interface ComparisonResult { sourceId: string; sourceLabel: string; model: string; content: string; inputTokens?: number; outputTokens?: number; durationMs: number; error?: string }
@@ -174,6 +185,49 @@ function ModelLibrary({ sources, error, signedIn, onLogin }: { sources: ModelSou
   </div>;
 }
 
+function ComputeMarket({ offers, requests, signedIn, onLogin, onSubmit }: { offers: ComputeOffer[]; requests: ComputeRequest[]; signedIn: boolean; onLogin: () => void; onSubmit: (input: ComputeRequestInput) => Promise<void> }) {
+  const [tab, setTab] = useState<ComputeRequestInput['kind']>('rental');
+  const [offerId, setOfferId] = useState(offers[0]?.id ?? '');
+  const [company, setCompany] = useState('');
+  const [contactName, setContactName] = useState('');
+  const [contactPhone, setContactPhone] = useState('');
+  const [city, setCity] = useState('');
+  const [gpuModel, setGpuModel] = useState(offers[0]?.gpuModel ?? 'NVIDIA H100 80GB');
+  const [quantity, setQuantity] = useState(1);
+  const [durationHours, setDurationHours] = useState(100);
+  const [termMonths, setTermMonths] = useState(24);
+  const [requirements, setRequirements] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  const selectedOffer = offers.find((offer) => offer.id === offerId) ?? offers[0];
+  const unitLabel: Record<ComputeOffer['priceUnit'], string> = { 'card-hour': '卡时', 'server-hour': '整机时', month: '月', quote: '询价' };
+  const statusLabel: Record<ComputeRequest['status'], string> = { submitted: '已提交', contacting: '联系中', quoted: '已报价', closed: '已关闭' };
+  const chooseOffer = (offer: ComputeOffer) => { setTab('rental'); setOfferId(offer.id); setGpuModel(offer.gpuModel); setQuantity(offer.gpuCount); setDurationHours(offer.minimumUnits); };
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!signedIn) { onLogin(); return; }
+    setSubmitting(true); setError('');
+    try {
+      await onSubmit({ kind: tab, offerId: tab === 'rental' ? selectedOffer?.id ?? null : null, company, contactName, contactPhone, city, gpuModel, quantity, durationHours: tab === 'rental' ? durationHours : null, termMonths: tab === 'installment' ? termMonths : null, requirements });
+      setRequirements('');
+    } catch (nextError) { setError(nextError instanceof Error ? nextError.message : '提交失败，请稍后重试'); }
+    finally { setSubmitting(false); }
+  };
+  return <div className="compute-market">
+    <section className="compute-hero"><div><span className="eyebrow">COD COMPUTE EXCHANGE</span><h2>把 GPU 变成可交易的卡时</h2><p>机房直供 H100，同时开放闲置算力上架、企业求购和显卡分期申请。首版由人工核验库存、网络与交付窗口，确认后报价成交。</p></div><div className="compute-hero-metrics"><span><strong>H100</strong><small>机房直供</small></span><span><strong>卡时</strong><small>按需起租</small></span><span><strong>SLA</strong><small>成交前确认</small></span></div></section>
+    <div className="compute-offers">{offers.map((offer) => <article className={selectedOffer?.id === offer.id && tab === 'rental' ? 'selected' : ''} key={offer.id}><header><span className={offer.availability}>{offer.availability === 'ready' ? '可预约' : offer.availability === 'limited' ? '库存紧张' : '企业询价'}</span>{offer.verified && <i><ShieldCheck weight="fill" /> 已核验</i>}</header><HardDrives weight="duotone" /><h3>{offer.title}</h3><p>{offer.gpuModel} · {offer.gpuCount} 卡 · {offer.gpuMemoryGb}GB/卡</p><strong>{offer.priceCents === null ? '企业询价' : `¥${(offer.priceCents / 100).toFixed(2)}`}<small>{offer.priceCents === null ? '' : ` / ${unitLabel[offer.priceUnit]}起`}</small></strong><dl><div><dt>区域</dt><dd>{offer.region}</dd></div><div><dt>交付</dt><dd>{offer.delivery}</dd></div><div><dt>网络</dt><dd>{offer.network}</dd></div></dl><footer>{offer.tags.map((tag) => <span key={tag}>{tag}</span>)}</footer><button onClick={() => chooseOffer(offer)}>预约锁卡</button></article>)}</div>
+    <section className="compute-deal"><nav aria-label="算力业务类型"><button className={tab === 'rental' ? 'active' : ''} onClick={() => setTab('rental')}><HardDrives />租算力</button><button className={tab === 'supply' ? 'active' : ''} onClick={() => setTab('supply')}><Storefront />上架闲置卡</button><button className={tab === 'installment' ? 'active' : ''} onClick={() => setTab('installment')}><CreditCard />显卡分期</button></nav><form onSubmit={submit}>
+      <div className="compute-form-head"><div>{tab === 'rental' ? <HardDrives /> : tab === 'supply' ? <Buildings /> : <Handshake />}</div><span><strong>{tab === 'rental' ? '提交租赁需求' : tab === 'supply' ? '成为算力供方' : '申请设备融资方案'}</strong><small>{tab === 'rental' ? '确认库存与交付环境后出具正式报价' : tab === 'supply' ? '机房、卡况、网络与产权核验通过后上架' : 'COD 仅撮合申请，不自行授信或放款'}</small></span></div>
+      {tab === 'rental' && <label className="compute-wide">算力商品<select aria-label="算力商品" value={selectedOffer?.id ?? ''} onChange={(event) => { const offer = offers.find((item) => item.id === event.target.value); if (offer) chooseOffer(offer); }}>{offers.map((offer) => <option key={offer.id} value={offer.id}>{offer.title} · {offer.priceCents === null ? '询价' : `¥${(offer.priceCents / 100).toFixed(2)}/${unitLabel[offer.priceUnit]}`}</option>)}</select></label>}
+      <label>企业 / 团队<input aria-label="企业或团队" value={company} onChange={(event) => setCompany(event.target.value)} required minLength={2} maxLength={120} placeholder="公司或团队名称" /></label><label>联系人<input aria-label="联系人" value={contactName} onChange={(event) => setContactName(event.target.value)} required maxLength={60} /></label><label>手机 / 微信<input aria-label="手机或微信" value={contactPhone} onChange={(event) => setContactPhone(event.target.value)} required pattern="[0-9+()\-\s]{6,40}" placeholder="用于确认报价" /></label><label>所在城市<input aria-label="所在城市" value={city} onChange={(event) => setCity(event.target.value)} required maxLength={80} /></label>
+      <label>GPU 型号<input aria-label="GPU 型号" value={gpuModel} onChange={(event) => setGpuModel(event.target.value)} required maxLength={100} /></label><label>卡数<input aria-label="卡数" type="number" min={1} max={4096} value={quantity} onChange={(event) => setQuantity(Number(event.target.value))} required /></label>{tab === 'rental' && <label>预计卡时<input aria-label="预计卡时" type="number" min={1} max={1000000} value={durationHours} onChange={(event) => setDurationHours(Number(event.target.value))} required /></label>}{tab === 'installment' && <label>期数<select aria-label="分期期数" value={termMonths} onChange={(event) => setTermMonths(Number(event.target.value))}><option value={12}>12 个月</option><option value={24}>24 个月</option><option value={36}>36 个月</option></select></label>}
+      <label className="compute-wide">需求说明<textarea aria-label="需求说明" value={requirements} onChange={(event) => setRequirements(event.target.value)} maxLength={2000} placeholder={tab === 'rental' ? '训练框架、镜像、存储、带宽、开始时间…' : tab === 'supply' ? '机房位置、卡况、服务器配置、可售时段…' : '设备配置、预算、首付能力、发票与交付要求…'} /></label>
+      {tab === 'installment' && <div className="compute-compliance compute-wide"><ShieldCheck /> 融资租赁申请将由具备相应资质的合作机构独立审核并签署书面合同；提交申请不代表授信通过。</div>}{error && <div className="notice error compute-wide">{error}</div>}<button className="primary-button compute-wide" disabled={submitting}>{submitting ? <CircleNotch className="spin" /> : <PaperPlaneTilt weight="fill" />}{signedIn ? '提交并等待报价' : '登录后提交需求'}</button>
+    </form></section>
+    {requests.length > 0 && <section className="compute-requests"><header><strong>我的需求</strong><small>商务确认后状态会更新</small></header>{requests.map((request) => <div key={request.id}><span><strong>{request.kind === 'rental' ? '算力租赁' : request.kind === 'supply' ? '供方上架' : '显卡分期'} · {request.gpuModel}</strong><small>{request.quantity} 卡{request.durationHours ? ` · ${request.durationHours} 卡时` : ''}{request.termMonths ? ` · ${request.termMonths} 个月` : ''} · {formatTime(request.createdAt)}</small></span><i className={request.status}>{statusLabel[request.status]}</i></div>)}</section>}
+  </div>;
+}
+
 export function App() {
   const [colorMode, setColorMode] = useState<ColorMode>(initialColorMode);
   const [authState, setAuthState] = useState<AuthState>('loading');
@@ -191,6 +245,8 @@ export function App() {
   const [compareEnabled, setCompareEnabled] = useState(false);
   const [compareModelKeys, setCompareModelKeys] = useState<string[]>([]);
   const [products, setProducts] = useState<ProductManifest[]>([]);
+  const [computeOffers, setComputeOffers] = useState<ComputeOffer[]>([]);
+  const [computeRequests, setComputeRequests] = useState<ComputeRequest[]>([]);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [targetDeviceId, setTargetDeviceId] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
@@ -223,6 +279,13 @@ export function App() {
     document.querySelector('meta[name="theme-color"]')?.setAttribute('content', colorMode === 'dark' ? '#0b1416' : '#fbfdfd');
     storageSet('kai.color-mode.v1', colorMode);
   }, [colorMode]);
+
+  useEffect(() => { listComputeOffers().then(setComputeOffers).catch(() => setComputeOffers([])); }, []);
+
+  useEffect(() => {
+    if (!session) { setComputeRequests([]); return; }
+    listComputeRequests(session.token).then(setComputeRequests).catch(() => setComputeRequests([]));
+  }, [session]);
 
   const activeTask = useMemo(() => tasks.find((task) => task.id === activeTaskId) ?? null, [tasks, activeTaskId]);
   const selectedSource = session?.sources.find((source) => source.id === selectedSourceId) ?? session?.sources[0] ?? null;
@@ -338,6 +401,10 @@ export function App() {
     try{const result=await purchaseCreditPack(session.token,packId);setSession({...session,account:result.account});setCreditPacks((current)=>({...current,summary:result.summary}));setLedger(await listLedger(session.token));setNotice(`${result.grant.name} 已到账，有效至 ${new Date(result.grant.expiresAt).toLocaleDateString('zh-CN')}。`);}
     catch(error){setNotice(error instanceof Error?error.message:'购买额度包失败');}
     finally{setPurchasingPackId('');}
+  };
+  const handleComputeRequest = async (input:ComputeRequestInput) => {
+    if(!session){setOverlay('login');return;}
+    const created=await createComputeRequest(session.token,input);setComputeRequests((current)=>[created,...current.filter((item)=>item.id!==created.id)]);setNotice('需求已提交，商务确认库存和交付条件后会联系你。');
   };
   const handleSourceChange = (sourceId: string) => {
     if (!session) return;
@@ -485,7 +552,7 @@ export function App() {
   });
 
   return <div className={`app-shell${inspectorOpen ? '' : ' inspector-hidden'}`}>
-    <aside className="rail"><Brand /><div className="rail-actions"><button className={`icon-button ${mode === 'code' ? 'active' : ''}`} title="任务" onClick={() => { setMode('code'); setSidebarOpen(true); }}><ListChecks weight="fill" /></button><button className={`icon-button ${mode === 'chat' ? 'active' : ''}`} title="普通对话" onClick={() => setMode('chat')}><ChatCircleDots /></button><button className="icon-button" title="模型库" onClick={() => setOverlay('models')}><Stack /></button><button className="icon-button" title="命令面板" onClick={() => setOverlay('commands')}><Command /></button>{products.map((product) => <button className="icon-button" title={product.name} key={product.id} onClick={() => void handleProductLaunch(product)}><ArrowSquareOut /></button>)}</div><div className="rail-footer"><ThemeToggle colorMode={colorMode} onChange={setColorMode} /><button className="icon-button" title={session ? '账户' : '登录'} onClick={() => setOverlay(session ? 'account' : 'login')}><UserCircle /></button></div></aside>
+    <aside className="rail"><Brand /><div className="rail-actions"><button className={`icon-button ${mode === 'code' ? 'active' : ''}`} title="任务" onClick={() => { setMode('code'); setSidebarOpen(true); }}><ListChecks weight="fill" /></button><button className={`icon-button ${mode === 'chat' ? 'active' : ''}`} title="普通对话" onClick={() => setMode('chat')}><ChatCircleDots /></button><button className="icon-button compute-entry" title="算力市场" onClick={() => setOverlay('compute')}><Storefront weight="fill" /></button><button className="icon-button" title="模型库" onClick={() => setOverlay('models')}><Stack /></button><button className="icon-button" title="命令面板" onClick={() => setOverlay('commands')}><Command /></button>{products.map((product) => <button className="icon-button" title={product.name} key={product.id} onClick={() => void handleProductLaunch(product)}><ArrowSquareOut /></button>)}</div><div className="rail-footer"><ThemeToggle colorMode={colorMode} onChange={setColorMode} /><button className="icon-button" title={session ? '账户' : '登录'} onClick={() => setOverlay(session ? 'account' : 'login')}><UserCircle /></button></div></aside>
     {sidebarOpen && <button className="sidebar-scrim" aria-label="关闭任务栏" onClick={() => setSidebarOpen(false)} />}
     <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}><div className="sidebar-head"><div><small>工作区</small><strong>{mode === 'code' ? '代码任务' : '对话'}</strong></div><button className="new-task" onClick={() => setOverlay(session ? 'new-task' : 'login')}><Plus weight="bold" /> 新任务</button></div><div className="search"><MagnifyingGlass /><input aria-label="搜索任务" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="搜索任务或状态" /></div><TaskList tasks={filteredTasks} devices={devices} activeId={activeTaskId} onSelect={(id) => { setActiveTaskId(id); setSidebarOpen(false); }} /><div className="sidebar-bottom">{notice && <div className="remote-notice">{notice}</div>}<button className="project-switch" onClick={handleOpenProject}><span className="project-icon"><Folder weight="fill" /></span><span><small>当前项目</small><strong>{projectName}</strong></span><CaretDown /></button><div className="balance-preview"><Lightning weight="fill" /><span><small>可用使用额度</small><strong>{session ? `¥ ${((session.account.balanceCents + creditPacks.summary.availableCents) / 100).toFixed(2)}` : '登录后查看'}</strong></span><button onClick={() => setOverlay(session ? 'account' : 'login')}>{session ? '额度包' : '登录'}</button></div></div></aside>
     <main className="workspace"><header className="workspace-header"><div className="task-heading"><button className="mobile-only icon-button" title="打开任务栏" onClick={() => setSidebarOpen(true)}><SidebarSimple /></button><div><h1>{activeTask?.title ?? (session ? '新建或选择任务' : '新对话')}</h1><p>{project.root || (authState === 'loading' ? '正在连接 COD…' : session ? 'Web 远程工作区' : '输入消息即可开始')}</p></div></div><div className="header-actions">{activeTask && <span className={`header-status ${activeTask.status}`}>{statusLabels[activeTask.status]}</span>}<div className="mode-switch" aria-label="工作模式"><button className={mode === 'code' ? 'active' : ''} onClick={() => setMode('code')}><Code /> 代码</button><button className={mode === 'chat' ? 'active' : ''} onClick={() => setMode('chat')}><ChatCircleDots /> 对话</button></div><select className="source-picker" aria-label="模型源" value={selectedSource?.id ?? ''} onChange={(event) => handleSourceChange(event.target.value)} disabled={!session}><option value="">{authState === 'loading' ? '正在连接…' : '登录后选择模型源'}</option>{session?.sources.map((source) => <option key={source.id} value={source.id}>{source.label} · {source.callable ? '已连接' : source.status === 'catalog' ? '目录' : '不可用'}</option>)}</select><select className="model-picker" aria-label="模型" value={selectedModelInfo?.id ?? ''} onChange={(event) => handleModelChange(event.target.value)} disabled={!session || !sourceModels.length}><option value="">登录后选择模型</option>{sourceModels.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}</select><button className={`icon-button inspector-toggle${inspectorOpen ? ' active' : ''}`} title={inspectorOpen ? '隐藏右侧面板' : '显示右侧面板'} onClick={toggleInspector}><SidebarSimple /></button></div></header>
@@ -502,6 +569,7 @@ export function App() {
     {inspectorOpen && <aside className="inspector"><div className="inspector-tabs"><button className={inspectorTab === 'changes' ? 'active' : ''} onClick={() => setInspectorTab('changes')}><GitDiff /> 改动</button><button className={inspectorTab === 'files' ? 'active' : ''} onClick={() => setInspectorTab('files')}><Folder /> 文件</button><button className={inspectorTab === 'terminal' ? 'active' : ''} onClick={() => setInspectorTab('terminal')}><TerminalWindow /> 终端</button><button className="inspector-close" title="隐藏右侧面板" onClick={toggleInspector}><X /></button></div><div className="inspector-body">{inspectorTab === 'changes' && <><div className="panel-title"><span><GitDiff /> 未提交改动</span><button title="刷新" onClick={refreshProject}><ArrowClockwise /></button></div>{project.root ? <CodeBlock text={project.diff || '当前项目没有未提交改动。'} /> : <div className="panel-empty">Web 端不伪造 Diff。请在 COD Desktop 中选择本机项目。</div>}</>}{inspectorTab === 'files' && <>{project.root ? <><div className="panel-title"><span><Folder /> 项目文件</span><small>{project.files.length}</small></div><FileTree files={project.files} selected={project.selectedFile} onSelect={handleFileSelect} />{project.selectedFile && <div className="file-preview"><strong>{project.selectedFile}</strong><CodeBlock text={project.selectedContent} /></div>}</> : <div className="panel-empty">本机文件仅在 COD Desktop 中可用。</div>}</>}{inspectorTab === 'terminal' && <>{window.codDesktop && project.root ? <><div className="panel-title"><span><TerminalWindow /> 本地终端</span><small>desktop</small></div><div className="terminal"><pre>{terminalOutput}</pre><div className="terminal-command"><span>$</span><input aria-label="终端命令" value={command} onChange={(event) => setCommand(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && handleRun()} /><button onClick={handleRun}>运行</button></div></div></> : <div className="panel-empty">Web 端不会执行或伪造终端结果。请使用 COD Desktop。</div>}</>}</div></aside>}
     {overlay === 'login' && <Modal title={pendingSend ? '登录后继续' : '登录 COD'} onClose={() => { setPendingSend(null); setOverlay(null); }}><LoginForm capabilities={capabilities} capabilityError={capabilityError} resumeConversation={Boolean(pendingSend)} onLogin={handleLogin} /></Modal>}
     {overlay === 'models' && <Modal title="模型库" wide onClose={() => setOverlay(null)}><ModelLibrary sources={modelCatalog} error={modelCatalogError} signedIn={Boolean(session)} onLogin={() => setOverlay('login')} /></Modal>}
+    {overlay === 'compute' && <Modal title="COD 算力市场 · 机房直供 / 卡时 / 分期" wide onClose={() => setOverlay(null)}><ComputeMarket offers={computeOffers} requests={computeRequests} signedIn={Boolean(session)} onLogin={() => setOverlay('login')} onSubmit={handleComputeRequest} /></Modal>}
     {overlay === 'new-task' && session && <Modal title="新建任务" onClose={() => setOverlay(null)}><form className="modal-form" onSubmit={handleCreateTask}><label>任务标题<input aria-label="任务标题" value={newTaskTitle} onChange={(event) => setNewTaskTitle(event.target.value)} placeholder="例如：审计登录流程" required autoFocus /></label><label>目标设备<select aria-label="目标设备" value={targetDeviceId} onChange={(event) => setTargetDeviceId(event.target.value)} required>{devices.map((device) => <option key={device.id} value={device.id}>{device.name} · {device.status}</option>)}</select></label><button className="primary-button" disabled={!newTaskTitle.trim() || !targetDeviceId}><Plus /> 创建并同步</button></form></Modal>}
     {overlay === 'account' && session && <Modal title="钱包与额度包" wide onClose={() => setOverlay(null)}><div className="account-panel">
       <div className="balance-grid"><div className="account-balance"><small>钱包余额 · 永久有效</small><strong>¥ {(session.account.balanceCents / 100).toFixed(2)}</strong><span>{session.account.displayName} · {session.account.plan}</span></div><div className="account-balance credit"><small>可用使用额度 · 优先扣减</small><strong>¥ {(creditPacks.summary.availableCents / 100).toFixed(2)}</strong><span>{creditPacks.summary.grants.filter((grant) => grant.status === 'active').length} 个有效批次</span></div></div>
@@ -511,6 +579,6 @@ export function App() {
       {capabilities?.payments.topupEnabled && <div className="topup-panel"><div><strong>预存试点钱包</strong><small>仅用于本轮产品与计费闭环测试，不代表真实支付已到账。</small></div><div><button onClick={() => handleTopup(1000)}>+ ¥10</button><button onClick={() => handleTopup(5000)}>+ ¥50</button><button onClick={() => handleTopup(10000)}>+ ¥100</button></div></div>}
       <div className="ledger"><header><strong>最近流水</strong><button onClick={refreshWallet}><ArrowClockwise /> 刷新</button></header>{ledger.length ? ledger.map((entry) => <div key={entry.id}><span>{entry.type === 'usage' ? `${entry.model ?? '模型'} 用量` : entry.type === 'pack_purchase' ? `购买 ${entry.reference}` : entry.type === 'trial_credit' ? '新用户试用金' : entry.type === 'credit_grant' ? `${entry.reference} 到账` : '钱包预存'}<small>{entry.paymentDirection ?? entry.reference} · {formatTime(entry.createdAt)}{entry.type === 'usage' && entry.creditAmountCents !== 0 ? ` · 额度包 ¥${Math.abs(entry.creditAmountCents / 100).toFixed(2)}` : ''}{entry.type === 'usage' && entry.walletAmountCents !== 0 ? ` · 钱包 ¥${Math.abs(entry.walletAmountCents / 100).toFixed(2)}` : ''}</small></span><strong className={entry.amountCents < 0 ? 'negative' : 'positive'}>{entry.amountCents > 0 ? '+' : ''}¥ {(entry.amountCents / 100).toFixed(2)}</strong></div>) : <p>暂无流水</p>}</div><button className="secondary-button" onClick={handleLogout}><SignOut /> 退出登录</button>
     </div></Modal>}
-    {overlay === 'commands' && <Modal title="命令面板" onClose={() => setOverlay(null)}><div className="command-list"><button onClick={() => setOverlay(session ? 'new-task' : 'login')}><Plus /><span><strong>新建任务</strong><small>创建并同步到设备</small></span></button><button onClick={() => { setMode('code'); setOverlay(null); }}><Code /><span><strong>代码模式</strong><small>进入项目与 Agent 工作区</small></span></button><button onClick={() => { setMode('chat'); setOverlay(null); }}><ChatCircleDots /><span><strong>普通对话</strong><small>使用选定模型提问</small></span></button><button onClick={() => setOverlay('models')}><Stack /><span><strong>模型库</strong><small>查看可用模型与每百万 Token 价格</small></span></button><button onClick={() => { setInspectorTab('terminal'); setOverlay(null); }}><TerminalWindow /><span><strong>打开终端</strong><small>{hasDesktopBridge() ? '运行受控本机命令' : '仅桌面端可用'}</small></span></button><button onClick={() => setOverlay(session ? 'account' : 'login')}><UserCircle /><span><strong>账户与服务状态</strong><small>余额、流水和接入状态</small></span></button></div></Modal>}
+    {overlay === 'commands' && <Modal title="命令面板" onClose={() => setOverlay(null)}><div className="command-list"><button onClick={() => setOverlay(session ? 'new-task' : 'login')}><Plus /><span><strong>新建任务</strong><small>创建并同步到设备</small></span></button><button onClick={() => { setMode('code'); setOverlay(null); }}><Code /><span><strong>代码模式</strong><small>进入项目与 Agent 工作区</small></span></button><button onClick={() => { setMode('chat'); setOverlay(null); }}><ChatCircleDots /><span><strong>普通对话</strong><small>使用选定模型提问</small></span></button><button onClick={() => setOverlay('compute')}><Storefront /><span><strong>算力市场</strong><small>H100 卡时、闲置卡撮合与设备分期申请</small></span></button><button onClick={() => setOverlay('models')}><Stack /><span><strong>模型库</strong><small>查看可用模型与每百万 Token 价格</small></span></button><button onClick={() => { setInspectorTab('terminal'); setOverlay(null); }}><TerminalWindow /><span><strong>打开终端</strong><small>{hasDesktopBridge() ? '运行受控本机命令' : '仅桌面端可用'}</small></span></button><button onClick={() => setOverlay(session ? 'account' : 'login')}><UserCircle /><span><strong>账户与服务状态</strong><small>余额、流水和接入状态</small></span></button></div></Modal>}
   </div>;
 }

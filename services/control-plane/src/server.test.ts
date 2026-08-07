@@ -131,6 +131,30 @@ describe('control-plane production rules', () => {
     expect(await conflict.json()).toMatchObject({ error: 'source_conflict' });
   });
 
+  it('publishes H100 offers and stores validated compute-market requests idempotently', async () => {
+    const { base, database } = await start();
+    const offersResponse = await fetch(`${base}/api/compute/offers`);
+    expect(offersResponse.status).toBe(200);
+    const offers = await offersResponse.json() as Array<{ id: string; gpuModel: string; priceUnit: string }>;
+    expect(offers).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'cod-h100-pcie-card-hour', gpuModel: expect.stringContaining('H100'), priceUnit: 'card-hour' })]));
+    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com' }) });
+    const { token, user } = await login.json() as { token: string; user: { id: string; email: string } };
+    const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'idempotency-key': 'compute-rental-1' };
+    const body = JSON.stringify({ kind: 'rental', offerId: 'cod-h100-pcie-card-hour', company: 'KAI 科技', contactName: 'Kai', contactPhone: '13800138000', city: '上海', gpuModel: 'NVIDIA H100 PCIe 80GB', quantity: 2, durationHours: 100, requirements: '用于模型微调' });
+    const first = await fetch(`${base}/api/compute/requests`, { method: 'POST', headers, body });
+    const second = await fetch(`${base}/api/compute/requests`, { method: 'POST', headers, body });
+    expect(first.status).toBe(201); expect(second.status).toBe(201);
+    const created = await first.json() as { id: string; status: string; quantity: number };
+    expect(await second.json()).toMatchObject({ id: created.id });
+    expect(created).toMatchObject({ status: 'submitted', quantity: 2 });
+    const listed = await (await fetch(`${base}/api/compute/requests`, { headers: { authorization: `Bearer ${token}` } })).json() as Array<{ id: string }>;
+    expect(listed).toHaveLength(1); expect(listed[0]?.id).toBe(created.id);
+    const invalid = await fetch(`${base}/api/compute/requests`, { method: 'POST', headers: { ...headers, 'idempotency-key': 'compute-invalid' }, body: JSON.stringify({ ...JSON.parse(body), contactPhone: 'x' }) });
+    expect(invalid.status).toBe(400);
+    const principal = { userId: user.id, tenantId: 'tenant_kai_com', email: user.email, role: 'member' as const };
+    expect((await database.listAudit(principal, 10)).some((entry) => entry.action === 'compute.request.created')).toBe(true);
+  });
+
   it('exposes readiness, version, and Prometheus metrics', async () => {
     const { base } = await start();
     expect(await (await fetch(`${base}/ready`)).json()).toMatchObject({ status: 'ready', database: 'memory' });

@@ -79,6 +79,28 @@ describe('COD workspace', () => {
     expect(within(dialog).getByRole('button', { name: '登录后使用模型' })).toBeInTheDocument();
   });
 
+  it('shows the H100 card-hour market and keeps financing as a compliant application flow', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/capabilities')) return json(capabilities);
+      if (url.endsWith('/api/model-catalog')) return json([]);
+      if (url.endsWith('/api/compute/offers')) return json([{ id: 'cod-h100-pcie-card-hour', title: 'H100 80GB 单卡算力', gpuModel: 'NVIDIA H100 PCIe 80GB', gpuMemoryGb: 80, gpuCount: 1, region: '国内合规机房', provider: 'COD 机房直供', priceCents: 1880, priceUnit: 'card-hour', minimumUnits: 10, delivery: '人工确认后开通', network: '按需报价', availability: 'ready', verified: true, tags: ['按卡时'] }]);
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<App />);
+    await screen.findByRole('heading', { name: '新对话' });
+    fireEvent.click(screen.getByTitle('算力市场'));
+    const dialog = await screen.findByRole('dialog', { name: 'COD 算力市场 · 机房直供 / 卡时 / 分期' });
+    expect(within(dialog).getByText('H100 80GB 单卡算力')).toBeInTheDocument();
+    expect(within(dialog).getByText('¥18.80')).toBeInTheDocument();
+    expect(within(dialog).getByText('/ 卡时起')).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: /显卡分期/ }));
+    expect(within(dialog).getByText(/COD 仅撮合申请，不自行授信或放款/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/具备相应资质的合作机构独立审核/)).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: '登录后提交需求' })).toBeInTheDocument();
+  });
+
   it('persists the KAI semantic color mode', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => json(capabilities)));
     render(<App />);
