@@ -9,10 +9,12 @@ const samples: KnowledgeHit[] = [
 ];
 
 export class KnowledgeAdapter {
+  private readonly conversationIds = new Map<string, string>();
+
   constructor(private readonly config: ControlPlaneConfig) {}
 
   mode(): 'live' | 'demo' {
-    return this.config.wikiSearchEndpoint && this.config.wikiApiKey ? 'live' : 'demo';
+    return this.config.wikiSearchEndpoint ? 'live' : 'demo';
   }
 
   async search(query: string, principal?: Principal): Promise<KnowledgeHit[]> {
@@ -20,47 +22,89 @@ export class KnowledgeAdapter {
     if (!normalized) return [];
     const endpoint = this.config.wikiSearchEndpoint;
     const apiKey = this.config.wikiApiKey;
-    if (!endpoint || !apiKey) {
+    if (!endpoint) {
       return samples.filter((item) => `${item.title}${item.excerpt}`.toLowerCase().includes(normalized.toLowerCase()));
     }
+    const wikiUrl = this.resolveEndpoint(endpoint);
+    const conversationKey = principal ? `${principal.tenantId}:${principal.userId}` : null;
     let response: Response;
     try {
-      response = await fetch(new URL(endpoint, this.config.wikiBaseUrl), {
+      response = await fetch(wikiUrl, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          authorization: `Bearer ${apiKey}`,
+          ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
           ...(principal ? { 'x-cod-tenant-id': principal.tenantId, 'x-cod-user-id': principal.userId } : {}),
         },
-        body: JSON.stringify({ query: normalized.slice(0, 2_000), limit: 8, tenantId: principal?.tenantId, userId: principal?.userId }),
+        body: JSON.stringify({
+          message: normalized.slice(0, 2_000),
+          conversation_id: conversationKey ? this.conversationIds.get(conversationKey) ?? null : null,
+          language: 'zh-CN',
+        }),
         signal: AbortSignal.timeout(15_000),
       });
     } catch {
       throw new HttpError('KAI Wiki is unavailable', 502, 'wiki_unavailable');
     }
     if (!response.ok) throw new HttpError(`KAI Wiki search failed: ${response.status}`, 502, 'wiki_upstream_error');
-    return normalizeKnowledgeHits(await response.json());
+    const raw = await readJsonResponse(response);
+    const result = normalizePublicChatResponse(raw, this.config.wikiBaseUrl);
+    if (conversationKey && result.conversationId) {
+      if (this.conversationIds.size >= 10_000 && !this.conversationIds.has(conversationKey)) this.conversationIds.clear();
+      this.conversationIds.set(conversationKey, result.conversationId);
+    }
+    return [result.hit];
+  }
+
+  private resolveEndpoint(endpoint: string): URL {
+    let baseUrl: URL;
+    let wikiUrl: URL;
+    try {
+      baseUrl = new URL(this.config.wikiBaseUrl);
+      wikiUrl = new URL(endpoint, baseUrl);
+    } catch {
+      throw new HttpError('KAI Wiki endpoint is invalid', 502, 'wiki_invalid_endpoint');
+    }
+    if (baseUrl.protocol !== 'https:' || wikiUrl.protocol !== 'https:' || wikiUrl.origin !== baseUrl.origin) {
+      throw new HttpError('KAI Wiki endpoint must use the configured HTTPS origin', 502, 'wiki_invalid_endpoint');
+    }
+    return wikiUrl;
   }
 }
 
-function normalizeKnowledgeHits(raw: unknown): KnowledgeHit[] {
-  let rows: unknown = raw;
-  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-    const envelope = raw as Record<string, unknown>;
-    rows = envelope.data ?? envelope.hits ?? envelope.results ?? [];
+async function readJsonResponse(response: Response): Promise<unknown> {
+  const contentLength = Number(response.headers.get('content-length') ?? 0);
+  if (Number.isFinite(contentLength) && contentLength > 1_000_000) {
+    throw new HttpError('KAI Wiki returned an oversized response', 502, 'wiki_invalid_response');
   }
-  if (!Array.isArray(rows)) throw new HttpError('KAI Wiki returned an invalid response', 502, 'wiki_invalid_response');
-  return rows.slice(0, 8).flatMap((row, index): KnowledgeHit[] => {
-    if (!row || typeof row !== 'object') return [];
-    const item = row as Record<string, unknown>;
-    const title = String(item.title ?? item.name ?? '').trim().slice(0, 300);
-    const excerpt = String(item.excerpt ?? item.snippet ?? item.content ?? '').trim().slice(0, 2_000);
-    const rawUrl = String(item.url ?? item.link ?? '').trim();
-    const score = Number(item.score ?? item.relevance ?? 0);
-    if (!title || !excerpt || !Number.isFinite(score)) return [];
-    let url: URL;
-    try { url = new URL(rawUrl); } catch { return []; }
-    if (url.protocol !== 'https:') return [];
-    return [{ id: String(item.id ?? item.document_id ?? `wiki-${index}`).slice(0, 200), title, excerpt, url: url.toString(), score }];
-  });
+  const text = await response.text();
+  if (text.length > 1_000_000) throw new HttpError('KAI Wiki returned an oversized response', 502, 'wiki_invalid_response');
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new HttpError('KAI Wiki returned an invalid response', 502, 'wiki_invalid_response');
+  }
+}
+
+function normalizePublicChatResponse(raw: unknown, wikiBaseUrl: string): { hit: KnowledgeHit; conversationId: string | null } {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new HttpError('KAI Wiki returned an invalid response', 502, 'wiki_invalid_response');
+  }
+  const item = raw as Record<string, unknown>;
+  const answer = typeof item.answer === 'string' ? item.answer.trim().slice(0, 20_000) : '';
+  const conversationId = typeof item.conversation_id === 'string' ? item.conversation_id.trim().slice(0, 200) : '';
+  const executionId = typeof item.execution_id === 'string' ? item.execution_id.trim().slice(0, 200) : '';
+  if (!answer || !conversationId) {
+    throw new HttpError('KAI Wiki returned an invalid response', 502, 'wiki_invalid_response');
+  }
+  return {
+    hit: {
+      id: executionId || conversationId,
+      title: '期算知识库回答',
+      excerpt: answer.slice(0, 2_000),
+      url: new URL(wikiBaseUrl).toString(),
+      score: 1,
+    },
+    conversationId,
+  };
 }

@@ -12,15 +12,45 @@ describe('KnowledgeAdapter', () => {
     expect(await new KnowledgeAdapter(loadConfig({})).search('unrelated phrase')).toEqual([]);
   });
 
-  it('normalizes live results, propagates tenant identity, and drops unsafe links', async () => {
-    const fetcher = vi.fn(async () => Response.json({ results: [
-      { document_id: 'doc-1', name: '权限规范', snippet: '仅返回当前租户内容', link: 'https://wiki.kai.com/doc-1', relevance: 0.91 },
-      { id: 'unsafe', title: 'unsafe', excerpt: 'bad', url: 'javascript:alert(1)', score: 1 },
-    ] }));
+  it('normalizes public chat answers and continues conversations without an API key', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(Response.json({
+        answer: '期算是标准化模型服务容量产品。',
+        conversation_id: 'conversation-1',
+        execution_id: 'execution-1',
+        created_at: '2026-08-07T00:00:00Z',
+      }))
+      .mockResolvedValueOnce(Response.json({
+        answer: '它使用 TPM 计量。',
+        conversation_id: 'conversation-1',
+        execution_id: 'execution-2',
+        created_at: '2026-08-07T00:00:01Z',
+      }));
     vi.stubGlobal('fetch', fetcher);
-    const adapter = new KnowledgeAdapter(loadConfig({ NODE_ENV: 'test', KAI_WIKI_SEARCH_ENDPOINT: '/api/search', KAI_WIKI_API_KEY: 'wiki-key' }));
-    const hits = await adapter.search('权限', { userId: 'user-1', tenantId: 'tenant-1', email: 'user@kai.com', role: 'member' });
-    expect(hits).toEqual([{ id: 'doc-1', title: '权限规范', excerpt: '仅返回当前租户内容', url: 'https://wiki.kai.com/doc-1', score: 0.91 }]);
-    expect(fetcher).toHaveBeenCalledWith(new URL('https://wiki.kai.com/api/search'), expect.objectContaining({ headers: expect.objectContaining({ 'x-cod-tenant-id': 'tenant-1', 'x-cod-user-id': 'user-1' }) }));
+    const adapter = new KnowledgeAdapter(loadConfig({ NODE_ENV: 'test', KAI_WIKI_SEARCH_ENDPOINT: '/api/v1/public-chat' }));
+    const principal = { userId: 'user-1', tenantId: 'tenant-1', email: 'user@kai.com', role: 'member' } as const;
+    expect(adapter.mode()).toBe('live');
+    expect(await adapter.search('什么是期算？', principal)).toEqual([{
+      id: 'execution-1',
+      title: '期算知识库回答',
+      excerpt: '期算是标准化模型服务容量产品。',
+      url: 'https://wiki.kai.com/',
+      score: 1,
+    }]);
+    await adapter.search('它用什么指标计量？', principal);
+    const firstRequest = fetcher.mock.calls[0]?.[1] as RequestInit;
+    const secondRequest = fetcher.mock.calls[1]?.[1] as RequestInit;
+    expect(firstRequest.headers).toMatchObject({ 'x-cod-tenant-id': 'tenant-1', 'x-cod-user-id': 'user-1' });
+    expect(firstRequest.headers).not.toHaveProperty('authorization');
+    expect(JSON.parse(String(firstRequest.body))).toEqual({ message: '什么是期算？', conversation_id: null, language: 'zh-CN' });
+    expect(JSON.parse(String(secondRequest.body))).toEqual({ message: '它用什么指标计量？', conversation_id: 'conversation-1', language: 'zh-CN' });
+  });
+
+  it('rejects off-origin endpoints before making a request', async () => {
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+    const adapter = new KnowledgeAdapter(loadConfig({ NODE_ENV: 'test', KAI_WIKI_SEARCH_ENDPOINT: 'https://example.com/chat' }));
+    await expect(adapter.search('query')).rejects.toMatchObject({ code: 'wiki_invalid_endpoint' });
+    expect(fetcher).not.toHaveBeenCalled();
   });
 });
