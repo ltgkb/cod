@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createHash, createHmac } from 'node:crypto';
-import { assistantContentFromResponse, createControlPlane } from './server.js';
+import { assistantContentFromResponse, createControlPlane, usageFromResponse } from './server.js';
 import { loadConfig } from './config.js';
 import { MemoryDatabase } from './memory-database.js';
 
@@ -19,8 +19,11 @@ async function start(overrides: Record<string, string> = {}) {
 describe('control-plane production rules', () => {
   it('rejects empty assistant content before it can be settled as a successful reply', () => {
     expect(assistantContentFromResponse({ choices: [{ message: { content: '回答' } }] })).toBe('回答');
+    expect(assistantContentFromResponse({ choices: [{ message: { content: [{ type: 'text', text: '分段回答' }] } }] })).toBe('分段回答');
     expect(assistantContentFromResponse({ choices: [{ message: { content: '   ' } }] })).toBeNull();
     expect(assistantContentFromResponse({ choices: [] })).toBeNull();
+    expect(usageFromResponse({ choices: [] }, { messages: [{ role: 'user', content: 'hello' }] }, 'answer')).toMatchObject({ estimated: true });
+    expect(usageFromResponse({ usage: { prompt_tokens: 12, completion_tokens: 4 } }, {}, 'answer')).toEqual({ inputTokens: 12, outputTokens: 4, estimated: false });
   });
 
   it('restricts development login and disables direct topups', async () => {

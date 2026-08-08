@@ -39,13 +39,15 @@ function validateLoginEmail(raw: string | undefined, accessCode: string | undefi
   return email;
 }
 
-function usageFromResponse(body: unknown): { inputTokens: number; outputTokens: number } | null {
-  if (!body || typeof body !== 'object') return null;
+export function usageFromResponse(body: unknown, requestBody: unknown, content: string): { inputTokens: number; outputTokens: number; estimated: boolean } {
+  if (!body || typeof body !== 'object') return { inputTokens: estimatedInputTokens(requestBody), outputTokens: estimatedTextTokens(content), estimated: true };
   const usage = (body as { usage?: Record<string, unknown> }).usage;
-  if (!usage) return null;
+  if (!usage) return { inputTokens: estimatedInputTokens(requestBody), outputTokens: estimatedTextTokens(content), estimated: true };
   const inputTokens = Number(usage.prompt_tokens ?? usage.input_tokens ?? 0);
   const outputTokens = Number(usage.completion_tokens ?? usage.output_tokens ?? 0);
-  return Number.isInteger(inputTokens) && Number.isInteger(outputTokens) && inputTokens >= 0 && outputTokens >= 0 ? { inputTokens, outputTokens } : null;
+  return Number.isInteger(inputTokens) && Number.isInteger(outputTokens) && inputTokens >= 0 && outputTokens >= 0 && inputTokens + outputTokens > 0
+    ? { inputTokens, outputTokens, estimated: false }
+    : { inputTokens: estimatedInputTokens(requestBody), outputTokens: estimatedTextTokens(content), estimated: true };
 }
 
 export function assistantContentFromResponse(body: unknown): string | null {
@@ -53,14 +55,24 @@ export function assistantContentFromResponse(body: unknown): string | null {
   const choices = (body as { choices?: unknown }).choices;
   if (!Array.isArray(choices) || !choices[0] || typeof choices[0] !== 'object') return null;
   const message = (choices[0] as { message?: unknown }).message;
-  if (!message || typeof message !== 'object') return null;
-  const content = (message as { content?: unknown }).content;
-  return typeof content === 'string' && content.trim() ? content.trim() : null;
+  if (message && typeof message === 'object') {
+    const content = (message as { content?: unknown }).content;
+    if (typeof content === 'string' && content.trim()) return content.trim();
+    if (Array.isArray(content)) {
+      const text = content.flatMap((part) => part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string' ? [String((part as { text: string }).text).trim()] : []).filter(Boolean).join('\n');
+      if (text) return text;
+    }
+  }
+  const text = (choices[0] as { text?: unknown }).text;
+  return typeof text === 'string' && text.trim() ? text.trim() : null;
 }
 
 function estimatedInputTokens(body: unknown): number {
-  return Math.max(1, Math.ceil(Buffer.byteLength(JSON.stringify(body), 'utf8') / 4));
+  const messages = body && typeof body === 'object' && Array.isArray((body as { messages?: unknown }).messages) ? (body as { messages: unknown[] }).messages : body;
+  return Math.max(1, Math.ceil(Buffer.byteLength(JSON.stringify(messages), 'utf8') / 4));
 }
+
+const estimatedTextTokens = (text: string): number => Math.max(1, Math.ceil(Buffer.byteLength(text, 'utf8') / 4));
 
 function queryInteger(raw: string | null, fallback: number, maximum = Number.MAX_SAFE_INTEGER): number {
   if (raw === null) return fallback;
@@ -96,7 +108,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         response.setHeader('access-control-allow-origin', origin);
         response.setHeader('vary', 'Origin');
       }
-      response.setHeader('access-control-allow-headers', 'authorization,content-type,idempotency-key');
+      response.setHeader('access-control-allow-headers', 'authorization,content-type,idempotency-key,x-request-id');
       response.setHeader('access-control-allow-methods', 'GET,POST,OPTIONS');
       if (request.method === 'OPTIONS') return sendJson(response, 204, null);
       if (request.method === 'GET' && url.pathname === '/health') return sendJson(response, 200, { status: 'ok', service: 'cod-control-plane' });
@@ -252,13 +264,13 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         if(!model)throw new HttpError('Model is required',400,'model_required');
         const selection=await gateway.getModel(sourceId,model);
         const maxOutput=Number(body.max_completion_tokens??body.max_tokens??4096);if(!Number.isInteger(maxOutput)||maxOutput<1||maxOutput>65536)throw new HttpError('Invalid max output tokens',400,'invalid_max_tokens');
-        const {source: _source, ...providerBody}=body;const reservationId=randomUUID();const reservedCost=gateway.costCents(selection.model,estimatedInputTokens(providerBody),maxOutput);await database.reserveUsage(principal,reservationId,reservedCost);
+        const {source: _source, ...providerBody}=body;const reservationId=randomUUID();const requestFingerprint=createHash('sha256').update(JSON.stringify(providerBody)).digest('hex').slice(0,24);const reservedCost=gateway.costCents(selection.model,estimatedInputTokens(providerBody),maxOutput);await database.reserveUsage(principal,reservationId,reservedCost);
         try {
-          const upstream=await gateway.proxyChat(sourceId,providerBody);const raw=Buffer.from(await upstream.arrayBuffer());
+          const upstream=await gateway.proxyChat(sourceId,providerBody,requestId);const raw=Buffer.from(await upstream.arrayBuffer());
           if(!upstream.ok){await database.releaseUsage(principal,reservationId);response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}
-          const parsed=JSON.parse(raw.toString('utf8')) as unknown;const content=assistantContentFromResponse(parsed);if(!content){await database.releaseUsage(principal,reservationId);throw new HttpError('Model returned an empty response',502,'empty_model_response');}const usage=usageFromResponse(parsed);if(!usage){await database.releaseUsage(principal,reservationId);throw new HttpError('Upstream response did not include billable usage',502,'usage_missing');}
-          const costCents=gateway.costCents(selection.model,usage.inputTokens,usage.outputTokens);await database.settleUsage(principal,reservationId,{idempotencyKey:`chat:${sourceId}:${(parsed as {id?:string}).id??createHash('sha256').update(raw).digest('hex')}`,taskId:'chat',sourceId,paymentDirection:selection.source.paymentDirection,model,inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,costCents});await database.audit(principal,'chat.complete','model',model,{sourceId,paymentDirection:selection.source.paymentDirection,...usage,costCents});
-          const result={...(parsed as Record<string,unknown>),cod_source:sourceId,cod_payment_direction:selection.source.paymentDirection,cod_charge_cents:costCents};const output=Buffer.from(JSON.stringify(result));response.writeHead(upstream.status,{'content-type':'application/json; charset=utf-8','content-length':output.length});response.end(output);return;
+          let parsed:unknown;try{parsed=JSON.parse(raw.toString('utf8')) as unknown;}catch{await database.releaseUsage(principal,reservationId);throw new HttpError('Model returned an invalid response',502,'invalid_model_response');}const content=assistantContentFromResponse(parsed);if(!content){await database.releaseUsage(principal,reservationId);throw new HttpError('Model returned an empty response after retry',502,'empty_model_response');}const usage=usageFromResponse(parsed,providerBody,content);
+          const costCents=gateway.costCents(selection.model,usage.inputTokens,usage.outputTokens);const commissionRateBps=selection.source.commissionRateBps;const commissionCents=Math.round(costCents*commissionRateBps/10_000);await database.settleUsage(principal,reservationId,{idempotencyKey:`chat:${requestId}:${requestFingerprint}`,taskId:'chat',sourceId,upstreamSourceId:selection.source.upstreamSourceId,paymentDirection:selection.source.paymentDirection,model,inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,costCents,commissionRateBps,commissionCents});await database.audit(principal,'chat.complete','model',model,{sourceId,upstreamSourceId:selection.source.upstreamSourceId,paymentDirection:selection.source.paymentDirection,...usage,costCents,commissionRateBps,commissionCents});
+          const result={...(parsed as Record<string,unknown>),usage:{...((parsed as {usage?:Record<string,unknown>}).usage??{}),prompt_tokens:usage.inputTokens,completion_tokens:usage.outputTokens},cod_source:sourceId,cod_upstream_source:selection.source.upstreamSourceId,cod_payment_direction:selection.source.paymentDirection,cod_charge_cents:costCents,cod_commission_rate_bps:commissionRateBps,cod_usage_estimated:usage.estimated};const output=Buffer.from(JSON.stringify(result));response.writeHead(upstream.status,{'content-type':'application/json; charset=utf-8','content-length':output.length});response.end(output);return;
         } catch(error) { await database.releaseUsage(principal,reservationId); throw error; }
       }
       return sendJson(response, 404, { error: 'not_found' });

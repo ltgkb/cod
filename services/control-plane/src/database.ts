@@ -20,8 +20,11 @@ export interface LedgerEntry {
   createdAt: string;
   reference: string;
   sourceId: string | null;
+  upstreamSourceId?: string | null;
   model: string | null;
   paymentDirection: string | null;
+  commissionRateBps?: number;
+  commissionCents?: number;
 }
 
 export interface CreditPackDefinition {
@@ -50,10 +53,10 @@ export interface CreditSummary {
 }
 
 export const creditPackCatalog: readonly CreditPackDefinition[] = [
-  { id: 'starter', name: '入门额度包', priceCents: 2_000, creditCents: 2_000, bonusPercent: 0, validityDays: 180 },
-  { id: 'standard', name: '标准额度包', priceCents: 10_000, creditCents: 10_400, bonusPercent: 4, validityDays: 180 },
-  { id: 'pro', name: '进阶额度包', priceCents: 20_000, creditCents: 21_200, bonusPercent: 6, validityDays: 180 },
-  { id: 'team', name: '团队额度包', priceCents: 40_000, creditCents: 43_600, bonusPercent: 9, validityDays: 180 },
+  { id: 'starter', name: 'AI.KAI.COM 入门额度包', priceCents: 2_000, creditCents: 2_000, bonusPercent: 0, validityDays: 180 },
+  { id: 'standard', name: 'AI.KAI.COM 标准额度包', priceCents: 10_000, creditCents: 10_400, bonusPercent: 4, validityDays: 180 },
+  { id: 'pro', name: 'AI.KAI.COM 进阶额度包', priceCents: 20_000, creditCents: 21_200, bonusPercent: 6, validityDays: 180 },
+  { id: 'team', name: 'AI.KAI.COM 团队额度包', priceCents: 40_000, creditCents: 43_600, bonusPercent: 9, validityDays: 180 },
 ] as const;
 
 export interface TopupRequest {
@@ -182,8 +185,11 @@ CREATE TABLE IF NOT EXISTS cod_ledger (
 ALTER TABLE cod_ledger DROP CONSTRAINT IF EXISTS cod_ledger_type_check;
 ALTER TABLE cod_ledger ADD CONSTRAINT cod_ledger_type_check CHECK (type IN ('topup','usage','pack_purchase','credit_grant','trial_credit'));
 ALTER TABLE cod_ledger ADD COLUMN IF NOT EXISTS source_id text;
+ALTER TABLE cod_ledger ADD COLUMN IF NOT EXISTS upstream_source_id text;
 ALTER TABLE cod_ledger ADD COLUMN IF NOT EXISTS model_id text;
 ALTER TABLE cod_ledger ADD COLUMN IF NOT EXISTS payment_direction text;
+ALTER TABLE cod_ledger ADD COLUMN IF NOT EXISTS commission_rate_bps integer NOT NULL DEFAULT 0;
+ALTER TABLE cod_ledger ADD COLUMN IF NOT EXISTS commission_cents bigint NOT NULL DEFAULT 0;
 ALTER TABLE cod_ledger ADD COLUMN IF NOT EXISTS wallet_amount_cents bigint NOT NULL DEFAULT 0;
 ALTER TABLE cod_ledger ADD COLUMN IF NOT EXISTS credit_amount_cents bigint NOT NULL DEFAULT 0;
 CREATE TABLE IF NOT EXISTS cod_credit_grants (
@@ -252,7 +258,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS cod_payment_orders_provider_event_idx ON cod_p
 const accountFromRow = (row: Record<string, unknown>): AccountSummary => ({
   userId: String(row.user_id), displayName: String(row.display_name), balanceCents: Number(row.balance_cents), currency: 'CNY', plan: row.plan === 'team' ? 'team' : 'developer',
 });
-const ledgerFromRow = (row: Record<string, unknown>): LedgerEntry => ({ id: String(row.id), type: row.type as LedgerEntry['type'], amountCents: Number(row.amount_cents), walletAmountCents: Number(row.wallet_amount_cents ?? 0), creditAmountCents: Number(row.credit_amount_cents ?? 0), reference: String(row.reference), sourceId: row.source_id ? String(row.source_id) : null, model: row.model_id ? String(row.model_id) : null, paymentDirection: row.payment_direction ? String(row.payment_direction) : null, createdAt: new Date(String(row.created_at)).toISOString() });
+const ledgerFromRow = (row: Record<string, unknown>): LedgerEntry => ({ id: String(row.id), type: row.type as LedgerEntry['type'], amountCents: Number(row.amount_cents), walletAmountCents: Number(row.wallet_amount_cents ?? 0), creditAmountCents: Number(row.credit_amount_cents ?? 0), reference: String(row.reference), sourceId: row.source_id ? String(row.source_id) : null, upstreamSourceId: row.upstream_source_id ? String(row.upstream_source_id) : null, model: row.model_id ? String(row.model_id) : null, paymentDirection: row.payment_direction ? String(row.payment_direction) : null, commissionRateBps: Number(row.commission_rate_bps ?? 0), commissionCents: Number(row.commission_cents ?? 0), createdAt: new Date(String(row.created_at)).toISOString() });
 const creditGrantFromRow = (row: Record<string, unknown>): CreditGrant => ({ id: String(row.id), packId: String(row.pack_id), name: String(row.name), originalCents: Number(row.original_cents), remainingCents: Number(row.remaining_cents), purchasedAt: new Date(String(row.purchased_at)).toISOString(), expiresAt: new Date(String(row.expires_at)).toISOString(), status: row.status as CreditGrant['status'] });
 interface GrantAllocation { grantId: string; amountCents: number }
 interface FundsAllocation { walletCents: number; grantAllocations: GrantAllocation[] }
@@ -472,7 +478,7 @@ export class PostgresDatabase implements CodDatabase {
     await client.query(`UPDATE cod_usage_reservations SET status='released',updated_at=now() WHERE id=$1`,[reservationId]);
   }
   private async insertUsageLedger(client:PoolClient,p:Principal,event:UsageEvent,walletCents:number,creditCents:number):Promise<LedgerEntry>{
-    const inserted=await client.query(`INSERT INTO cod_ledger (id,tenant_id,user_id,type,amount_cents,wallet_amount_cents,credit_amount_cents,reference,idempotency_key,source_id,model_id,payment_direction) VALUES ($1,$2,$3,'usage',$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,[randomUUID(),p.tenantId,p.userId,-event.costCents,-walletCents,-creditCents,`${event.sourceId}:${event.model}:${event.taskId}`,event.idempotencyKey,event.sourceId,event.model,event.paymentDirection]);
+    const inserted=await client.query(`INSERT INTO cod_ledger (id,tenant_id,user_id,type,amount_cents,wallet_amount_cents,credit_amount_cents,reference,idempotency_key,source_id,upstream_source_id,model_id,payment_direction,commission_rate_bps,commission_cents) VALUES ($1,$2,$3,'usage',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,[randomUUID(),p.tenantId,p.userId,-event.costCents,-walletCents,-creditCents,`${event.sourceId}:${event.model}:${event.taskId}`,event.idempotencyKey,event.sourceId,event.upstreamSourceId??'ai-kai',event.model,event.paymentDirection,event.commissionRateBps??0,event.commissionCents??0]);
     return ledgerFromRow(inserted.rows[0]);
   }
   private async append(p:Principal,type:TaskEvent['type'],entityId:string,data:unknown) { await this.pool.query('INSERT INTO cod_events (tenant_id,user_id,type,entity_id,data) VALUES ($1,$2,$3,$4,$5)',[p.tenantId,p.userId,type,entityId,JSON.stringify(data)]); }

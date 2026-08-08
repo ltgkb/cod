@@ -38,6 +38,15 @@ describe('wallet database contract', () => {
     await expect(database.recordUsage(principal, { idempotencyKey: 'usage-2', taskId: 'task', sourceId: 'ai-kai', paymentDirection: '钱包 → ai.kai.com', model: 'coder-pro', inputTokens: 1, outputTokens: 1, costCents: 9000 })).rejects.toMatchObject({ status: 402 });
   });
 
+  it('falls back to permanent wallet funds at the original model price and records source attribution', async () => {
+    const database = new MemoryDatabase();
+    await database.topup(principal, { idempotencyKey: 'wallet-funds', amountCents: 500, channel: 'pilot' });
+    await database.recordUsage(principal, { idempotencyKey: 'drain-trial', taskId: 'task', sourceId: 'chase-kai', upstreamSourceId: 'ai-kai', paymentDirection: '钱包/额度 → ai.kai.com · 归因 CHASE.KAI.COM', model: 'glm-5.2', inputTokens: 100, outputTokens: 100, costCents: 1200, commissionRateBps: 1000, commissionCents: 120 });
+    expect((await database.getCreditSummary(principal)).availableCents).toBe(0);
+    expect((await database.getAccount(principal)).balanceCents).toBe(300);
+    expect((await database.getLedger(principal))[0]).toMatchObject({ sourceId: 'chase-kai', upstreamSourceId: 'ai-kai', creditAmountCents: -1000, walletAmountCents: -200, commissionRateBps: 1000, commissionCents: 120 });
+  });
+
   it('isolates balances and idempotency by principal', async () => {
     const database = new MemoryDatabase();
     const other = { ...principal, userId: 'other', email: 'other@kai.com' };

@@ -13,9 +13,11 @@ export interface ModelInfo {
 export interface ModelSourceInfo {
   id: string;
   label: string;
+  upstreamSourceId: 'ai-kai' | 'demo';
   status: 'live' | 'catalog' | 'demo' | 'unavailable';
   callable: boolean;
   paymentDirection: string;
+  commissionRateBps: number;
   models: ModelInfo[];
   note: string;
 }
@@ -44,8 +46,21 @@ function responseData<T>(value: unknown): T {
 }
 
 function sourceNote(source: ModelSourceConfig, callable: boolean): string {
-  if (callable) return `真实调用与结算均指向 ${new URL(source.baseUrl).host}`;
-  return `仅参考 ${new URL(source.catalogUrl).host} 的公开模型目录，配置该源密钥后才可调用`;
+  const attribution = source.commissionRateBps > 0 ? `，按 ${(source.commissionRateBps / 100).toFixed(2)}% 记录渠道分成` : '，分成比例待商务配置';
+  if (callable) return `界面按 ${source.label} 展示和归因；真实调用与主结算统一走 ${new URL(source.baseUrl).host}${attribution}`;
+  return `模型目录来自 ${new URL(source.catalogUrl).host}；配置 ai.kai.com 密钥后即可调用`;
+}
+
+function responseHasAssistantContent(response: Response): Promise<boolean> {
+  if (!response.ok) return Promise.resolve(true);
+  return response.clone().json().then((body: unknown) => {
+    if (!body || typeof body !== 'object') return false;
+    const choice = (body as { choices?: unknown[] }).choices?.[0];
+    if (!choice || typeof choice !== 'object') return false;
+    const content = ((choice as { message?: { content?: unknown } }).message?.content);
+    if (typeof content === 'string') return Boolean(content.trim());
+    return Array.isArray(content) && content.some((part) => part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string' && Boolean(String((part as { text?: unknown }).text).trim()));
+  }).catch(() => false);
 }
 
 export class AiGateway {
@@ -56,7 +71,7 @@ export class AiGateway {
   async listSources(force = false): Promise<ModelSourceInfo[]> {
     if (!force && this.cache && this.cache.expiresAt > Date.now()) return this.cache.value;
     if (!this.config.modelSources.some((source) => source.apiKey)) {
-      const value = this.config.demoMode ? [{ id: 'demo', label: 'COD DEMO', status: 'demo' as const, callable: true, paymentDirection: '测试钱包 → COD Demo', models: demoModels, note: '演示响应，不调用外部模型源' }] : [];
+      const value = this.config.demoMode ? [{ id: 'demo', label: 'COD DEMO', upstreamSourceId: 'demo' as const, status: 'demo' as const, callable: true, paymentDirection: '测试钱包 → COD Demo', commissionRateBps: 0, models: demoModels, note: '演示响应，不调用外部模型源' }] : [];
       this.cache = { expiresAt: Date.now() + 60_000, value };
       return value;
     }
@@ -92,17 +107,30 @@ export class AiGateway {
     return inputTokens + outputTokens > 0 ? Math.max(1, Math.ceil(raw)) : 0;
   }
 
-  async proxyChat(sourceId: string, body: unknown): Promise<Response> {
+  async proxyChat(sourceId: string, body: unknown, requestId: string = randomUUID()): Promise<Response> {
     if (sourceId === 'demo') return this.demoResponse(body);
     const source = this.config.modelSources.find((item) => item.id === sourceId);
     if (!source?.apiKey) throw new HttpError('Selected model source is not configured', 503, 'source_unavailable');
-    try {
-      return await this.fetcher(`${source.baseUrl.replace(/\/$/, '')}/chat/completions`, {
-        method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${source.apiKey}` }, body: JSON.stringify(body), signal: AbortSignal.timeout(120_000),
-      });
-    } catch (error) {
-      throw new HttpError(error instanceof Error && error.name === 'TimeoutError' ? 'KAI model request timed out' : 'KAI model provider is unavailable', 502, 'ai_upstream_unavailable');
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const response = await this.fetcher(`${source.baseUrl.replace(/\/$/, '')}/chat/completions`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${source.apiKey}`, 'x-request-id': requestId, 'idempotency-key': requestId },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(120_000),
+        });
+        const retryableStatus = [408, 425, 429, 500, 502, 503, 504].includes(response.status);
+        const hasContent = await responseHasAssistantContent(response);
+        if ((!retryableStatus && hasContent) || attempt === 1) return response;
+        lastError = new Error(retryableStatus ? `Retryable upstream status: ${response.status}` : 'Empty upstream response');
+      } catch (error) {
+        lastError = error;
+        if (attempt === 1) break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 300));
     }
+    throw new HttpError(lastError instanceof Error && lastError.name === 'TimeoutError' ? 'KAI model request timed out' : 'KAI model provider is unavailable', 502, 'ai_upstream_unavailable');
   }
 
   private async loadSource(source: ModelSourceConfig): Promise<ModelSourceInfo> {
@@ -128,7 +156,7 @@ export class AiGateway {
     }).sort((left, right) => left.label.localeCompare(right.label));
     const callable = authenticated && models.length > 0;
     const statusName = callable ? 'live' : models.length ? 'catalog' : 'unavailable';
-    return { id: source.id, label: source.label, status: statusName, callable, paymentDirection: source.paymentDirection, models, note: sourceNote(source, callable) };
+    return { id: source.id, label: source.label, upstreamSourceId: source.upstreamSourceId, status: statusName, callable, paymentDirection: source.paymentDirection, commissionRateBps: source.commissionRateBps, models, note: sourceNote(source, callable) };
   }
 
   private async fetchJson(url: string, headers: Record<string, string> = {}): Promise<unknown> {

@@ -1,10 +1,12 @@
 export interface ModelSourceConfig {
   id: string;
   label: string;
+  upstreamSourceId: 'ai-kai';
   baseUrl: string;
   catalogUrl: string;
   statusUrl: string;
   paymentDirection: string;
+  commissionRateBps: number;
   apiKey: string | null;
 }
 
@@ -36,21 +38,31 @@ export interface ControlPlaneConfig {
 
 function defaultModelSources(environment: NodeJS.ProcessEnv): ModelSourceConfig[] {
   const aiBaseUrl = environment.KAI_AI_BASE_URL ?? 'https://ai.kai.com/v1';
-  const chaseBaseUrl = environment.CHASE_AI_BASE_URL ?? 'https://chase.kai.com/v1';
+  const catalogUrl = environment.KAI_AI_CATALOG_URL ?? 'https://ai.kai.com/api/pricing';
+  const statusUrl = environment.KAI_AI_STATUS_URL ?? 'https://ai.kai.com/api/status';
+  const apiKey = environment.KAI_API_KEY ?? null;
+  const commissionRate = (raw: string | undefined): number => {
+    const value = Number(raw ?? 0);
+    if (!Number.isInteger(value) || value < 0 || value > 10_000) throw new Error('Source commission rate must be between 0 and 10000 basis points');
+    return value;
+  };
   return [
     {
-      id: 'ai-kai', label: 'AI.KAI.COM', baseUrl: aiBaseUrl, catalogUrl: environment.KAI_AI_CATALOG_URL ?? 'https://ai.kai.com/api/pricing',
-      statusUrl: environment.KAI_AI_STATUS_URL ?? 'https://ai.kai.com/api/status', paymentDirection: '钱包 → ai.kai.com', apiKey: environment.KAI_API_KEY ?? null,
+      id: 'ai-kai', label: 'AI.KAI.COM', upstreamSourceId: 'ai-kai', baseUrl: aiBaseUrl, catalogUrl,
+      statusUrl, paymentDirection: '钱包/额度 → ai.kai.com · 归因 AI.KAI.COM', commissionRateBps: 0, apiKey,
     },
     {
-      id: 'chase-kai', label: 'CHASE.KAI.COM', baseUrl: chaseBaseUrl, catalogUrl: environment.CHASE_AI_CATALOG_URL ?? 'https://chase.kai.com/api/pricing',
-      statusUrl: environment.CHASE_AI_STATUS_URL ?? 'https://chase.kai.com/api/status', paymentDirection: '钱包 → chase.kai.com', apiKey: environment.CHASE_API_KEY ?? null,
+      id: 'chase-kai', label: 'CHASE.KAI.COM', upstreamSourceId: 'ai-kai', baseUrl: aiBaseUrl, catalogUrl,
+      statusUrl, paymentDirection: '钱包/额度 → ai.kai.com · 归因 CHASE.KAI.COM', commissionRateBps: commissionRate(environment.CHASE_COMMISSION_RATE_BPS), apiKey,
     },
   ];
 }
 
 function loadModelSources(environment: NodeJS.ProcessEnv): ModelSourceConfig[] {
   if (!environment.COD_MODEL_SOURCES_JSON) return defaultModelSources(environment);
+  const aiBaseUrl = environment.KAI_AI_BASE_URL ?? 'https://ai.kai.com/v1';
+  const catalogUrl = environment.KAI_AI_CATALOG_URL ?? 'https://ai.kai.com/api/pricing';
+  const statusUrl = environment.KAI_AI_STATUS_URL ?? 'https://ai.kai.com/api/status';
   let raw: unknown;
   try { raw = JSON.parse(environment.COD_MODEL_SOURCES_JSON); }
   catch { throw new Error('COD_MODEL_SOURCES_JSON must be valid JSON'); }
@@ -58,11 +70,13 @@ function loadModelSources(environment: NodeJS.ProcessEnv): ModelSourceConfig[] {
   return raw.map((item, index) => {
     if (!item || typeof item !== 'object') throw new Error(`Model source ${index} is invalid`);
     const source = item as Record<string, unknown>;
-    const id = String(source.id ?? '').trim(); const label = String(source.label ?? '').trim(); const baseUrl = String(source.baseUrl ?? '').trim();
-    const catalogUrl = String(source.catalogUrl ?? '').trim(); const statusUrl = String(source.statusUrl ?? '').trim();
-    const paymentDirection = String(source.paymentDirection ?? '').trim(); const apiKeyEnv = String(source.apiKeyEnv ?? '').trim();
-    if (!/^[a-z0-9-]{2,40}$/.test(id) || !label || !baseUrl || !catalogUrl || !statusUrl || !paymentDirection) throw new Error(`Model source ${index} is incomplete`);
-    return { id, label, baseUrl, catalogUrl, statusUrl, paymentDirection, apiKey: apiKeyEnv ? environment[apiKeyEnv] ?? null : null };
+    const id = String(source.id ?? '').trim(); const label = String(source.label ?? '').trim();
+    const commissionRateBps = Number(source.commissionRateBps ?? 0);
+    if (!/^[a-z0-9-]{2,40}$/.test(id) || !label || !Number.isInteger(commissionRateBps) || commissionRateBps < 0 || commissionRateBps > 10_000) throw new Error(`Model source ${index} is incomplete`);
+    return {
+      id, label, upstreamSourceId: 'ai-kai', baseUrl: aiBaseUrl, catalogUrl, statusUrl,
+      paymentDirection: `钱包/额度 → ai.kai.com · 归因 ${label}`, commissionRateBps, apiKey: environment.KAI_API_KEY ?? null,
+    };
   });
 }
 

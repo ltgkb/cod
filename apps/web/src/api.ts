@@ -14,9 +14,11 @@ export interface ModelInfo {
 export interface ModelSourceInfo {
   id: string;
   label: string;
+  upstreamSourceId: 'ai-kai' | 'demo';
   status: 'live' | 'catalog' | 'demo' | 'unavailable';
   callable: boolean;
   paymentDirection: string;
+  commissionRateBps: number;
   models: ModelInfo[];
   note: string;
 }
@@ -58,8 +60,11 @@ export interface LedgerEntry {
   createdAt: string;
   reference: string;
   sourceId: string | null;
+  upstreamSourceId?: string | null;
   model: string | null;
   paymentDirection: string | null;
+  commissionRateBps?: number;
+  commissionCents?: number;
 }
 
 export interface CreditPackDefinition {
@@ -285,17 +290,31 @@ export async function launchProduct(token: string, productId: string): Promise<{
   return request(`/api/products/${encodeURIComponent(productId)}/launch`, token, { method: 'POST' });
 }
 
-export async function sendChat(token: string, source: string, model: string, messages: Array<{ role: 'user' | 'assistant'; content: string }>): Promise<{ content: string; mode: 'live' | 'demo'; source: string; paymentDirection: string; inputTokens: number; outputTokens: number }> {
+export async function sendChat(token: string, source: string, model: string, messages: Array<{ role: 'user' | 'assistant'; content: string }>): Promise<{ content: string; mode: 'live' | 'demo'; source: string; upstreamSource: string; paymentDirection: string; inputTokens: number; outputTokens: number; usageEstimated: boolean }> {
   const sanitizedMessages = messages.filter((message) => typeof message.content === 'string' && message.content.trim().length > 0).slice(-20).map((message) => ({ ...message, content: message.content.trim() }));
   if (!sanitizedMessages.length) throw new ApiError('消息内容不能为空。', 400, 'empty_messages');
-  const result = await request<{ choices: Array<{ message: { content: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number; input_tokens?: number; output_tokens?: number }; cod_mode?: 'demo'; cod_source?: string; cod_payment_direction?: string }>('/v1/chat/completions', token, {
-    method: 'POST',
-    body: JSON.stringify({ source, model, messages: sanitizedMessages, max_tokens: 20_000, stream: false }),
-  });
+  const requestId = createClientId();
+  let result: { choices: Array<{ message: { content: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number; input_tokens?: number; output_tokens?: number }; cod_mode?: 'demo'; cod_source?: string; cod_upstream_source?: string; cod_payment_direction?: string; cod_usage_estimated?: boolean } | null = null;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      result = await request('/v1/chat/completions', token, {
+        method: 'POST', headers: { 'x-request-id': requestId },
+        body: JSON.stringify({ source, model, messages: sanitizedMessages, max_tokens: 20_000, stream: false }),
+      });
+      break;
+    } catch (error) {
+      lastError = error;
+      const retryable = !(error instanceof ApiError) || error.status === 429 || error.status >= 500;
+      if (!retryable || attempt === 1) throw error;
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+    }
+  }
+  if (!result) throw lastError instanceof Error ? lastError : new ApiError('模型请求失败，请重试。', 502, 'chat_failed');
   const content = result.choices[0]?.message.content?.trim();
   if (!content) throw new ApiError('模型返回了空内容，本次回复不可用，请重试或切换模型。', 502, 'empty_model_response');
   const inputTokens = Number(result.usage?.prompt_tokens ?? result.usage?.input_tokens);
   const outputTokens = Number(result.usage?.completion_tokens ?? result.usage?.output_tokens);
   if (![inputTokens, outputTokens].every((value) => Number.isInteger(value) && value >= 0)) throw new ApiError('模型没有返回有效的 Token 用量，请重试。', 502, 'invalid_model_usage');
-  return { content, mode: result.cod_mode === 'demo' ? 'demo' : 'live', source: result.cod_source ?? source, paymentDirection: result.cod_payment_direction ?? '', inputTokens, outputTokens };
+  return { content, mode: result.cod_mode === 'demo' ? 'demo' : 'live', source: result.cod_source ?? source, upstreamSource: result.cod_upstream_source ?? (source === 'demo' ? 'demo' : 'ai-kai'), paymentDirection: result.cod_payment_direction ?? '', inputTokens, outputTokens, usageEstimated: Boolean(result.cod_usage_estimated) };
 }

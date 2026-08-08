@@ -296,6 +296,11 @@ button:active { transform: translateY(1px); }
 .agent-message header { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
 .agent-message header strong { color: var(--ink); font-size: 11px; }
 .agent-message p { margin: 8px 0 0; white-space: pre-wrap; font-size: 12px; line-height: 1.7; }
+.agent-message.failed > div:last-child { background: var(--destructive-soft); border-color: color-mix(in srgb, var(--destructive) 38%, var(--border-subtle)); border-left-color: var(--destructive); }
+.agent-message.failed .agent-avatar { background: var(--destructive); }
+.retry-message { display: flex; align-items: center; gap: 5px; margin-top: 10px; padding: 6px 9px; color: var(--destructive); background: var(--layer-01); border: 1px solid color-mix(in srgb, var(--destructive) 45%, var(--border-subtle)); font-size: 9px; font-weight: 600; }
+.retry-message:hover { color: var(--text-on-color); background: var(--destructive); }
+.retry-message svg { width: 13px; }
 .comparison-message { margin: 0 0 22px 42px; }
 .comparison-message > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
 .comparison-message > header > div { display: flex; align-items: center; gap: 7px; }

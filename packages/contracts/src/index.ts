@@ -33,11 +33,14 @@ export interface UsageEvent {
   idempotencyKey: string;
   taskId: string;
   sourceId: string;
+  upstreamSourceId?: string;
   paymentDirection: string;
   model: string;
   inputTokens: number;
   outputTokens: number;
   costCents: number;
+  commissionRateBps?: number;
+  commissionCents?: number;
 }
 
 export interface DeviceRecord {
