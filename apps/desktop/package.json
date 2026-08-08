@@ -17,7 +17,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prepare:sidecar": "node ../../scripts/prepare-goose-sidecar.mjs",
     "package:linux": "npm run build -w @cod/web && npm run build && npm run prepare:sidecar && electron-builder --linux AppImage deb",
-    "package:mac": "npm run build -w @cod/web && npm run build && npm run prepare:sidecar && COD_ADHOC_SIGN=true CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dmg zip",
+    "package:mac": "npm run build -w @cod/web && npm run build && npm run prepare:sidecar && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dmg zip -c.mac.identity=-",
     "package:mac:signed": "npm run build -w @cod/web && npm run build && npm run prepare:sidecar && electron-builder --mac dmg zip",
     "package:win": "npm run build -w @cod/web && npm run build && npm run prepare:sidecar && electron-builder --win nsis"
   },
@@ -75,6 +75,8 @@
       "artifactName": "COD-${version}-mac-${arch}.${ext}",
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
       "extendInfo": {
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": false,

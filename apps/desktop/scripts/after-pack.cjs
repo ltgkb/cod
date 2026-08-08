@@ -32,27 +32,4 @@ exports.default = async function afterPack(context) {
     throw new Error(`Failed to harden App Transport Security in ${infoPlist}`);
   }
 
-  if (process.env.COD_ADHOC_SIGN === "true") {
-    // Test builds downloaded by a browser still need a structurally valid
-    // signature. This does not replace Developer ID signing or notarization,
-    // but it prevents the post-pack Info.plist change from invalidating the
-    // Electron bundle and being reported as a corrupt application.
-    await execFileAsync("/usr/bin/codesign", [
-      "--force",
-      "--deep",
-      "--sign",
-      "-",
-      "--timestamp=none",
-      "--options",
-      "runtime",
-      appPath,
-    ]);
-    await execFileAsync("/usr/bin/codesign", [
-      "--verify",
-      "--deep",
-      "--strict",
-      "--verbose=2",
-      appPath,
-    ]);
-  }
 };
