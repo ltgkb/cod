@@ -13,6 +13,8 @@ npm run package:android
 npm run package:ios
 ```
 
+`package:mac` creates an ad-hoc signed QA build and verifies its bundle signature after applying security settings. It prevents a structurally invalid app from being reported as corrupt, but browser-downloaded builds still require Gatekeeper approval. Release automation with a Developer ID certificate must use `npm run package:mac:signed`, followed by Apple notarization and stapling.
+
 The desktop packaging command automatically selects the Goose binary matching the build runner's operating system and CPU architecture. A manually supplied release binary can be selected with `COD_GOOSE_BINARY`.
 
 GitHub Actions builds and retains these artifacts on native runners:
