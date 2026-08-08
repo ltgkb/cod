@@ -17,6 +17,20 @@ async function start(overrides: Record<string, string> = {}) {
 }
 
 describe('control-plane production rules', () => {
+  it('fails closed on incomplete production secrets and never enables direct production topups', () => {
+    expect(() => loadConfig({ NODE_ENV: 'production' })).toThrow('COD_SESSION_SECRET');
+    const config = loadConfig({
+      NODE_ENV: 'production',
+      COD_SESSION_SECRET: 's'.repeat(32),
+      DATABASE_URL: 'postgresql://cod:test@127.0.0.1:5432/cod',
+      KAI_API_KEY: 'provider-key',
+      COD_DEVELOPMENT_LOGIN_ENABLED: 'true',
+      COD_PILOT_ACCESS_CODE_HASH: 'a'.repeat(64),
+      COD_DEVELOPMENT_TOPUP_ENABLED: 'true',
+    });
+    expect(config.developmentTopupEnabled).toBe(false);
+  });
+
   it('rejects empty assistant content before it can be settled as a successful reply', () => {
     expect(assistantContentFromResponse({ choices: [{ message: { content: '回答' } }] })).toBe('回答');
     expect(assistantContentFromResponse({ choices: [{ message: { content: [{ type: 'text', text: '分段回答' }] } }] })).toBe('分段回答');

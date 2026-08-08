@@ -81,6 +81,28 @@ function loadModelSources(environment: NodeJS.ProcessEnv): ModelSourceConfig[] {
 }
 
 export function loadConfig(environment = process.env): ControlPlaneConfig {
+  const production = environment.NODE_ENV === 'production';
+  const sessionSecret = environment.COD_SESSION_SECRET ?? 'cod-local-development-secret';
+  const databaseUrl = environment.DATABASE_URL ?? null;
+  const pilotAccessCodeHash = environment.COD_PILOT_ACCESS_CODE_HASH ?? null;
+  const developmentLoginEnabled = environment.COD_DEVELOPMENT_LOGIN_ENABLED === 'true' || !production;
+  const demoMode = environment.COD_DEMO_MODE === 'true' || !production;
+  const paymentWebhookSecret = environment.COD_PAYMENT_WEBHOOK_SECRET ?? null;
+
+  if (pilotAccessCodeHash && !/^[a-f0-9]{64}$/i.test(pilotAccessCodeHash)) {
+    throw new Error('COD_PILOT_ACCESS_CODE_HASH must be a SHA-256 hex digest');
+  }
+  if (production) {
+    if (Buffer.byteLength(sessionSecret, 'utf8') < 32 || sessionSecret === 'cod-local-development-secret') {
+      throw new Error('Production requires COD_SESSION_SECRET with at least 32 bytes');
+    }
+    if (!databaseUrl) throw new Error('Production requires DATABASE_URL');
+    if (developmentLoginEnabled && !pilotAccessCodeHash) throw new Error('Production pilot login requires COD_PILOT_ACCESS_CODE_HASH');
+    if (!demoMode && !environment.KAI_API_KEY) throw new Error('Live production mode requires KAI_API_KEY');
+    if (paymentWebhookSecret && Buffer.byteLength(paymentWebhookSecret, 'utf8') < 32) {
+      throw new Error('COD_PAYMENT_WEBHOOK_SECRET must contain at least 32 bytes');
+    }
+  }
   let feishuBindings: Record<string, string> = {};
   if (environment.COD_FEISHU_BINDINGS_JSON) {
     try {
@@ -91,21 +113,21 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
   }
   return {
     port: Number(environment.COD_CONTROL_PORT ?? 8787),
-    sessionSecret: environment.COD_SESSION_SECRET ?? 'cod-local-development-secret',
-    databaseUrl: environment.DATABASE_URL ?? null,
+    sessionSecret,
+    databaseUrl,
     allowedEmailDomains: (environment.COD_ALLOWED_EMAIL_DOMAINS ?? 'kai.com').split(',').map((value) => value.trim().toLowerCase()).filter(Boolean),
     allowedOrigins: (environment.COD_ALLOWED_ORIGINS ?? 'http://127.0.0.1:5173,http://localhost:5173,null').split(',').map((value) => value.trim()).filter(Boolean),
-    developmentLoginEnabled: environment.COD_DEVELOPMENT_LOGIN_ENABLED === 'true' || environment.NODE_ENV !== 'production',
+    developmentLoginEnabled,
     developmentLoginEmail: (environment.COD_DEVELOPMENT_LOGIN_EMAIL ?? 'developer@kai.com').toLowerCase(),
-    pilotAccessCodeHash: environment.COD_PILOT_ACCESS_CODE_HASH ?? null,
-    developmentTopupEnabled: environment.COD_DEVELOPMENT_TOPUP_ENABLED === 'true',
-    paymentWebhookSecret: environment.COD_PAYMENT_WEBHOOK_SECRET ?? null,
+    pilotAccessCodeHash,
+    developmentTopupEnabled: !production && environment.COD_DEVELOPMENT_TOPUP_ENABLED === 'true',
+    paymentWebhookSecret,
     feishuVerificationToken: environment.COD_FEISHU_VERIFICATION_TOKEN ?? null,
     feishuEncryptKey: environment.COD_FEISHU_ENCRYPT_KEY ?? null,
     feishuAppId: environment.COD_FEISHU_APP_ID ?? null,
     feishuAppSecret: environment.COD_FEISHU_APP_SECRET ?? null,
     feishuBindings,
-    demoMode: environment.COD_DEMO_MODE === 'true' || environment.NODE_ENV !== 'production',
+    demoMode,
     modelSources: loadModelSources(environment),
     wikiBaseUrl: environment.KAI_WIKI_BASE_URL ?? 'https://wiki.kai.com',
     wikiSearchEndpoint: environment.KAI_WIKI_SEARCH_ENDPOINT ?? null,

@@ -19,7 +19,13 @@ describe('model source gateway', () => {
       }
       throw new Error(`Unexpected request: ${url}`);
     });
-    const gateway = new AiGateway(loadConfig({ NODE_ENV: 'production', KAI_API_KEY: 'test-key' }), fetcher as typeof fetch);
+    const gateway = new AiGateway(loadConfig({
+      NODE_ENV: 'production',
+      COD_SESSION_SECRET: 's'.repeat(32),
+      DATABASE_URL: 'postgresql://cod:test@127.0.0.1:5432/cod',
+      COD_DEVELOPMENT_LOGIN_ENABLED: 'false',
+      KAI_API_KEY: 'test-key',
+    }), fetcher as typeof fetch);
     const sources = await gateway.listSources();
     expect(sources).toHaveLength(2);
     expect(sources[0]).toMatchObject({ id: 'ai-kai', upstreamSourceId: 'ai-kai', status: 'live', callable: true, models: [{ id: 'glm-5.2', inputPricePerMillionCents: 836, outputPricePerMillionCents: 2926 }] });

@@ -16,6 +16,7 @@ The review covers login and sessions, model routing, token settlement, wallet an
 | High | Desktop builds could bundle a Goose binary for the wrong OS | Packaging resolves the sidecar for the runner's OS and architecture |
 | High | Electron and Capacitor builds used root-relative assets and could open blank | Vite now emits relative application assets |
 | High | Direct IP access sent login/session data over plaintext HTTP | Non-health traffic on the IP is redirected to `https://cod.kai.com` |
+| High | Production exposed a pilot endpoint that could mint wallet funds without verified payment | Direct top-up is now impossible in production; only a verified provider callback may credit the permanent wallet |
 | Medium | Electron accepted arbitrary HTTPS external URLs and navigation | Navigation is blocked, only KAI HTTPS links open externally, webviews and runtime permissions are denied |
 | Medium | Upstream model and catalog responses were not size bounded | Model replies are streamed into a 5 MiB cap; catalogs are capped at 2 MiB |
 | Medium | Packaged app did not define an application CSP | Shared CSP now protects web, Electron, and mobile shells |
@@ -37,7 +38,7 @@ The review covers login and sessions, model routing, token settlement, wallet an
 
 ## Release blockers still requiring business credentials
 
-1. Production payments are still in `pilot-credit` mode. Before taking customer money, configure a real WeChat/Alipay adapter and `COD_PAYMENT_WEBHOOK_SECRET`, then disable `COD_DEVELOPMENT_TOPUP_ENABLED`.
+1. Production payment collection is intentionally unavailable. Before taking customer money, configure a real WeChat/Alipay checkout adapter and a 32-byte-or-longer `COD_PAYMENT_WEBHOOK_SECRET`; direct pilot top-up remains disabled.
 2. Apple, Windows, and Android public releases require organization-owned signing credentials. They are intentionally not stored in the repository.
 3. Channel commission is recorded but defaults to zero until an approved `CHASE_COMMISSION_RATE_BPS` is configured.
 4. Feishu and WeCom remain unavailable until their application credentials and verified identity bindings are supplied.
