@@ -74,6 +74,26 @@ function estimatedInputTokens(body: unknown): number {
 
 const estimatedTextTokens = (text: string): number => Math.max(1, Math.ceil(Buffer.byteLength(text, 'utf8') / 4));
 
+async function readResponseBuffer(response: Response, maximumBytes = 5 * 1024 * 1024): Promise<Buffer> {
+  const advertisedLength = Number(response.headers.get('content-length') ?? 0);
+  if (Number.isFinite(advertisedLength) && advertisedLength > maximumBytes) throw new HttpError('Model response is too large', 502, 'model_response_too_large');
+  if (!response.body) return Buffer.alloc(0);
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let size = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maximumBytes) {
+      await reader.cancel();
+      throw new HttpError('Model response is too large', 502, 'model_response_too_large');
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks, size);
+}
+
 function queryInteger(raw: string | null, fallback: number, maximum = Number.MAX_SAFE_INTEGER): number {
   if (raw === null) return fallback;
   const value = Number(raw);
@@ -262,14 +282,14 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         const sourceId=routeSource??body.source??(config.modelSources.some((source)=>source.apiKey)?config.modelSources.find((source)=>source.apiKey)!.id:'demo');
         const model=typeof body.model==='string'?body.model.trim():'';
         if(!model)throw new HttpError('Model is required',400,'model_required');
-        const selection=await gateway.getModel(sourceId,model);
+        const selection=await gateway.getModel(sourceId,model);const fallbackCandidate=sourceId==='demo'?null:await gateway.getFallbackModel(sourceId,model);
         const maxOutput=Number(body.max_completion_tokens??body.max_tokens??4096);if(!Number.isInteger(maxOutput)||maxOutput<1||maxOutput>65536)throw new HttpError('Invalid max output tokens',400,'invalid_max_tokens');
-        const {source: _source, ...rawProviderBody}=body;const providerMaxOutput=Math.max(512,maxOutput);const providerBody={...rawProviderBody,...(body.max_completion_tokens!==undefined?{max_completion_tokens:providerMaxOutput}:{max_tokens:providerMaxOutput})};const reservationId=randomUUID();const reservedCost=gateway.costCents(selection.model,estimatedInputTokens(providerBody),providerMaxOutput);await database.reserveUsage(principal,reservationId,reservedCost);
+        const {source: _source, ...rawProviderBody}=body;const providerMaxOutput=Math.max(512,maxOutput);const providerBody={...rawProviderBody,...(body.max_completion_tokens!==undefined?{max_completion_tokens:providerMaxOutput}:{max_tokens:providerMaxOutput})};const reservationId=randomUUID();const estimatedInput=estimatedInputTokens(providerBody);const reservedCost=Math.max(gateway.costCents(selection.model,estimatedInput,providerMaxOutput),fallbackCandidate?gateway.costCents(fallbackCandidate,estimatedInput,providerMaxOutput):0);await database.reserveUsage(principal,reservationId,reservedCost);
         try {
-          let actualModel=model;let actualSelection=selection;let actualProviderBody=providerBody;let upstream=await gateway.proxyChat(sourceId,actualProviderBody,requestId);let raw=Buffer.from(await upstream.arrayBuffer());
+          let actualModel=model;let actualSelection=selection;let actualProviderBody=providerBody;let upstream=await gateway.proxyChat(sourceId,actualProviderBody,requestId);let raw=await readResponseBuffer(upstream);
           if(!upstream.ok){await database.releaseUsage(principal,reservationId);response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}
           let parsed:unknown;try{parsed=JSON.parse(raw.toString('utf8')) as unknown;}catch{throw new HttpError('Model returned an invalid response',502,'invalid_model_response');}let content=assistantContentFromResponse(parsed);
-          if(!content&&sourceId!=='demo'){const fallback=await gateway.getFallbackModel(sourceId,model);if(fallback){actualModel=fallback.id;actualSelection={source:selection.source,model:fallback};actualProviderBody={...providerBody,model:actualModel};upstream=await gateway.proxyChat(sourceId,actualProviderBody,`${requestId}.fallback`);raw=Buffer.from(await upstream.arrayBuffer());if(!upstream.ok){await database.releaseUsage(principal,reservationId);response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}try{parsed=JSON.parse(raw.toString('utf8')) as unknown;}catch{throw new HttpError('Fallback model returned an invalid response',502,'invalid_model_response');}content=assistantContentFromResponse(parsed);}}
+          if(!content&&fallbackCandidate){actualModel=fallbackCandidate.id;actualSelection={source:selection.source,model:fallbackCandidate};actualProviderBody={...providerBody,model:actualModel};upstream=await gateway.proxyChat(sourceId,actualProviderBody,`${requestId}.fallback`);raw=await readResponseBuffer(upstream);if(!upstream.ok){await database.releaseUsage(principal,reservationId);response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}try{parsed=JSON.parse(raw.toString('utf8')) as unknown;}catch{throw new HttpError('Fallback model returned an invalid response',502,'invalid_model_response');}content=assistantContentFromResponse(parsed);}
           if(!content)throw new HttpError('Model returned an empty response after retry and fallback',502,'empty_model_response');const usage=usageFromResponse(parsed,actualProviderBody,content);const requestFingerprint=createHash('sha256').update(JSON.stringify(actualProviderBody)).digest('hex').slice(0,24);
           const costCents=gateway.costCents(actualSelection.model,usage.inputTokens,usage.outputTokens);const commissionRateBps=actualSelection.source.commissionRateBps;const commissionCents=Math.round(costCents*commissionRateBps/10_000);await database.settleUsage(principal,reservationId,{idempotencyKey:`chat:${requestId}:${requestFingerprint}`,taskId:'chat',sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection:actualSelection.source.paymentDirection,model:actualModel,inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,costCents,commissionRateBps,commissionCents});await database.audit(principal,'chat.complete','model',actualModel,{requestedModel:model,fallbackUsed:actualModel!==model,sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection:actualSelection.source.paymentDirection,...usage,costCents,commissionRateBps,commissionCents});
           const result={...(parsed as Record<string,unknown>),model:actualModel,usage:{...((parsed as {usage?:Record<string,unknown>}).usage??{}),prompt_tokens:usage.inputTokens,completion_tokens:usage.outputTokens},cod_source:sourceId,cod_upstream_source:actualSelection.source.upstreamSourceId,cod_payment_direction:actualSelection.source.paymentDirection,cod_charge_cents:costCents,cod_commission_rate_bps:commissionRateBps,cod_usage_estimated:usage.estimated,cod_requested_model:model,cod_fallback_used:actualModel!==model};const output=Buffer.from(JSON.stringify(result));response.writeHead(upstream.status,{'content-type':'application/json; charset=utf-8','content-length':output.length});response.end(output);return;

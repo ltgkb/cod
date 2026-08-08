@@ -146,6 +146,10 @@ function storageSet(key: string, value: string | null): void {
 
 export function getControlPlaneUrl(): string {
   if (configuredControlPlaneUrl) return configuredControlPlaneUrl.replace(/\/$/, '');
+  const nativeRuntime = (window as Window & { Capacitor?: { isNativePlatform?: () => boolean } }).Capacitor;
+  if (nativeRuntime?.isNativePlatform?.() || window.location.protocol === 'capacitor:' || window.location.protocol === 'ionic:') {
+    return 'https://cod.kai.com';
+  }
   if (window.location.protocol === 'file:') return window.codDesktop?.controlPlaneUrl?.replace(/\/$/, '') ?? '';
   return '';
 }
@@ -301,6 +305,7 @@ export async function sendChat(token: string, source: string, model: string, mes
       result = await request('/v1/chat/completions', token, {
         method: 'POST', headers: { 'x-request-id': requestId },
         body: JSON.stringify({ source, model, messages: sanitizedMessages, max_tokens: 20_000, stream: false }),
+        signal: AbortSignal.timeout(255_000),
       });
       break;
     } catch (error) {

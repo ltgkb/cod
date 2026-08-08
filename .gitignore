@@ -9,4 +9,5 @@ coverage/
 .env.local
 apps/desktop/resources/bin/goose
 apps/desktop/resources/bin/goose.exe
+apps/mobile/release/
 work-server-bundle.mjs

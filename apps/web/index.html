@@ -6,17 +6,8 @@
     <meta name="theme-color" content="#fbfdfd" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <link rel="manifest" href="/manifest.webmanifest" />
-    <script>
-      try {
-        const storedMode = localStorage.getItem('kai.color-mode.v1');
-        document.documentElement.dataset.colorMode = storedMode === 'light' || storedMode === 'dark'
-          ? storedMode
-          : matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-      } catch {
-        document.documentElement.dataset.colorMode = 'light';
-      }
-    </script>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' https://cod.kai.com ws://127.0.0.1:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-src https://hongkong.kai.com; base-uri 'self'; form-action 'self'; object-src 'none'" />
+    <link rel="manifest" href="./manifest.webmanifest" />
     <title>COD</title>
   </head>
   <body>

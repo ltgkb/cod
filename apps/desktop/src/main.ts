@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron';
 import { execFile } from 'node:child_process';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer as createNetServer } from 'node:net';
@@ -17,6 +17,15 @@ const approvedProjectRoots = new Set<string>();
 let gooseSidecar: ChildProcess | null = null;
 let gooseAcpUrl: string | null = null;
 let gooseConfigurationKey: string | null = null;
+
+function isTrustedExternalUrl(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    return url.protocol === 'https:' && (url.hostname === 'kai.com' || url.hostname.endsWith('.kai.com'));
+  } catch {
+    return false;
+  }
+}
 
 async function availablePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -197,13 +206,23 @@ async function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      spellcheck: true,
     },
   });
 
   window.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('https://')) void shell.openExternal(url);
+    if (isTrustedExternalUrl(url)) void shell.openExternal(url);
     return { action: 'deny' };
   });
+  window.webContents.on('will-navigate', (event, url) => {
+    const allowedDevelopmentNavigation = !app.isPackaged && url.startsWith(developmentUrl);
+    if (allowedDevelopmentNavigation) return;
+    event.preventDefault();
+    if (isTrustedExternalUrl(url)) void shell.openExternal(url);
+  });
+  window.webContents.on('will-attach-webview', (event) => event.preventDefault());
 
   if (!app.isPackaged) {
     await window.loadURL(developmentUrl);
@@ -270,6 +289,8 @@ ipcMain.handle('cod:run-command', async (_event, root: string, rawCommand: strin
 });
 
 app.whenReady().then(async () => {
+  session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+  session.defaultSession.setPermissionCheckHandler(() => false);
   await createWindow();
   app.on('activate', async () => {
     if (BrowserWindow.getAllWindows().length === 0) await createWindow();

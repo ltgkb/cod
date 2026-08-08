@@ -218,6 +218,8 @@ CREATE TABLE IF NOT EXISTS cod_payment_orders (
   created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (tenant_id,user_id,idempotency_key)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS cod_payment_orders_provider_event_unique ON cod_payment_orders (provider_event_id) WHERE provider_event_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS cod_payment_orders_provider_payment_unique ON cod_payment_orders (channel,provider_payment_id) WHERE provider_payment_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS cod_compute_requests (
   id uuid PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL, email text NOT NULL,
   kind text NOT NULL CHECK (kind IN ('rental','supply','installment')), offer_id text,
@@ -369,6 +371,7 @@ export class PostgresDatabase implements CodDatabase {
   }
   async completePaymentOrder(event: PaymentCompletion) {
     return this.transaction(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1)),pg_advisory_xact_lock(hashtext($2))',[`payment-event:${event.providerEventId}`,`provider-payment:${event.channel}:${event.providerPaymentId}`]);
       const result = await client.query('SELECT * FROM cod_payment_orders WHERE id=$1 FOR UPDATE',[event.orderId]);
       if (!result.rows[0]) throw new HttpError('Payment order not found',404,'payment_order_not_found');
       const current = paymentOrderFromRow(result.rows[0]);

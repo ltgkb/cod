@@ -174,7 +174,11 @@ export class AiGateway {
   private async fetchJson(url: string, headers: Record<string, string> = {}): Promise<unknown> {
     const response = await this.fetcher(url, { headers: { accept: 'application/json', ...headers }, signal: AbortSignal.timeout(15_000) });
     if (!response.ok) throw new Error(`Catalog request failed: ${response.status}`);
-    return response.json();
+    const advertisedLength = Number(response.headers.get('content-length') ?? 0);
+    if (Number.isFinite(advertisedLength) && advertisedLength > 2 * 1024 * 1024) throw new Error('Catalog response is too large');
+    const text = await response.text();
+    if (text.length > 2 * 1024 * 1024) throw new Error('Catalog response is too large');
+    return JSON.parse(text) as unknown;
   }
 
   private demoResponse(body: unknown): Response {

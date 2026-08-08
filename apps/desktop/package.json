@@ -15,9 +15,10 @@
     "dev": "concurrently -k \"npm run dev -w @cod/web\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "package:linux": "npm run build -w @cod/web && npm run build && electron-builder --linux AppImage deb",
-    "package:mac": "npm run build -w @cod/web && npm run build && electron-builder --mac dmg zip",
-    "package:win": "npm run build -w @cod/web && npm run build && electron-builder --win nsis"
+    "prepare:sidecar": "node ../../scripts/prepare-goose-sidecar.mjs",
+    "package:linux": "npm run build -w @cod/web && npm run build && npm run prepare:sidecar && electron-builder --linux AppImage deb",
+    "package:mac": "npm run build -w @cod/web && npm run build && npm run prepare:sidecar && electron-builder --mac dmg zip",
+    "package:win": "npm run build -w @cod/web && npm run build && npm run prepare:sidecar && electron-builder --win nsis"
   },
   "dependencies": {
     "@cod/contracts": "*"
@@ -68,10 +69,37 @@
     },
     "mac": {
       "category": "public.app-category.developer-tools",
-      "target": ["dmg", "zip"]
+      "target": ["dmg", "zip"],
+      "artifactName": "COD-${version}-mac-${arch}.${ext}",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "extendInfo": {
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": false,
+          "NSAllowsLocalNetworking": true,
+          "NSExceptionDomains": {
+            "127.0.0.1": {
+              "NSIncludesSubdomains": false,
+              "NSTemporaryExceptionAllowsInsecureHTTPLoads": true
+            },
+            "localhost": {
+              "NSIncludesSubdomains": false,
+              "NSTemporaryExceptionAllowsInsecureHTTPLoads": true
+            }
+          }
+        }
+      }
     },
     "win": {
-      "target": ["nsis"]
+      "target": ["nsis"],
+      "artifactName": "COD-${version}-windows-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
     }
   }
 }

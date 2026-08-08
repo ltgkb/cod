@@ -1,4 +1,4 @@
-name: build
+name: build-and-package
 
 on:
   push:
@@ -31,3 +31,53 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - name: Package desktop
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then npm run package:win; fi
+          if [[ "${{ runner.os }}" == "macOS" ]]; then npm run package:mac; fi
+          if [[ "${{ runner.os }}" == "Linux" ]]; then npm run package:linux; fi
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cod-desktop-${{ runner.os }}
+          path: apps/desktop/release/*
+          if-no-files-found: error
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+      - run: npm run package:android
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cod-android-debug
+          path: apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+  ios-simulator:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run package:ios
+      - run: ditto -c -k --sequesterRsrc --keepParent apps/mobile/release/ios-simulator/Build/Products/Release-iphonesimulator/App.app apps/mobile/release/COD-ios-simulator.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cod-ios-simulator
+          path: apps/mobile/release/COD-ios-simulator.zip
+          if-no-files-found: error

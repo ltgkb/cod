@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">COD</string>
+    <string name="title_activity_main">COD</string>
+    <string name="package_name">com.kai.cod</string>
+    <string name="custom_url_scheme">com.kai.cod</string>
+</resources>
