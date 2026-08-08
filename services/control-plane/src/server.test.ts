@@ -128,6 +128,19 @@ describe('control-plane production rules', () => {
     expect((await database.listAudit(principal, 10)).some((entry) => entry.action === 'chat.complete')).toBe(true);
   });
 
+  it('enforces the 20000-token product limit at the billed gateway', async () => {
+    const { base } = await start();
+    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com' }) });
+    const { token } = await login.json() as { token: string };
+    const request = (maxTokens: number) => fetch(`${base}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'coder-pro', messages: [{ role: 'user', content: 'limit' }], max_tokens: maxTokens, stream: false }),
+    });
+    expect((await request(20_001)).status).toBe(400);
+    expect((await request(20_000)).status).toBe(200);
+  });
+
   it('exposes the credit pack catalog and purchases a pack from wallet exactly once', async()=>{
     const {base}=await start({COD_DEVELOPMENT_TOPUP_ENABLED:'true'});const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com'})});const {token}=await login.json() as {token:string};const auth={authorization:`Bearer ${token}`,'content-type':'application/json'};
     await fetch(`${base}/api/topups`,{method:'POST',headers:{...auth,'idempotency-key':'pack-funds'},body:JSON.stringify({amountCents:10000,channel:'pilot'})});

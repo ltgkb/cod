@@ -283,7 +283,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         const model=typeof body.model==='string'?body.model.trim():'';
         if(!model)throw new HttpError('Model is required',400,'model_required');
         const selection=await gateway.getModel(sourceId,model);const fallbackCandidate=sourceId==='demo'?null:await gateway.getFallbackModel(sourceId,model);
-        const maxOutput=Number(body.max_completion_tokens??body.max_tokens??4096);if(!Number.isInteger(maxOutput)||maxOutput<1||maxOutput>65536)throw new HttpError('Invalid max output tokens',400,'invalid_max_tokens');
+        const maxOutput=Number(body.max_completion_tokens??body.max_tokens??4096);if(!Number.isInteger(maxOutput)||maxOutput<1||maxOutput>20_000)throw new HttpError('Invalid max output tokens; COD allows at most 20000',400,'invalid_max_tokens');
         const {source: _source, ...rawProviderBody}=body;const providerMaxOutput=Math.max(512,maxOutput);const providerBody={...rawProviderBody,...(body.max_completion_tokens!==undefined?{max_completion_tokens:providerMaxOutput}:{max_tokens:providerMaxOutput})};const reservationId=randomUUID();const estimatedInput=estimatedInputTokens(providerBody);const reservedCost=Math.max(gateway.costCents(selection.model,estimatedInput,providerMaxOutput),fallbackCandidate?gateway.costCents(fallbackCandidate,estimatedInput,providerMaxOutput):0);await database.reserveUsage(principal,reservationId,reservedCost);
         try {
           let actualModel=model;let actualSelection=selection;let actualProviderBody=providerBody;let upstream=await gateway.proxyChat(sourceId,actualProviderBody,requestId);let raw=await readResponseBuffer(upstream);
