@@ -39,6 +39,7 @@ const demoModels: ModelInfo[] = [
   { id: 'coder-pro', label: 'KAI Coder Pro', contextWindow: 200_000, inputPricePerMillionCents: 260, outputPricePerMillionCents: 1_040 },
   { id: 'chat-fast', label: 'KAI Chat Fast', contextWindow: 128_000, inputPricePerMillionCents: 80, outputPricePerMillionCents: 320 },
 ];
+const preferredModelOrder = ['glm-5.2', 'glm-4.7', 'deepseek-v3.2', 'gpt-5.2'];
 
 function responseData<T>(value: unknown): T {
   if (value && typeof value === 'object' && 'data' in value) return (value as { data: T }).data;
@@ -101,6 +102,13 @@ export class AiGateway {
     return { source, model };
   }
 
+  async getFallbackModel(sourceId: string, excludedModelId: string): Promise<ModelInfo | null> {
+    const source = await this.getSource(sourceId);
+    return source.models.find((model) => model.id !== excludedModelId && preferredModelOrder.includes(model.id))
+      ?? source.models.find((model) => model.id !== excludedModelId)
+      ?? null;
+  }
+
   costCents(model: ModelInfo, inputTokens: number, outputTokens: number): number {
     if (![inputTokens, outputTokens].every((value) => Number.isInteger(value) && value >= 0)) throw new Error('Invalid token usage');
     const raw = (inputTokens * model.inputPricePerMillionCents + outputTokens * model.outputPricePerMillionCents) / 1_000_000;
@@ -153,7 +161,11 @@ export class AiGateway {
       if (authenticated && !advertisedIds.has(id)) return [];
       const inputPrice = Math.max(1, Math.ceil((ratio * 1_000_000 / quotaPerUnit) * yuanPerUnit * 100));
       return [{ id, label: id, contextWindow: 0, inputPricePerMillionCents: inputPrice, outputPricePerMillionCents: Math.max(1, Math.ceil(inputPrice * completionRatio)) }];
-    }).sort((left, right) => left.label.localeCompare(right.label));
+    }).sort((left, right) => {
+      const leftRank = preferredModelOrder.indexOf(left.id); const rightRank = preferredModelOrder.indexOf(right.id);
+      if (leftRank >= 0 || rightRank >= 0) return (leftRank < 0 ? Number.MAX_SAFE_INTEGER : leftRank) - (rightRank < 0 ? Number.MAX_SAFE_INTEGER : rightRank);
+      return left.label.localeCompare(right.label);
+    });
     const callable = authenticated && models.length > 0;
     const statusName = callable ? 'live' : models.length ? 'catalog' : 'unavailable';
     return { id: source.id, label: source.label, upstreamSourceId: source.upstreamSourceId, status: statusName, callable, paymentDirection: source.paymentDirection, commissionRateBps: source.commissionRateBps, models, note: sourceNote(source, callable) };
