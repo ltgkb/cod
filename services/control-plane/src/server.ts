@@ -264,7 +264,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         if(!model)throw new HttpError('Model is required',400,'model_required');
         const selection=await gateway.getModel(sourceId,model);
         const maxOutput=Number(body.max_completion_tokens??body.max_tokens??4096);if(!Number.isInteger(maxOutput)||maxOutput<1||maxOutput>65536)throw new HttpError('Invalid max output tokens',400,'invalid_max_tokens');
-        const {source: _source, ...providerBody}=body;const reservationId=randomUUID();const requestFingerprint=createHash('sha256').update(JSON.stringify(providerBody)).digest('hex').slice(0,24);const reservedCost=gateway.costCents(selection.model,estimatedInputTokens(providerBody),maxOutput);await database.reserveUsage(principal,reservationId,reservedCost);
+        const {source: _source, ...rawProviderBody}=body;const providerMaxOutput=Math.max(512,maxOutput);const providerBody={...rawProviderBody,...(body.max_completion_tokens!==undefined?{max_completion_tokens:providerMaxOutput}:{max_tokens:providerMaxOutput})};const reservationId=randomUUID();const requestFingerprint=createHash('sha256').update(JSON.stringify(providerBody)).digest('hex').slice(0,24);const reservedCost=gateway.costCents(selection.model,estimatedInputTokens(providerBody),providerMaxOutput);await database.reserveUsage(principal,reservationId,reservedCost);
         try {
           const upstream=await gateway.proxyChat(sourceId,providerBody,requestId);const raw=Buffer.from(await upstream.arrayBuffer());
           if(!upstream.ok){await database.releaseUsage(principal,reservationId);response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}
