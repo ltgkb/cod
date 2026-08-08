@@ -1,7 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { TaskStatus, UsageEvent } from '@cod/contracts';
-import { createSessionToken, verifySessionToken } from './auth.js';
+import { createSessionToken, hashPassword, validatePassword, verifyPassword, verifySessionToken } from './auth.js';
 import { BotService, parseBotCommand, parseFeishuWebhook, replyFeishuMessage, verifyWebhookSignature, type BotPlatform } from './bots.js';
 import { loadConfig, type ControlPlaneConfig } from './config.js';
 import { creditPackCatalog, type CodDatabase, type Principal, PostgresDatabase, type TopupRequest } from './database.js';
@@ -24,19 +24,22 @@ const userIdFor = (email: string) => `usr_${createHash('sha256').update(email).d
 const tenantIdFor = (email: string) => `tenant_${email.split('@')[1]?.replace(/[^a-z0-9]+/g, '_') ?? 'unknown'}`;
 const principalFromSession = (session: NonNullable<ReturnType<typeof verifySessionToken>>): Principal => ({ userId: session.sub, tenantId: session.tenantId, email: session.email, role: session.role });
 
-function validateLoginEmail(raw: string | undefined, accessCode: string | undefined, config: ControlPlaneConfig): string {
+const dummyPasswordHash='scrypt$16384$8$1$MDEyMzQ1Njc4OWFiY2RlZg$vNLqtxxHxO9XlDJYZk-T6OzryI7HSubiscMSJDaWZtd0bu3h2vmmdlKsAZpCn3V20q-R_KOLJgJl9mHX32LDiA';
+
+function validateAuthEmail(raw: unknown): string {
+  if(typeof raw!=='string')throw new HttpError('请输入有效邮箱',400,'invalid_email');
   const email = (raw ?? '').trim().toLowerCase();
-  if (!config.developmentLoginEnabled) throw new HttpError('Development login is disabled', 503, 'login_unavailable');
-  if (!/^\S+@\S+\.\S+$/.test(email)) throw new HttpError('Valid email is required', 400, 'invalid_email');
-  if (email !== config.developmentLoginEmail) throw new HttpError('Development login account is not allowed', 403, 'login_forbidden');
-  const domain = email.split('@')[1] ?? '';
-  if (!config.allowedEmailDomains.includes(domain)) throw new HttpError('Email domain is not allowed', 403, 'domain_forbidden');
-  if (config.pilotAccessCodeHash) {
-    const expected = Buffer.from(config.pilotAccessCodeHash, 'hex');
-    const actual = createHash('sha256').update(accessCode ?? '').digest();
-    if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) throw new HttpError('Email or access code is incorrect', 403, 'login_forbidden');
-  }
+  if(email.length>254||!/^\S+@\S+\.\S+$/.test(email))throw new HttpError('请输入有效邮箱',400,'invalid_email');
   return email;
+}
+
+function verifyLegacyAccessCode(accessCode: unknown, config:ControlPlaneConfig):boolean{
+  if(config.pilotAccessCodeHash&&typeof accessCode==='string'){
+    const expected = Buffer.from(config.pilotAccessCodeHash, 'hex');
+    const actual = createHash('sha256').update(accessCode).digest();
+    return expected.length===actual.length&&timingSafeEqual(expected,actual);
+  }
+  return false;
 }
 
 export function usageFromResponse(body: unknown, requestBody: unknown, content: string): { inputTokens: number; outputTokens: number; estimated: boolean } {
@@ -136,7 +139,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       if (request.method === 'GET' && url.pathname === '/metrics') { const ready=await database.health(); response.writeHead(200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8' }); response.end(renderMetrics(ready)); return; }
       if (request.method === 'GET' && url.pathname === '/version') return sendJson(response, 200, { revision: process.env.COD_REVISION ?? 'development', node: process.version });
       if (request.method === 'GET' && url.pathname === '/api/capabilities') return sendJson(response, 200, {
-        authentication: { mode: 'pilot', accessCodeRequired: Boolean(config.pilotAccessCodeHash) },
+        authentication: { mode: 'password', registrationEnabled: true, inviteCodeOptional: true, accessCodeRequired: false },
         ai: { mode: await gateway.mode(), streaming: false },
         knowledge: { mode: knowledge.mode() },
         payments: { topupEnabled: config.developmentTopupEnabled, orderApi: true, mode: config.paymentWebhookSecret ? 'verified-webhook' : config.developmentTopupEnabled ? 'pilot-credit' : 'unavailable' },
@@ -149,13 +152,29 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       if (request.method === 'GET' && url.pathname === '/api/model-catalog') return sendJson(response, 200, await gateway.listSources());
       if (request.method === 'GET' && url.pathname === '/api/compute/offers') return sendJson(response, 200, computeOfferCatalog);
       if (request.method === 'POST' && url.pathname === '/api/auth/login') {
-        const body = await readJson<{ email?: string; accessCode?: string }>(request);
-        const email = validateLoginEmail(body.email, body.accessCode, config);
-        const principal: Principal = { userId: userIdFor(email), tenantId: tenantIdFor(email), email, role: 'member' };
-        await database.ensurePrincipal(principal);
+        const body = await readJson<{ email?: string; password?: string }>(request);
+        const email = validateAuthEmail(body.email);
+        const identity=await database.findIdentityByEmail(email);
+        const passwordMatches=await verifyPassword(body.password,identity?.passwordHash??dummyPasswordHash);
+        if(!identity?.passwordHash||!passwordMatches)throw new HttpError('邮箱或密码错误',401,'invalid_credentials');
+        const principal=identity.principal;
         await database.audit(principal, 'auth.login', 'session', null);
         const token = createSessionToken({ sub: principal.userId, tenantId: principal.tenantId, email, role: principal.role }, config.sessionSecret);
         return sendJson(response, 200, { token, user: { id: principal.userId, email } });
+      }
+      if(request.method==='POST'&&url.pathname==='/api/auth/register'){
+        const body=await readJson<{email?:string;password?:string;inviteCode?:string;legacyAccessCode?:string}>(request);
+        const email=validateAuthEmail(body.email);
+        let password:string;try{password=validatePassword(body.password);}catch(error){throw new HttpError(error instanceof Error?error.message:'密码不符合要求',400,'invalid_password');}
+        const inviteCode=typeof body.inviteCode==='string'&&body.inviteCode.trim()?body.inviteCode.trim().toUpperCase():null;
+        if(inviteCode&&(!/^[A-Z0-9-]{4,32}$/.test(inviteCode)))throw new HttpError('邀请码格式无效',400,'invalid_invite_code');
+        const existing=await database.findIdentityByEmail(email);
+        const allowExisting=Boolean(existing&&!existing.passwordHash&&verifyLegacyAccessCode(body.legacyAccessCode,config));
+        const principal:Principal={userId:userIdFor(email),tenantId:tenantIdFor(email),email,role:'member'};
+        const result=await database.registerIdentity(principal,await hashPassword(password),inviteCode,allowExisting);
+        await database.audit(result.identity.principal,result.created?'auth.register':'auth.legacy_migrated','user',result.identity.principal.userId,{inviteCodeUsed:result.identity.referralCodeUsed});
+        const token=createSessionToken({sub:result.identity.principal.userId,tenantId:result.identity.principal.tenantId,email,role:result.identity.principal.role},config.sessionSecret);
+        return sendJson(response,result.created?201:200,{token,user:{id:result.identity.principal.userId,email},inviteCode:result.identity.inviteCode,referred:Boolean(result.identity.referredByUserId)});
       }
       if (request.method === 'POST' && url.pathname === '/api/webhooks/feishu') {
         if (!config.feishuVerificationToken) throw new HttpError('Feishu integration is not configured', 503, 'feishu_unavailable');
@@ -215,6 +234,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       const session = verifySessionToken(bearerToken(request) ?? '', config.sessionSecret);
       if (!session) return sendJson(response, 401, { error: 'unauthorized' });
       const principal = principalFromSession(session);
+      if(request.method==='GET'&&url.pathname==='/api/referrals')return sendJson(response,200,await database.getReferralSummary(principal));
       if (request.method === 'GET' && url.pathname === '/api/account') return sendJson(response, 200, await database.getAccount(principal));
       if (request.method === 'GET' && url.pathname === '/api/ledger') return sendJson(response, 200, await database.getLedger(principal));
       if (request.method === 'GET' && url.pathname === '/api/compute/requests') return sendJson(response,200,await database.listComputeRequests(principal));

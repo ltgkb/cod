@@ -9,6 +9,8 @@ afterEach(async () => Promise.all(servers.splice(0).map((server) => new Promise<
 
 async function start(overrides: Record<string, string> = {}) {
   const database = new MemoryDatabase();
+  const email='developer@kai.com';
+  await database.registerIdentity({userId:`usr_${createHash('sha256').update(email).digest('hex').slice(0,20)}`,tenantId:'tenant_kai_com',email,role:'member'},'scrypt$16384$8$1$dGVzdC1hdXRoLXNhbHQtMQ$OkZEwwvTyk_BXs8umIBKldU3L-Oit-AkHANDBB81kdN0CCW6-5kqg9cGUwmetGRwxs9g_NiohCkGSni7NtcayQ',null,false);
   const config = loadConfig({ NODE_ENV: 'test', COD_DEVELOPMENT_LOGIN_ENABLED: 'true', COD_DEVELOPMENT_LOGIN_EMAIL: 'developer@kai.com', COD_DEVELOPMENT_TOPUP_ENABLED: 'false', ...overrides });
   const server = createControlPlane({ config, database }); servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -40,17 +42,29 @@ describe('control-plane production rules', () => {
     expect(usageFromResponse({ usage: { prompt_tokens: 12, completion_tokens: 4 } }, {}, 'answer')).toEqual({ inputTokens: 12, outputTokens: 4, estimated: false });
   });
 
-  it('restricts development login and disables direct topups', async () => {
-    const accessCode = 'pilot-access';
-    const { base } = await start({ COD_PILOT_ACCESS_CODE_HASH: createHash('sha256').update(accessCode).digest('hex') });
-    const denied = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'other@kai.com' }) });
-    expect(denied.status).toBe(403);
-    const wrongCode = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com', accessCode: 'wrong' }) });
-    expect(wrongCode.status).toBe(403);
-    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com', accessCode }) });
+  it('uses password login with generic credential errors and disables direct topups', async () => {
+    const { base } = await start();
+    const denied = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'other@kai.com', password:'Password123' }) });
+    expect(denied.status).toBe(401);
+    const wrongPassword = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com', password: 'WrongPassword1' }) });
+    expect(wrongPassword.status).toBe(401);
+    expect(await wrongPassword.json()).toMatchObject({error:'invalid_credentials'});
+    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com', password:'Password123' }) });
     const { token } = await login.json() as { token: string };
     const topup = await fetch(`${base}/api/topups`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'idempotency-key': 'test' }, body: JSON.stringify({ amountCents: 1000, channel: 'pilot' }) });
     expect(topup.status).toBe(403);
+  });
+
+  it('registers with an optional immutable invite binding and issues the 30-day trial once',async()=>{
+    const {base,database}=await start();const email='developer@kai.com';const principal={userId:`usr_${createHash('sha256').update(email).digest('hex').slice(0,20)}`,tenantId:'tenant_kai_com',email,role:'member' as const};
+    const inviter=await database.getReferralSummary(principal);
+    const weak=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'new@example.com',password:'short1'})});expect(weak.status).toBe(400);
+    const invalidInvite=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'new@example.com',password:'Password123',inviteCode:'KAI-NOTFOUND'})});expect(invalidInvite.status).toBe(400);
+    const registration=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'new@example.com',password:'Password123',inviteCode:inviter.inviteCode})});expect(registration.status).toBe(201);
+    const registered=await registration.json() as {token:string;inviteCode:string;referred:boolean};expect(registered).toMatchObject({inviteCode:expect.stringMatching(/^KAI-/),referred:true});
+    const credits=await (await fetch(`${base}/api/credit-packs`,{headers:{authorization:`Bearer ${registered.token}`}})).json() as {summary:{availableCents:number;grants:Array<{packId:string}>}};expect(credits.summary.availableCents).toBe(1000);expect(credits.summary.grants.filter((grant)=>grant.packId==='trial')).toHaveLength(1);
+    const duplicate=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'new@example.com',password:'AnotherPass123'})});expect(duplicate.status).toBe(409);
+    expect((await database.getReferralSummary(principal)).referredUsers).toBe(1);
   });
 
   it('reports integration capabilities and rejects invalid JSON and origins', async () => {
@@ -78,7 +92,7 @@ describe('control-plane production rules', () => {
 
   it('issues idempotent pilot wallet credit when the pilot preload is enabled', async () => {
     const { base } = await start({ COD_DEVELOPMENT_TOPUP_ENABLED: 'true' });
-    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com' }) });
+    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com',password:'Password123' }) });
     const { token } = await login.json() as { token: string };
     const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'idempotency-key': 'pilot-credit-1' };
     const first = await fetch(`${base}/api/topups`, { method: 'POST', headers, body: JSON.stringify({ amountCents: 1000, channel: 'pilot' }) });
@@ -92,7 +106,7 @@ describe('control-plane production rules', () => {
   it('credits only signed, paid, idempotent payment callbacks', async () => {
     const secret = 'payment-secret';
     const { base } = await start({ COD_PAYMENT_WEBHOOK_SECRET: secret });
-    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com' }) });
+    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com',password:'Password123' }) });
     const { token } = await login.json() as { token: string };
     const orderResponse = await fetch(`${base}/api/payment-orders`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'idempotency-key': 'checkout-1' }, body: JSON.stringify({ amountCents: 1200, channel: 'wechat' }) });
     expect(orderResponse.status).toBe(201);
@@ -114,7 +128,7 @@ describe('control-plane production rules', () => {
 
   it('settles every non-stream demo request exactly once', async () => {
     const { base, database } = await start();
-    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com' }) });
+    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com',password:'Password123' }) });
     const { token, user } = await login.json() as { token: string; user: { id: string; email: string } };
     const response = await fetch(`${base}/v1/chat/completions`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: 'coder-pro', messages: [{ role: 'user', content: 'hi' }], stream: false }) });
     expect(response.status).toBe(200);
@@ -130,7 +144,7 @@ describe('control-plane production rules', () => {
 
   it('enforces the 20000-token product limit at the billed gateway', async () => {
     const { base } = await start();
-    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com' }) });
+    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com',password:'Password123' }) });
     const { token } = await login.json() as { token: string };
     const request = (maxTokens: number) => fetch(`${base}/v1/chat/completions`, {
       method: 'POST',
@@ -142,7 +156,7 @@ describe('control-plane production rules', () => {
   });
 
   it('exposes the credit pack catalog and purchases a pack from wallet exactly once', async()=>{
-    const {base}=await start({COD_DEVELOPMENT_TOPUP_ENABLED:'true'});const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com'})});const {token}=await login.json() as {token:string};const auth={authorization:`Bearer ${token}`,'content-type':'application/json'};
+    const {base}=await start({COD_DEVELOPMENT_TOPUP_ENABLED:'true'});const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com',password:'Password123'})});const {token}=await login.json() as {token:string};const auth={authorization:`Bearer ${token}`,'content-type':'application/json'};
     await fetch(`${base}/api/topups`,{method:'POST',headers:{...auth,'idempotency-key':'pack-funds'},body:JSON.stringify({amountCents:10000,channel:'pilot'})});
     const catalog=await (await fetch(`${base}/api/credit-packs`,{headers:auth})).json() as {packs:Array<{id:string;validityDays:number}>;summary:{availableCents:number}};expect(catalog.packs).toHaveLength(4);expect(catalog.packs.every((pack)=>pack.validityDays===180)).toBe(true);expect(catalog.summary.availableCents).toBe(1000);
     const headers={...auth,'idempotency-key':'purchase-1'};const first=await fetch(`${base}/api/credit-packs/standard/purchase`,{method:'POST',headers});const second=await fetch(`${base}/api/credit-packs/standard/purchase`,{method:'POST',headers});expect(first.status).toBe(201);expect(second.status).toBe(201);const result=await first.json() as {account:{balanceCents:number};summary:{availableCents:number};grant:{expiresAt:string;purchasedAt:string}};expect(result.account.balanceCents).toBe(0);expect(result.summary.availableCents).toBe(11400);expect(Math.round((new Date(result.grant.expiresAt).getTime()-new Date(result.grant.purchasedAt).getTime())/86400000)).toBe(180);
@@ -150,7 +164,7 @@ describe('control-plane production rules', () => {
 
   it('binds desktop Agent requests to the source encoded in the gateway route', async () => {
     const { base } = await start();
-    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com' }) });
+    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com',password:'Password123' }) });
     const { token } = await login.json() as { token: string };
     const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
     const response = await fetch(`${base}/v1/sources/demo/chat/completions`, { method: 'POST', headers, body: JSON.stringify({ model: 'coder-pro', messages: [{ role: 'user', content: 'desktop' }] }) });
@@ -167,7 +181,7 @@ describe('control-plane production rules', () => {
     expect(offersResponse.status).toBe(200);
     const offers = await offersResponse.json() as Array<{ id: string; gpuModel: string; priceUnit: string }>;
     expect(offers).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'cod-h100-pcie-card-hour', gpuModel: expect.stringContaining('H100'), priceUnit: 'card-hour' })]));
-    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com' }) });
+    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com',password:'Password123' }) });
     const { token, user } = await login.json() as { token: string; user: { id: string; email: string } };
     const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'idempotency-key': 'compute-rental-1' };
     const body = JSON.stringify({ kind: 'rental', offerId: 'cod-h100-pcie-card-hour', company: 'KAI 科技', contactName: 'Kai', contactPhone: '13800138000', city: '上海', gpuModel: 'NVIDIA H100 PCIe 80GB', quantity: 2, durationHours: 100, requirements: '用于模型微调' });

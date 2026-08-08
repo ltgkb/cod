@@ -30,7 +30,7 @@ export interface CodSession {
 }
 
 export interface CapabilityReport {
-  authentication: { mode: 'pilot'; accessCodeRequired: boolean };
+  authentication: { mode: 'password'; registrationEnabled: boolean; inviteCodeOptional: boolean; accessCodeRequired: false };
   ai: { mode: 'live' | 'demo' | 'unavailable'; streaming: boolean };
   knowledge: { mode: 'live' | 'demo' };
   payments: { topupEnabled: boolean; orderApi: boolean; mode: 'pilot-credit' | 'verified-webhook' | 'unavailable' };
@@ -199,13 +199,19 @@ export async function resumeCodSession(): Promise<CodSession | null> {
   }
 }
 
-export async function loginCod(email: string, accessCode: string): Promise<CodSession> {
+export async function loginCod(email: string, password: string): Promise<CodSession> {
   const login = await request<{ token: string }>('/api/auth/login', undefined, {
     method: 'POST',
-    body: JSON.stringify({ email, accessCode }),
+    body: JSON.stringify({ email, password }),
   });
   storageSet(sessionStorageKey, login.token);
   return hydrateSession(login.token);
+}
+
+export async function registerCod(input:{email:string;password:string;inviteCode?:string;legacyAccessCode?:string}):Promise<CodSession>{
+  const registration=await request<{token:string}>('/api/auth/register',undefined,{method:'POST',body:JSON.stringify(input)});
+  storageSet(sessionStorageKey,registration.token);
+  return hydrateSession(registration.token);
 }
 
 export function logoutCod(): void {

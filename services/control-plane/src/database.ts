@@ -11,6 +11,27 @@ export interface Principal {
   role: 'member' | 'admin';
 }
 
+export interface IdentityRecord {
+  principal: Principal;
+  passwordHash: string | null;
+  inviteCode: string | null;
+  referredByUserId: string | null;
+  referralCodeUsed: string | null;
+}
+
+export interface RegistrationResult {
+  identity: IdentityRecord;
+  created: boolean;
+}
+
+export interface ReferralSummary {
+  inviteCode: string;
+  referredUsers: number;
+  commissionRateBps: number;
+  pendingCommissionCents: number;
+  settledCommissionCents: number;
+}
+
 export interface LedgerEntry {
   id: string;
   type: 'topup' | 'usage' | 'pack_purchase' | 'credit_grant' | 'trial_credit';
@@ -125,6 +146,9 @@ export interface CodDatabase {
   initialize(): Promise<void>;
   health(): Promise<boolean>;
   ensurePrincipal(principal: Principal): Promise<void>;
+  findIdentityByEmail(email: string): Promise<IdentityRecord | null>;
+  registerIdentity(principal: Principal, passwordHash: string, inviteCode: string | null, allowExisting: boolean): Promise<RegistrationResult>;
+  getReferralSummary(principal: Principal): Promise<ReferralSummary>;
   getAccount(principal: Principal): Promise<AccountSummary>;
   getLedger(principal: Principal): Promise<LedgerEntry[]>;
   getCreditSummary(principal: Principal): Promise<CreditSummary>;
@@ -177,6 +201,14 @@ CREATE TABLE IF NOT EXISTS cod_users (
   created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (tenant_id, user_id), UNIQUE (tenant_id, email)
 );
 ALTER TABLE cod_users ALTER COLUMN balance_cents SET DEFAULT 0;
+ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS password_hash text;
+ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS invite_code text;
+ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS referred_by_tenant_id text;
+ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS referred_by_user_id text;
+ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS referral_code_used text;
+ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS referral_commission_rate_bps integer NOT NULL DEFAULT 0 CHECK (referral_commission_rate_bps >= 0 AND referral_commission_rate_bps <= 10000);
+CREATE UNIQUE INDEX IF NOT EXISTS cod_users_email_global_unique ON cod_users (lower(email));
+CREATE UNIQUE INDEX IF NOT EXISTS cod_users_invite_code_unique ON cod_users (upper(invite_code)) WHERE invite_code IS NOT NULL;
 CREATE TABLE IF NOT EXISTS cod_ledger (
   id uuid PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL, type text NOT NULL,
   amount_cents bigint NOT NULL, reference text NOT NULL, idempotency_key text NOT NULL, source_id text, model_id text, payment_direction text, created_at timestamptz NOT NULL DEFAULT now(),
@@ -260,6 +292,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS cod_payment_orders_provider_event_idx ON cod_p
 const accountFromRow = (row: Record<string, unknown>): AccountSummary => ({
   userId: String(row.user_id), displayName: String(row.display_name), balanceCents: Number(row.balance_cents), currency: 'CNY', plan: row.plan === 'team' ? 'team' : 'developer',
 });
+const principalFromUserRow = (row: Record<string, unknown>): Principal => ({ userId: String(row.user_id), tenantId: String(row.tenant_id), email: String(row.email), role: 'member' });
+const identityFromRow = (row: Record<string, unknown>): IdentityRecord => ({
+  principal: principalFromUserRow(row),
+  passwordHash: row.password_hash ? String(row.password_hash) : null,
+  inviteCode: row.invite_code ? String(row.invite_code) : null,
+  referredByUserId: row.referred_by_user_id ? String(row.referred_by_user_id) : null,
+  referralCodeUsed: row.referral_code_used ? String(row.referral_code_used) : null,
+});
 const ledgerFromRow = (row: Record<string, unknown>): LedgerEntry => ({ id: String(row.id), type: row.type as LedgerEntry['type'], amountCents: Number(row.amount_cents), walletAmountCents: Number(row.wallet_amount_cents ?? 0), creditAmountCents: Number(row.credit_amount_cents ?? 0), reference: String(row.reference), sourceId: row.source_id ? String(row.source_id) : null, upstreamSourceId: row.upstream_source_id ? String(row.upstream_source_id) : null, model: row.model_id ? String(row.model_id) : null, paymentDirection: row.payment_direction ? String(row.payment_direction) : null, commissionRateBps: Number(row.commission_rate_bps ?? 0), commissionCents: Number(row.commission_cents ?? 0), createdAt: new Date(String(row.created_at)).toISOString() });
 const creditGrantFromRow = (row: Record<string, unknown>): CreditGrant => ({ id: String(row.id), packId: String(row.pack_id), name: String(row.name), originalCents: Number(row.original_cents), remainingCents: Number(row.remaining_cents), purchasedAt: new Date(String(row.purchased_at)).toISOString(), expiresAt: new Date(String(row.expires_at)).toISOString(), status: row.status as CreditGrant['status'] });
 interface GrantAllocation { grantId: string; amountCents: number }
@@ -308,6 +348,39 @@ export class PostgresDatabase implements CodDatabase {
       await client.query(`INSERT INTO cod_credit_grants (id,tenant_id,user_id,pack_id,name,purchase_price_cents,original_cents,remaining_cents,expires_at,status,idempotency_key) VALUES ($1,$2,$3,'trial','新用户试用金',0,1000,1000,now()+interval '30 days','active',$4)`,[grantId,p.tenantId,p.userId,key]);
       await client.query(`INSERT INTO cod_ledger (id,tenant_id,user_id,type,amount_cents,wallet_amount_cents,credit_amount_cents,reference,idempotency_key,payment_direction) VALUES ($1,$2,$3,'trial_credit',1000,0,1000,'新用户试用金',$4,'平台赠送 → COD 使用额度')`,[randomUUID(),p.tenantId,p.userId,key]);
     });
+  }
+  async findIdentityByEmail(email: string) {
+    const { rows } = await this.pool.query('SELECT * FROM cod_users WHERE lower(email)=lower($1) LIMIT 1',[email]);
+    return rows[0] ? identityFromRow(rows[0]) : null;
+  }
+  async registerIdentity(p: Principal, passwordHash: string, inviteCode: string | null, allowExisting: boolean) {
+    return this.transaction(async(client)=>{
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`auth-register:${p.email.toLowerCase()}`]);
+      const current=await client.query('SELECT * FROM cod_users WHERE lower(email)=lower($1) LIMIT 1 FOR UPDATE',[p.email]);
+      const personalInviteCode=`KAI-${p.userId.replace(/^usr_/,'').slice(0,10).toUpperCase()}`;
+      if(current.rows[0]){
+        if(current.rows[0].password_hash)throw new HttpError('该邮箱已经注册，请直接登录',409,'email_registered');
+        if(!allowExisting)throw new HttpError('这是旧试点账号，请使用旧访问码完成一次性迁移',409,'legacy_migration_required');
+        const {rows}=await client.query(`UPDATE cod_users SET password_hash=$1,invite_code=COALESCE(invite_code,$2),updated_at=now() WHERE tenant_id=$3 AND user_id=$4 RETURNING *`,[passwordHash,personalInviteCode,current.rows[0].tenant_id,current.rows[0].user_id]);
+        return {identity:identityFromRow(rows[0]),created:false};
+      }
+      let inviter:Record<string,unknown>|null=null;
+      if(inviteCode){
+        const found=await client.query('SELECT tenant_id,user_id,invite_code FROM cod_users WHERE upper(invite_code)=upper($1) LIMIT 1',[inviteCode]);
+        inviter=found.rows[0]??null;
+        if(!inviter)throw new HttpError('邀请码无效',400,'invalid_invite_code');
+      }
+      const inserted=await client.query(`INSERT INTO cod_users (tenant_id,user_id,email,display_name,password_hash,invite_code,referred_by_tenant_id,referred_by_user_id,referral_code_used) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,[p.tenantId,p.userId,p.email,p.email.split('@')[0],passwordHash,personalInviteCode,inviter?.tenant_id??null,inviter?.user_id??null,inviter?.invite_code??null]);
+      const grantId=randomUUID();const key='trial-credit-v1';
+      await client.query(`INSERT INTO cod_credit_grants (id,tenant_id,user_id,pack_id,name,purchase_price_cents,original_cents,remaining_cents,expires_at,status,idempotency_key) VALUES ($1,$2,$3,'trial','新用户试用金',0,1000,1000,now()+interval '30 days','active',$4)`,[grantId,p.tenantId,p.userId,key]);
+      await client.query(`INSERT INTO cod_ledger (id,tenant_id,user_id,type,amount_cents,wallet_amount_cents,credit_amount_cents,reference,idempotency_key,payment_direction) VALUES ($1,$2,$3,'trial_credit',1000,0,1000,'新用户试用金',$4,'平台赠送 → COD 使用额度')`,[randomUUID(),p.tenantId,p.userId,key]);
+      return {identity:identityFromRow(inserted.rows[0]),created:true};
+    });
+  }
+  async getReferralSummary(p: Principal) {
+    const {rows}=await this.pool.query(`SELECT u.invite_code,u.referral_commission_rate_bps,(SELECT count(*) FROM cod_users r WHERE r.referred_by_tenant_id=u.tenant_id AND r.referred_by_user_id=u.user_id)::integer AS referred_users FROM cod_users u WHERE u.tenant_id=$1 AND u.user_id=$2`,[p.tenantId,p.userId]);
+    if(!rows[0]||!rows[0].invite_code)throw new HttpError('Referral profile not found',404,'referral_profile_not_found');
+    return {inviteCode:String(rows[0].invite_code),referredUsers:Number(rows[0].referred_users),commissionRateBps:Number(rows[0].referral_commission_rate_bps),pendingCommissionCents:0,settledCommissionCents:0};
   }
   async getAccount(p: Principal) { const { rows } = await this.pool.query('SELECT * FROM cod_users WHERE tenant_id=$1 AND user_id=$2',[p.tenantId,p.userId]); if (!rows[0]) throw new HttpError('Account not found',404,'account_not_found'); return accountFromRow(rows[0]); }
   async getLedger(p: Principal) { const { rows } = await this.pool.query('SELECT * FROM cod_ledger WHERE tenant_id=$1 AND user_id=$2 ORDER BY created_at DESC LIMIT 200',[p.tenantId,p.userId]); return rows.map(ledgerFromRow); }

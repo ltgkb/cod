@@ -202,7 +202,7 @@ async function createWindow() {
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     autoHideMenuBar: true,
     webPreferences: {
-      preload: path.join(moduleDirectory, 'preload.js'),
+      preload: path.join(moduleDirectory, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,

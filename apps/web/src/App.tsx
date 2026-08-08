@@ -56,6 +56,7 @@ import {
   refreshAccount,
   purchaseCreditPack,
   registerDevice,
+  registerCod,
   resumeCodSession,
   searchKnowledge,
   sendChat,
@@ -162,16 +163,31 @@ function Modal({ title, onClose, children, wide = false }: { title: string; onCl
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className={`modal${wide ? ' modal-wide' : ''}`} role="dialog" aria-modal="true" aria-label={title}><header><strong>{title}</strong><button className="icon-button" title="关闭" onClick={onClose}><X /></button></header>{children}</section></div>;
 }
 
-function LoginForm({ capabilities, capabilityError, resumeConversation, onLogin }: { capabilities: CapabilityReport | null; capabilityError: string; resumeConversation: boolean; onLogin: (email: string, accessCode: string) => Promise<void> }) {
-  const [email, setEmail] = useState('developer@kai.com');
-  const [accessCode, setAccessCode] = useState('');
+function LoginForm({ capabilities, capabilityError, resumeConversation, onLogin, onRegister }: { capabilities: CapabilityReport | null; capabilityError: string; resumeConversation: boolean; onLogin: (email: string, password: string) => Promise<void>; onRegister:(input:{email:string;password:string;inviteCode?:string;legacyAccessCode?:string})=>Promise<void> }) {
+  const [mode,setMode]=useState<'login'|'register'>('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword,setConfirmPassword]=useState('');
+  const [inviteCode,setInviteCode]=useState('');
+  const [legacyAccessCode,setLegacyAccessCode]=useState('');
+  const [showLegacyMigration,setShowLegacyMigration]=useState(false);
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setSubmitting(true); setError('');
-    try { await onLogin(email, accessCode); } catch (nextError) { setError(nextError instanceof Error ? nextError.message : '登录失败'); } finally { setSubmitting(false); }
+    try {
+      if(mode==='login')await onLogin(email,password);
+      else{
+        if(password!==confirmPassword)throw new Error('两次输入的密码不一致');
+        await onRegister({email,password,inviteCode:inviteCode.trim()||undefined,legacyAccessCode:legacyAccessCode||undefined});
+      }
+    } catch (nextError) {
+      if(nextError instanceof ApiError&&nextError.code==='legacy_migration_required')setShowLegacyMigration(true);
+      setError(nextError instanceof Error ? nextError.message : mode==='login'?'登录失败':'注册失败');
+    } finally { setSubmitting(false); }
   };
-  return <div className="login-form"><div className="login-copy"><span className="eyebrow">PRIVATE PILOT</span><h2>{resumeConversation ? '登录后继续对话' : '登录 COD'}</h2><p>{resumeConversation ? '你的消息已经保留。登录成功后，COD 会自动发送这条消息。' : '使用获批的 KAI 账号和试点访问码登录。'}</p></div>{capabilityError && <div className="notice error">{capabilityError}</div>}<form onSubmit={submit}><label>邮箱<input aria-label="邮箱" type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" required /></label><label>访问码<input aria-label="访问码" type="password" value={accessCode} onChange={(event) => setAccessCode(event.target.value)} autoComplete="current-password" required={capabilities?.authentication.accessCodeRequired ?? true} autoFocus /></label>{error && <div className="notice error">{error}</div>}<button className="primary-button" disabled={submitting}>{submitting ? <CircleNotch className="spin" /> : <Key />} {resumeConversation ? '登录并继续' : '登录'}</button></form><div className="capability-summary"><span className={capabilities?.ai.mode === 'live' ? 'live' : 'demo'}>模型：{capabilities?.ai.mode === 'live' ? '已连接' : capabilities?.ai.mode === 'demo' ? '演示模式' : '待检测'}</span><span>同步：{capabilities ? '可用' : '待检测'}</span></div></div>;
+  const switchMode=(next:'login'|'register')=>{setMode(next);setError('');setShowLegacyMigration(false);setLegacyAccessCode('');};
+  return <div className="login-form"><div className="auth-tabs" role="tablist"><button type="button" className={mode==='login'?'active':''} onClick={()=>switchMode('login')}>密码登录</button><button type="button" className={mode==='register'?'active':''} onClick={()=>switchMode('register')}>注册账号</button></div><div className="login-copy"><span className="eyebrow">KAI ACCOUNT</span><h2>{resumeConversation ? `${mode==='login'?'登录':'注册'}后继续对话` : mode==='login'?'登录 COD':'注册 COD'}</h2><p>{resumeConversation ? '你的消息已保留，认证成功后会自动发送。' : mode==='login'?'使用邮箱和密码登录。':'注册即获 ¥10 试用金，有效期 30 天。邀请码选填，用于绑定邀请人与后续返佣。'}</p></div>{capabilityError && <div className="notice error">{capabilityError}</div>}<form onSubmit={submit}><label>邮箱<input aria-label="邮箱" type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" required autoFocus /></label><label>密码<input aria-label="密码" type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode==='login'?'current-password':'new-password'} minLength={10} maxLength={128} required /></label>{mode==='register'&&<><label>确认密码<input aria-label="确认密码" type="password" value={confirmPassword} onChange={(event)=>setConfirmPassword(event.target.value)} autoComplete="new-password" minLength={10} maxLength={128} required /></label><label>邀请码 <small>选填</small><input aria-label="邀请码" value={inviteCode} onChange={(event)=>setInviteCode(event.target.value.toUpperCase())} autoComplete="off" maxLength={32} placeholder="例如 KAI-XXXXXXXXXX" /></label>{showLegacyMigration&&<label>旧试点访问码 <small>仅迁移一次</small><input aria-label="旧试点访问码" type="password" value={legacyAccessCode} onChange={(event)=>setLegacyAccessCode(event.target.value)} autoComplete="off" required /></label>}<p className="password-hint">密码须为 10–128 位，并同时包含字母和数字。邀请关系注册后不可自行更改。</p></>}{error && <div className="notice error">{error}</div>}<button className="primary-button" disabled={submitting}>{submitting ? <CircleNotch className="spin" /> : <Key />} {resumeConversation ? `${mode==='login'?'登录':'注册'}并继续` : mode==='login'?'登录':'注册并领取试用金'}</button></form><div className="capability-summary"><span className={capabilities?.ai.mode === 'live' ? 'live' : 'demo'}>模型：{capabilities?.ai.mode === 'live' ? '已连接' : capabilities?.ai.mode === 'demo' ? '演示模式' : '待检测'}</span><span>认证：邮箱密码</span></div></div>;
 }
 
 function ModelLibrary({ sources, error, signedIn, onLogin }: { sources: ModelSourceInfo[]; error: string; signedIn: boolean; onLogin: () => void }) {
@@ -397,9 +413,13 @@ export function App() {
     if (recentRoot) loadProject(recentRoot).then((snapshot) => snapshot && setProject(snapshot)).catch(() => storageSet('cod.project.root', ''));
   }, []);
 
-  const handleLogin = async (email: string, accessCode: string) => {
-    const nextSession = await loginCod(email, accessCode);
+  const handleLogin = async (email: string, password: string) => {
+    const nextSession = await loginCod(email, password);
     await loadWorkspace(nextSession); setSession(nextSession); setAuthState('signed-in'); setOverlay(null);
+  };
+  const handleRegister=async(input:{email:string;password:string;inviteCode?:string;legacyAccessCode?:string})=>{
+    const nextSession=await registerCod(input);
+    await loadWorkspace(nextSession);setSession(nextSession);setAuthState('signed-in');setOverlay(null);
   };
   const handleLogout = () => { void window.codDesktop?.stopGoose(); logoutCod(); setSession(null); setTasks([]); setDevices([]); setCreditPacks({ packs: [], summary: { availableCents: 0, grants: [] } }); setCurrentDeviceId(''); setPendingSend(null); setOverlay(null); setAuthState('signed-out'); };
   const refreshWallet = async () => {
@@ -590,7 +610,7 @@ export function App() {
         </div></section>
     </main>
     {inspectorOpen && <aside className="inspector"><div className="inspector-tabs"><button className={inspectorTab === 'changes' ? 'active' : ''} onClick={() => setInspectorTab('changes')}><GitDiff /> 改动</button><button className={inspectorTab === 'files' ? 'active' : ''} onClick={() => setInspectorTab('files')}><Folder /> 文件</button><button className={inspectorTab === 'terminal' ? 'active' : ''} onClick={() => setInspectorTab('terminal')}><TerminalWindow /> 终端</button><button className="inspector-close" title="隐藏右侧面板" onClick={toggleInspector}><X /></button></div><div className="inspector-body">{inspectorTab === 'changes' && <><div className="panel-title"><span><GitDiff /> 未提交改动</span><button title="刷新" onClick={refreshProject}><ArrowClockwise /></button></div>{project.root ? <CodeBlock text={project.diff || '当前项目没有未提交改动。'} /> : <div className="panel-empty">Web 端不伪造 Diff。请在 COD Desktop 中选择本机项目。</div>}</>}{inspectorTab === 'files' && <>{project.root ? <><div className="panel-title"><span><Folder /> 项目文件</span><small>{project.files.length}</small></div><FileTree files={project.files} selected={project.selectedFile} onSelect={handleFileSelect} />{project.selectedFile && <div className="file-preview"><strong>{project.selectedFile}</strong><CodeBlock text={project.selectedContent} /></div>}</> : <div className="panel-empty">本机文件仅在 COD Desktop 中可用。</div>}</>}{inspectorTab === 'terminal' && <>{window.codDesktop && project.root ? <><div className="panel-title"><span><TerminalWindow /> 本地终端</span><small>desktop</small></div><div className="terminal"><pre>{terminalOutput}</pre><div className="terminal-command"><span>$</span><input aria-label="终端命令" value={command} onChange={(event) => setCommand(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && handleRun()} /><button onClick={handleRun}>运行</button></div></div></> : <div className="panel-empty">Web 端不会执行或伪造终端结果。请使用 COD Desktop。</div>}</>}</div></aside>}
-    {overlay === 'login' && <Modal title={pendingSend ? '登录后继续' : '登录 COD'} onClose={() => { setPendingSend(null); setOverlay(null); }}><LoginForm capabilities={capabilities} capabilityError={capabilityError} resumeConversation={Boolean(pendingSend)} onLogin={handleLogin} /></Modal>}
+    {overlay === 'login' && <Modal title={pendingSend ? '登录后继续' : '登录 COD'} onClose={() => { setPendingSend(null); setOverlay(null); }}><LoginForm capabilities={capabilities} capabilityError={capabilityError} resumeConversation={Boolean(pendingSend)} onLogin={handleLogin} onRegister={handleRegister} /></Modal>}
     {overlay === 'models' && <Modal title="模型库" wide onClose={() => setOverlay(null)}><ModelLibrary sources={modelCatalog} error={modelCatalogError} signedIn={Boolean(session)} onLogin={() => setOverlay('login')} /></Modal>}
     {overlay === 'compute' && <Modal title="COD 算力市场 · 机房直供 / 卡时 / 分期" wide onClose={() => setOverlay(null)}><ComputeMarket offers={computeOffers} requests={computeRequests} signedIn={Boolean(session)} onLogin={() => setOverlay('login')} onSubmit={handleComputeRequest} /></Modal>}
     {overlay === 'new-task' && session && <Modal title="新建任务" onClose={() => setOverlay(null)}><form className="modal-form" onSubmit={handleCreateTask}><label>任务标题<input aria-label="任务标题" value={newTaskTitle} onChange={(event) => setNewTaskTitle(event.target.value)} placeholder="例如：审计登录流程" required autoFocus /></label><label>目标设备<select aria-label="目标设备" value={targetDeviceId} onChange={(event) => setTargetDeviceId(event.target.value)} required>{devices.map((device) => <option key={device.id} value={device.id}>{device.name} · {device.status}</option>)}</select></label><button className="primary-button" disabled={!newTaskTitle.trim() || !targetDeviceId}><Plus /> 创建并同步</button></form></Modal>}

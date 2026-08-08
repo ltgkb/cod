@@ -11,7 +11,7 @@ afterEach(() => {
 });
 
 const capabilities = {
-  authentication: { mode: 'pilot', accessCodeRequired: true },
+  authentication: { mode: 'password', registrationEnabled: true, inviteCodeOptional: true, accessCodeRequired: false },
   ai: { mode: 'demo', streaming: false },
   knowledge: { mode: 'demo' },
   payments: { topupEnabled: false, orderApi: true, mode: 'unavailable' as const },
@@ -56,7 +56,7 @@ describe('COD workspace', () => {
     fireEvent.change(composer, { target: { value: '这是我的第一条消息' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
     const dialog = await screen.findByRole('dialog', { name: '登录后继续' });
-    expect(within(dialog).getByLabelText('访问码')).toBeRequired();
+    expect(within(dialog).getByLabelText('密码')).toBeRequired();
     expect(composer).toHaveValue('这是我的第一条消息');
   });
 
@@ -153,7 +153,8 @@ describe('COD workspace', () => {
     fireEvent.change(composer, { target: { value: '登录后自动发送' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
     const dialog = await screen.findByRole('dialog', { name: '登录后继续' });
-    fireEvent.change(within(dialog).getByLabelText('访问码'), { target: { value: 'pilot' } });
+    fireEvent.change(within(dialog).getByLabelText('邮箱'), { target: { value: 'developer@kai.com' } });
+    fireEvent.change(within(dialog).getByLabelText('密码'), { target: { value: 'Password123' } });
     fireEvent.click(within(dialog).getByRole('button', { name: '登录并继续' }));
     expect(await screen.findByText('自动回复')).toBeInTheDocument();
     expect(screen.getByText(/输入 12 \/ 输出 34 Token/)).toBeInTheDocument();
@@ -164,7 +165,7 @@ describe('COD workspace', () => {
 
   it('runs the same prompt through two selected models and renders a comparison', async()=>{
     let taskVersion=1;const fetchMock=vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{const url=String(input);if(url.endsWith('/api/capabilities'))return json(capabilities);if(url.endsWith('/api/auth/login'))return json({token:'test-token'});if(url.endsWith('/api/account'))return json({userId:'user',displayName:'developer',balanceCents:5000,currency:'CNY',plan:'developer'});if(url.endsWith('/api/model-sources'))return json([{id:'ai-kai',label:'AI.KAI.COM',status:'live',callable:true,paymentDirection:'钱包 → ai.kai.com',note:'已连接',models:[{id:'model-a',label:'模型 A',contextWindow:128000,inputPricePerMillionCents:100,outputPricePerMillionCents:200},{id:'model-b',label:'模型 B',contextWindow:128000,inputPricePerMillionCents:150,outputPricePerMillionCents:300}]}]);if(url.endsWith('/api/devices')&&init?.method==='POST')return json({id:'web-device',name:'COD Web',platform:'web',status:'online',lastSeenAt:new Date().toISOString()},201);if(url.endsWith('/api/devices'))return json([]);if(url.endsWith('/api/tasks')&&init?.method==='POST')return json({id:'compare-task',title:'同一个问题',status:'draft',deviceId:'web-device',updatedAt:new Date().toISOString(),version:taskVersion},201);if(url.endsWith('/api/tasks'))return json([]);if(/\/api\/tasks\/compare-task\/status$/.test(url)){const body=JSON.parse(String(init?.body)) as {status:'running'|'complete'};taskVersion+=1;return json({id:'compare-task',title:'同一个问题',status:body.status,deviceId:'web-device',updatedAt:new Date().toISOString(),version:taskVersion,result:body.status==='complete'?'比较完成':null,error:null});}if(url.endsWith('/v1/chat/completions')){const body=JSON.parse(String(init?.body)) as {model:string;messages:Array<{content:string}>};return json({choices:[{message:{content:`${body.model} 的回答`}}],usage:{prompt_tokens:10,completion_tokens:20},cod_source:'ai-kai'});}if(url.endsWith('/api/credit-packs'))return json(creditPacks);if(url.endsWith('/api/products')||url.endsWith('/api/ledger'))return json([]);throw new Error(`Unexpected request: ${url}`);});
-    vi.stubGlobal('fetch',fetchMock);render(<App/>);await screen.findByRole('heading',{name:'新对话'});fireEvent.click(screen.getByTitle('登录'));const dialog=await screen.findByRole('dialog',{name:'登录 COD'});fireEvent.change(within(dialog).getByLabelText('访问码'),{target:{value:'pilot'}});fireEvent.click(within(dialog).getByRole('button',{name:'登录'}));await screen.findByRole('heading',{name:'新建或选择任务'});fireEvent.click(screen.getByTitle('普通对话'));fireEvent.click(screen.getByRole('button',{name:/多模型对比/}));expect(screen.getByText('本次发送将产生 2 次独立计费请求')).toBeInTheDocument();const composer=screen.getByPlaceholderText('输入一个问题，同时询问 2 个模型...');fireEvent.change(composer,{target:{value:'同一个问题'}});fireEvent.click(screen.getByRole('button',{name:'发送'}));expect(await screen.findByText('model-a 的回答')).toBeInTheDocument();expect(screen.getByText('model-b 的回答')).toBeInTheDocument();expect(screen.getByText('同一问题 · 2 个模型')).toBeInTheDocument();const calls=fetchMock.mock.calls.filter(([url])=>String(url).endsWith('/v1/chat/completions'));expect(calls).toHaveLength(2);expect(calls.map(([,init])=>(JSON.parse(String(init?.body)) as {model:string}).model).sort()).toEqual(['model-a','model-b']);fireEvent.click(screen.getAllByRole('button',{name:'选用此模型'})[1]);expect(screen.getByRole('combobox',{name:'模型'})).toHaveValue('model-b');expect(screen.getAllByText('已将 AI.KAI.COM · 模型 B 设为默认模型。').length).toBeGreaterThan(0);
+    vi.stubGlobal('fetch',fetchMock);render(<App/>);await screen.findByRole('heading',{name:'新对话'});fireEvent.click(screen.getByTitle('登录'));const dialog=await screen.findByRole('dialog',{name:'登录 COD'});fireEvent.change(within(dialog).getByLabelText('邮箱'),{target:{value:'developer@kai.com'}});fireEvent.change(within(dialog).getByLabelText('密码'),{target:{value:'Password123'}});fireEvent.click(within(dialog).getByRole('button',{name:'登录'}));await screen.findByRole('heading',{name:'新建或选择任务'});fireEvent.click(screen.getByTitle('普通对话'));fireEvent.click(screen.getByRole('button',{name:/多模型对比/}));expect(screen.getByText('本次发送将产生 2 次独立计费请求')).toBeInTheDocument();const composer=screen.getByPlaceholderText('输入一个问题，同时询问 2 个模型...');fireEvent.change(composer,{target:{value:'同一个问题'}});fireEvent.click(screen.getByRole('button',{name:'发送'}));expect(await screen.findByText('model-a 的回答')).toBeInTheDocument();expect(screen.getByText('model-b 的回答')).toBeInTheDocument();expect(screen.getByText('同一问题 · 2 个模型')).toBeInTheDocument();const calls=fetchMock.mock.calls.filter(([url])=>String(url).endsWith('/v1/chat/completions'));expect(calls).toHaveLength(2);expect(calls.map(([,init])=>(JSON.parse(String(init?.body)) as {model:string}).model).sort()).toEqual(['model-a','model-b']);fireEvent.click(screen.getAllByRole('button',{name:'选用此模型'})[1]);expect(screen.getByRole('combobox',{name:'模型'})).toHaveValue('model-b');expect(screen.getAllByText('已将 AI.KAI.COM · 模型 B 设为默认模型。').length).toBeGreaterThan(0);
   });
 
   it('loads synchronized tasks, filters them, and does not fake Web terminal output', async () => {
@@ -189,7 +190,8 @@ describe('COD workspace', () => {
     await screen.findByRole('heading', { name: '新对话' });
     fireEvent.click(screen.getByTitle('登录'));
     const loginDialog = await screen.findByRole('dialog', { name: '登录 COD' });
-    fireEvent.change(within(loginDialog).getByLabelText('访问码'), { target: { value: 'pilot' } });
+    fireEvent.change(within(loginDialog).getByLabelText('邮箱'), { target: { value: 'developer@kai.com' } });
+    fireEvent.change(within(loginDialog).getByLabelText('密码'), { target: { value: 'Password123' } });
     fireEvent.click(within(loginDialog).getByRole('button', { name: '登录' }));
     expect(await screen.findByRole('heading', { name: '真实同步任务', level: 1 })).toBeInTheDocument();
     expect(screen.getByRole('combobox', { name: '模型源' })).toHaveValue('ai-kai');

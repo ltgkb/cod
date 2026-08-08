@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { AccountSummary, DeviceRecord, TaskStatus, UsageEvent } from '@cod/contracts';
-import { creditPackCatalog, validateDeviceInput, validateTaskTransition, type AuditEntry, type CodDatabase, type CreditGrant, type CreditSummary, type LedgerEntry, type PaymentCompletion, type PaymentOrder, type PaymentOrderRequest, type Principal, type SyncedTask, type TaskEvent, type TaskOutcome, type TopupRequest } from './database.js';
+import { creditPackCatalog, validateDeviceInput, validateTaskTransition, type AuditEntry, type CodDatabase, type CreditGrant, type CreditSummary, type IdentityRecord, type LedgerEntry, type PaymentCompletion, type PaymentOrder, type PaymentOrderRequest, type Principal, type SyncedTask, type TaskEvent, type TaskOutcome, type TopupRequest } from './database.js';
 import { HttpError } from './errors.js';
 import type { ComputeRequest, ComputeRequestInput } from './compute-market.js';
 
@@ -23,11 +23,23 @@ interface UserState {
 
 export class MemoryDatabase implements CodDatabase {
   private readonly users = new Map<string, UserState>();
+  private readonly identities = new Map<string, IdentityRecord>();
   private readonly providerEvents = new Map<string, string>();
   async initialize() {}
   async close() {}
   async health() { return true; }
-  async ensurePrincipal(p: Principal) { this.state(p); }
+  async ensurePrincipal(p: Principal) { this.state(p);this.ensureLegacyIdentity(p); }
+  async findIdentityByEmail(email:string){return this.identities.get(email.toLowerCase())??null;}
+  async registerIdentity(p:Principal,passwordHash:string,inviteCode:string|null,allowExisting:boolean){
+    const email=p.email.toLowerCase();const current=this.identities.get(email);
+    if(current?.passwordHash)throw new HttpError('该邮箱已经注册，请直接登录',409,'email_registered');
+    if(current&&!allowExisting)throw new HttpError('这是旧试点账号，请使用旧访问码完成一次性迁移',409,'legacy_migration_required');
+    let inviter:IdentityRecord|null=null;
+    if(inviteCode){inviter=[...this.identities.values()].find((identity)=>identity.inviteCode?.toUpperCase()===inviteCode.toUpperCase())??null;if(!inviter)throw new HttpError('邀请码无效',400,'invalid_invite_code');}
+    const identity:IdentityRecord={principal:current?.principal??p,passwordHash,inviteCode:current?.inviteCode??`KAI-${p.userId.replace(/^usr_/,'').slice(0,10).toUpperCase()}`,referredByUserId:current?.referredByUserId??inviter?.principal.userId??null,referralCodeUsed:current?.referralCodeUsed??inviter?.inviteCode??null};
+    this.state(identity.principal);this.identities.set(email,identity);return{identity,created:!current};
+  }
+  async getReferralSummary(p:Principal){const identity=this.identities.get(p.email.toLowerCase());if(!identity?.inviteCode)throw new HttpError('Referral profile not found',404,'referral_profile_not_found');return{inviteCode:identity.inviteCode,referredUsers:[...this.identities.values()].filter((item)=>item.referredByUserId===p.userId).length,commissionRateBps:0,pendingCommissionCents:0,settledCommissionCents:0};}
   async getAccount(p: Principal) { return { ...this.state(p).account }; }
   async getLedger(p: Principal) { return [...this.state(p).ledger]; }
   async getCreditSummary(p:Principal):Promise<CreditSummary>{const state=this.state(p);this.expireGrants(state);const grants=[...state.creditGrants.values()].sort((a,b)=>a.expiresAt.localeCompare(b.expiresAt));return{availableCents:grants.filter((grant)=>grant.status==='active').reduce((total,grant)=>total+grant.remainingCents,0),grants:grants.map((grant)=>({...grant}))};}
@@ -82,6 +94,7 @@ export class MemoryDatabase implements CodDatabase {
   async audit(p:Principal,action:string,entityType:string,entityId:string|null,data:unknown={}){this.state(p).audit.unshift({id:randomUUID(),action,entityType,entityId,data,createdAt:new Date().toISOString()});}
   async listAudit(p:Principal,limit:number){return this.state(p).audit.slice(0,Math.min(Math.max(limit,1),200));}
   private key(p:Principal){return `${p.tenantId}:${p.userId}`;}
+  private ensureLegacyIdentity(p:Principal){const email=p.email.toLowerCase();if(!this.identities.has(email))this.identities.set(email,{principal:p,passwordHash:null,inviteCode:`KAI-${p.userId.replace(/^usr_/,'').slice(0,10).toUpperCase()}`,referredByUserId:null,referralCodeUsed:null});}
   private state(p:Principal){const key=this.key(p);let state=this.users.get(key);if(!state){const now=new Date();const trial:CreditGrant={id:randomUUID(),packId:'trial',name:'新用户试用金',originalCents:1000,remainingCents:1000,purchasedAt:now.toISOString(),expiresAt:new Date(now.getTime()+30*24*60*60*1000).toISOString(),status:'active'};const trialEntry:LedgerEntry={id:randomUUID(),type:'trial_credit',amountCents:1000,walletAmountCents:0,creditAmountCents:1000,createdAt:now.toISOString(),reference:'新用户试用金',sourceId:null,model:null,paymentDirection:'平台赠送 → COD 使用额度'};state={account:{userId:p.userId,displayName:p.email.split('@')[0],balanceCents:0,currency:'CNY',plan:'developer'},ledger:[trialEntry],idempotency:new Map(),devices:new Map(),tasks:new Map(),events:[],audit:[],reservations:new Map(),creditGrants:new Map([[trial.id,trial]]),creditPackIdempotency:new Map(),paymentOrders:new Map(),paymentIdempotency:new Map(),computeRequests:new Map(),computeIdempotency:new Map()};this.users.set(key,state);}return state;}
   private expireGrants(state:UserState){for(const [id,grant] of state.creditGrants)if(grant.status==='active'&&new Date(grant.expiresAt).getTime()<=Date.now())state.creditGrants.set(id,{...grant,status:'expired'});}
   private allocateFunds(state:UserState,amountCents:number){this.expireGrants(state);let remaining=amountCents;const grantAllocations:Array<{grantId:string;amountCents:number}>=[];const active=[...state.creditGrants.values()].filter((grant)=>grant.status==='active'&&grant.remainingCents>0).sort((a,b)=>a.expiresAt.localeCompare(b.expiresAt));for(const grant of active){if(remaining<=0)break;const amount=Math.min(grant.remainingCents,remaining);grantAllocations.push({grantId:grant.id,amountCents:amount});remaining-=amount;state.creditGrants.set(grant.id,{...grant,remainingCents:grant.remainingCents-amount,status:grant.remainingCents===amount?'depleted':'active'});}if(state.account.balanceCents<remaining){for(const allocation of grantAllocations)this.restoreGrant(state,allocation.grantId,allocation.amountCents);throw new HttpError('Insufficient balance',402,'insufficient_balance');}state.account={...state.account,balanceCents:state.account.balanceCents-remaining};return{walletCents:remaining,grantAllocations};}
