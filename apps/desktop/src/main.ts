@@ -39,17 +39,31 @@ async function availablePort(): Promise<number> {
   });
 }
 
-async function waitForGoose(port: number, attempts = 50): Promise<void> {
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/status`);
-      if (response.ok) return;
-    } catch {
-      // The sidecar is still starting.
+async function waitForGoose(port: number, processToWatch: ChildProcess, attempts = 50): Promise<void> {
+  let startupError: Error | null = null;
+  const handleError = (error: Error) => { startupError = new Error(`Goose sidecar failed to start: ${error.message}`); };
+  const handleExit = (code: number | null, signal: NodeJS.Signals | null) => {
+    startupError = new Error(`Goose sidecar exited before becoming ready${code !== null ? ` (exit ${code})` : signal ? ` (${signal})` : ''}`);
+  };
+  processToWatch.once('error', handleError);
+  processToWatch.once('exit', handleExit);
+  try {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (startupError) throw startupError;
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/status`);
+        if (response.ok) return;
+      } catch {
+        // The sidecar is still starting.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
     }
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    if (startupError) throw startupError;
+    throw new Error('Goose sidecar did not become ready');
+  } finally {
+    processToWatch.removeListener('error', handleError);
+    processToWatch.removeListener('exit', handleExit);
   }
-  throw new Error('Goose sidecar did not become ready');
 }
 
 async function stopGooseSidecar(): Promise<void> {
@@ -102,7 +116,7 @@ async function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | 
   controlPlane.pathname = `${controlPlane.pathname.replace(/\/$/, '')}/v1/sources/${encodeURIComponent(config.sourceId)}`;
   controlPlane.search = '';
   controlPlane.hash = '';
-  gooseSidecar = spawn(binary, ['serve', '--platform', 'desktop', '--host', '127.0.0.1', '--port', String(port)], {
+  const spawnedSidecar = spawn(binary, ['serve', '--host', '127.0.0.1', '--port', String(port)], {
     stdio: 'ignore',
     env: {
       ...process.env,
@@ -114,16 +128,20 @@ async function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | 
       OPENAI_API_KEY: config.token,
     },
   });
-  gooseSidecar.once('exit', () => {
+  gooseSidecar = spawnedSidecar;
+  const clearSpawnedSidecar = () => {
+    if (gooseSidecar !== spawnedSidecar) return;
     gooseSidecar = null;
     gooseAcpUrl = null;
     gooseConfigurationKey = null;
-  });
+  };
+  spawnedSidecar.once('exit', clearSpawnedSidecar);
+  spawnedSidecar.once('error', clearSpawnedSidecar);
   try {
-    await waitForGoose(port);
+    await waitForGoose(port, spawnedSidecar);
   } catch (error) {
-    gooseSidecar.kill();
-    gooseSidecar = null;
+    if (spawnedSidecar.exitCode === null && !spawnedSidecar.killed) spawnedSidecar.kill();
+    clearSpawnedSidecar();
     throw error;
   }
   gooseAcpUrl = `ws://127.0.0.1:${port}/acp?token=${secret}`;
@@ -256,6 +274,12 @@ ipcMain.handle('cod:read-text-file', async (_event, root: string, relativePath: 
 ipcMain.handle('cod:git-diff', async (_event, root: string) => {
   try {
     const resolvedRoot = await approvedProjectRoot(root);
+    try {
+      const { stdout } = await execFileAsync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: resolvedRoot, maxBuffer: 64 * 1024 });
+      if (stdout.trim() !== 'true') return '当前目录不是 Git 工作区，暂无可显示的改动。';
+    } catch {
+      return '当前目录不是 Git 仓库，暂无可显示的改动。初始化 Git 后即可在这里查看变更。';
+    }
     const [{ stdout: unstaged }, { stdout: staged }] = await Promise.all([
       execFileAsync('git', ['diff', '--no-ext-diff', '--'], { cwd: resolvedRoot, maxBuffer: 2 * 1024 * 1024 }),
       execFileAsync('git', ['diff', '--cached', '--no-ext-diff', '--'], { cwd: resolvedRoot, maxBuffer: 2 * 1024 * 1024 }),

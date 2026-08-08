@@ -142,6 +142,24 @@ describe('control-plane production rules', () => {
     expect((await database.listAudit(principal, 10)).some((entry) => entry.action === 'chat.complete')).toBe(true);
   });
 
+  it('serves billed desktop streaming requests as valid SSE and settles them once', async () => {
+    const { base, database } = await start();
+    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com',password:'Password123' }) });
+    const { token, user } = await login.json() as { token: string; user: { id: string; email: string } };
+    const response = await fetch(`${base}/v1/chat/completions`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: 'coder-pro', messages: [{ role: 'user', content: 'stream this reply' }], stream: true }) });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('text/event-stream');
+    expect(response.headers.get('x-accel-buffering')).toBe('no');
+    const events=(await response.text()).split('\n\n').filter(Boolean);
+    expect(events.at(-1)).toBe('data: [DONE]');
+    const chunks=events.slice(0,-1).map((event)=>JSON.parse(event.replace(/^data: /,'')) as {object:string;choices:Array<{delta:{content?:string};finish_reason:string|null}>;usage?:{prompt_tokens:number;completion_tokens:number;total_tokens:number}});
+    expect(chunks[0]).toMatchObject({object:'chat.completion.chunk',choices:[{delta:{role:'assistant',content:expect.any(String)},finish_reason:null}]});
+    expect(chunks.at(-1)).toMatchObject({choices:[{delta:{},finish_reason:'stop'}],usage:{prompt_tokens:expect.any(Number),completion_tokens:expect.any(Number),total_tokens:expect.any(Number)}});
+    const principal = { userId: user.id, tenantId: 'tenant_kai_com', email: user.email, role: 'member' as const };
+    expect(await database.getLedger(principal)).toHaveLength(2);
+    expect((await database.getCreditSummary(principal)).availableCents).toBe(999);
+  });
+
   it('enforces the 20000-token product limit at the billed gateway', async () => {
     const { base } = await start();
     const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com',password:'Password123' }) });
