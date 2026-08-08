@@ -32,6 +32,7 @@
     "wait-on": "^8.0.4"
   },
   "build": {
+    "afterPack": "scripts/after-pack.cjs",
     "appId": "com.kai.cod",
     "productName": "COD",
     "executableName": "cod",
