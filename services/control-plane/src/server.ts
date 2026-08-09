@@ -70,6 +70,36 @@ export function assistantContentFromResponse(body: unknown): string | null {
   return typeof text === 'string' && text.trim() ? text.trim() : null;
 }
 
+export function assistantToolCallsFromResponse(body: unknown): Array<Record<string,unknown>> {
+  if(!body||typeof body!=='object')return[];
+  const choices=(body as {choices?:unknown}).choices;if(!Array.isArray(choices)||!choices[0]||typeof choices[0]!=='object')return[];
+  const message=(choices[0] as {message?:unknown}).message;if(!message||typeof message!=='object')return[];
+  const toolCalls=(message as {tool_calls?:unknown}).tool_calls;if(!Array.isArray(toolCalls))return[];
+  return toolCalls.filter((call):call is Record<string,unknown>=>{
+    if(!call||typeof call!=='object'||typeof (call as {id?:unknown}).id!=='string')return false;
+    const fn=(call as {function?:unknown}).function;
+    return Boolean(fn&&typeof fn==='object'&&typeof (fn as {name?:unknown}).name==='string'&&typeof (fn as {arguments?:unknown}).arguments==='string');
+  });
+}
+
+function assistantHasAction(body:unknown):boolean{return Boolean(assistantContentFromResponse(body)||assistantToolCallsFromResponse(body).length);}
+
+export function isValidChatMessage(message:unknown):boolean{
+  if(!message||typeof message!=='object')return false;
+  const value=message as {role?:unknown;content?:unknown;tool_calls?:unknown;tool_call_id?:unknown};
+  const validText=typeof value.content==='string'&&value.content.length>0&&value.content.length<=50_000;
+  if(value.role==='user'||value.role==='system'||value.role==='developer')return validText;
+  if(value.role==='tool')return validText&&typeof value.tool_call_id==='string'&&value.tool_call_id.length>0&&value.tool_call_id.length<=200;
+  if(value.role!=='assistant')return false;
+  if(validText)return true;
+  if(!Array.isArray(value.tool_calls)||value.tool_calls.length===0||value.tool_calls.length>64)return false;
+  return value.tool_calls.every((call)=>{
+    if(!call||typeof call!=='object'||typeof (call as {id?:unknown}).id!=='string')return false;
+    const fn=(call as {function?:unknown}).function;
+    return Boolean(fn&&typeof fn==='object'&&typeof (fn as {name?:unknown}).name==='string'&&typeof (fn as {arguments?:unknown}).arguments==='string'&&String((fn as {arguments:unknown}).arguments).length<=100_000);
+  });
+}
+
 function estimatedInputTokens(body: unknown): number {
   const messages = body && typeof body === 'object' && Array.isArray((body as { messages?: unknown }).messages) ? (body as { messages: unknown[] }).messages : body;
   return Math.max(1, Math.ceil(Buffer.byteLength(JSON.stringify(messages), 'utf8') / 4));
@@ -291,11 +321,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         const body = await readJson<{ model?: string; source?: string } & Record<string, unknown>>(request);
         const clientRequestedStream=body.stream===true;
         if(!Array.isArray(body.messages) || body.messages.length === 0 || body.messages.length > 40)throw new HttpError('Chat must contain between 1 and 40 messages',400,'invalid_messages');
-        const validMessages = body.messages.every((message) => {
-          if (!message || typeof message !== 'object') return false;
-          const value = message as { role?: unknown; content?: unknown };
-          return (value.role === 'user' || value.role === 'assistant' || value.role === 'system') && typeof value.content === 'string' && value.content.length > 0 && value.content.length <= 50_000;
-        });
+        const validMessages = body.messages.every(isValidChatMessage);
         if (!validMessages) throw new HttpError('Chat messages are invalid',400,'invalid_messages');
         const routeSource = chatRoute[1];
         if (routeSource && body.source && routeSource !== body.source) throw new HttpError('Model source conflicts with the gateway route', 400, 'source_conflict');
@@ -308,16 +334,17 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         try {
           let actualModel=model;let actualSelection=selection;let actualProviderBody=providerBody;let upstream=await gateway.proxyChat(sourceId,actualProviderBody,requestId);let raw=await readResponseBuffer(upstream);
           if(!upstream.ok){await database.releaseUsage(principal,reservationId);response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}
-          let parsed:unknown;try{parsed=JSON.parse(raw.toString('utf8')) as unknown;}catch{throw new HttpError('Model returned an invalid response',502,'invalid_model_response');}let content=assistantContentFromResponse(parsed);
-          if(!content&&fallbackCandidate){actualModel=fallbackCandidate.id;actualSelection={source:selection.source,model:fallbackCandidate};actualProviderBody={...providerBody,model:actualModel};upstream=await gateway.proxyChat(sourceId,actualProviderBody,`${requestId}.fallback`);raw=await readResponseBuffer(upstream);if(!upstream.ok){await database.releaseUsage(principal,reservationId);response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}try{parsed=JSON.parse(raw.toString('utf8')) as unknown;}catch{throw new HttpError('Fallback model returned an invalid response',502,'invalid_model_response');}content=assistantContentFromResponse(parsed);}
-          if(!content)throw new HttpError('Model returned an empty response after retry and fallback',502,'empty_model_response');const usage=usageFromResponse(parsed,actualProviderBody,content);const requestFingerprint=createHash('sha256').update(JSON.stringify(actualProviderBody)).digest('hex').slice(0,24);
+          let parsed:unknown;try{parsed=JSON.parse(raw.toString('utf8')) as unknown;}catch{throw new HttpError('Model returned an invalid response',502,'invalid_model_response');}let content=assistantContentFromResponse(parsed);let toolCalls=assistantToolCallsFromResponse(parsed);
+          if(!assistantHasAction(parsed)&&fallbackCandidate){actualModel=fallbackCandidate.id;actualSelection={source:selection.source,model:fallbackCandidate};actualProviderBody={...providerBody,model:actualModel};upstream=await gateway.proxyChat(sourceId,actualProviderBody,`${requestId}.fallback`);raw=await readResponseBuffer(upstream);if(!upstream.ok){await database.releaseUsage(principal,reservationId);response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}try{parsed=JSON.parse(raw.toString('utf8')) as unknown;}catch{throw new HttpError('Fallback model returned an invalid response',502,'invalid_model_response');}content=assistantContentFromResponse(parsed);toolCalls=assistantToolCallsFromResponse(parsed);}
+          if(!assistantHasAction(parsed))throw new HttpError('Model returned an empty response after retry and fallback',502,'empty_model_response');const usage=usageFromResponse(parsed,actualProviderBody,content??JSON.stringify(toolCalls));const requestFingerprint=createHash('sha256').update(JSON.stringify(actualProviderBody)).digest('hex').slice(0,24);
           const costCents=gateway.costCents(actualSelection.model,usage.inputTokens,usage.outputTokens);const commissionRateBps=actualSelection.source.commissionRateBps;const commissionCents=Math.round(costCents*commissionRateBps/10_000);await database.settleUsage(principal,reservationId,{idempotencyKey:`chat:${requestId}:${requestFingerprint}`,taskId:'chat',sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection:actualSelection.source.paymentDirection,model:actualModel,inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,costCents,commissionRateBps,commissionCents});await database.audit(principal,'chat.complete','model',actualModel,{requestedModel:model,fallbackUsed:actualModel!==model,sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection:actualSelection.source.paymentDirection,...usage,costCents,commissionRateBps,commissionCents});
           const result={...(parsed as Record<string,unknown>),model:actualModel,usage:{...((parsed as {usage?:Record<string,unknown>}).usage??{}),prompt_tokens:usage.inputTokens,completion_tokens:usage.outputTokens,total_tokens:usage.inputTokens+usage.outputTokens},cod_source:sourceId,cod_upstream_source:actualSelection.source.upstreamSourceId,cod_payment_direction:actualSelection.source.paymentDirection,cod_charge_cents:costCents,cod_commission_rate_bps:commissionRateBps,cod_usage_estimated:usage.estimated,cod_requested_model:model,cod_fallback_used:actualModel!==model};
           if(clientRequestedStream){
             const parsedRecord=parsed as Record<string,unknown>;const parsedChoices=Array.isArray(parsedRecord.choices)?parsedRecord.choices:[];const firstChoice=parsedChoices[0]&&typeof parsedChoices[0]==='object'?parsedChoices[0] as Record<string,unknown>:{};
             const streamBase={id:typeof parsedRecord.id==='string'?parsedRecord.id:`chatcmpl-${requestId}`,object:'chat.completion.chunk',created:typeof parsedRecord.created==='number'?parsedRecord.created:Math.floor(Date.now()/1000),model:actualModel};
             const streamMetadata={cod_source:sourceId,cod_upstream_source:actualSelection.source.upstreamSourceId,cod_payment_direction:actualSelection.source.paymentDirection,cod_charge_cents:costCents,cod_commission_rate_bps:commissionRateBps,cod_usage_estimated:usage.estimated,cod_requested_model:model,cod_fallback_used:actualModel!==model};
-            const contentChunk={...streamBase,choices:[{index:0,delta:{role:'assistant',content},finish_reason:null}],...streamMetadata};
+            const delta={role:'assistant',...(content?{content}:{}),...(toolCalls.length?{tool_calls:toolCalls.map((call,index)=>({...call,index}))}:{})};
+            const contentChunk={...streamBase,choices:[{index:0,delta,finish_reason:null}],...streamMetadata};
             const finishChunk={...streamBase,choices:[{index:0,delta:{},finish_reason:typeof firstChoice.finish_reason==='string'?firstChoice.finish_reason:'stop'}],usage:result.usage,...streamMetadata};
             response.writeHead(200,{'content-type':'text/event-stream; charset=utf-8','cache-control':'no-cache, no-transform','connection':'keep-alive','x-accel-buffering':'no'});
             response.write(`data: ${JSON.stringify(contentChunk)}\n\n`);response.write(`data: ${JSON.stringify(finishChunk)}\n\n`);response.end('data: [DONE]\n\n');return;

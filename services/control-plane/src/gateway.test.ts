@@ -12,8 +12,10 @@ describe('model source gateway', () => {
       if (url === 'https://ai.kai.com/v1/models') return Response.json({ data: [{ id: 'glm-5.2' }] });
       if (url === 'https://ai.kai.com/v1/chat/completions') {
         expect((init?.headers as Record<string, string>).authorization).toBe('Bearer test-key');
-        expect((init?.headers as Record<string, string>)['x-request-id']).toBe('request-1');
+        const requestId=(init?.headers as Record<string, string>)['x-request-id'];
         chatAttempts += 1;
+        if(requestId==='request-tools')return Response.json({id:'chat-tools',model:'glm-5.2',choices:[{message:{role:'assistant',content:null,tool_calls:[{id:'call-1',type:'function',function:{name:'developer__file_write',arguments:'{"path":"game.html"}'}}]},finish_reason:'tool_calls'}],usage:{prompt_tokens:10,completion_tokens:5}});
+        expect(requestId).toBe('request-1');
         if (chatAttempts === 1) return Response.json({ id: 'chat-empty', choices: [{ message: { content: '' } }] });
         return Response.json({ id: 'chat-live', model: 'glm-5.2', choices: [{ message: { content: 'ok' } }], usage: { prompt_tokens: 1, completion_tokens: 1 } });
       }
@@ -33,5 +35,8 @@ describe('model source gateway', () => {
     const response = await gateway.proxyChat('chase-kai', { model: 'glm-5.2', messages: [] }, 'request-1');
     expect(response.status).toBe(200);
     expect(chatAttempts).toBe(2);
+    const toolResponse=await gateway.proxyChat('ai-kai',{model:'glm-5.2',messages:[],tools:[{type:'function',function:{name:'developer__file_write'}}]},'request-tools');
+    expect(toolResponse.status).toBe(200);
+    expect(chatAttempts).toBe(3);
   });
 });

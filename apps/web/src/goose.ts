@@ -1,5 +1,5 @@
 import { GooseClient, type GooseClientCallbacks } from '@aaif/goose-sdk';
-import { PROTOCOL_VERSION, type RequestPermissionRequest, type SessionNotification } from '@agentclientprotocol/sdk';
+import { PROTOCOL_VERSION, type RequestPermissionRequest, type SessionNotification, type ToolCallStatus, type ToolKind } from '@agentclientprotocol/sdk';
 
 export interface GooseRunUpdate {
   kind: 'message' | 'thought' | 'tool' | 'permission' | 'status';
@@ -13,6 +13,29 @@ export interface GooseRunOptions {
   prompt: string;
   onUpdate(update: GooseRunUpdate): void;
   requestPermission(request: RequestPermissionRequest): Promise<string | null>;
+}
+
+export interface GooseRunResult {
+  answer: string;
+  toolCalls: number;
+  completedTools: number;
+  failedTools: number;
+  mutationTools: number;
+}
+
+interface TrackedToolCall { kind: ToolKind; status: ToolCallStatus }
+
+const mutationKinds = new Set<ToolKind>(['edit', 'delete', 'move']);
+const mutationRequestPattern = /(?:创建|新建|生成|实现|开发|编写|修改|修复|优化|重构|添加|删除|替换|改成|做一个|搭建|安装|升级|create|build|implement|develop|write|modify|edit|fix|optimi[sz]e|refactor|add|delete|remove|replace|install|upgrade)/i;
+
+export function buildCodeExecutionPrompt(prompt: string): string {
+  return `You are COD's coding agent operating inside the selected local project. Execute the user's request now with the Developer tools available to you. Inspect the project before changing it, make the requested file changes, and verify the result with an appropriate command when possible. Do not merely promise to start, describe hypothetical work, or claim completion without using tools. If execution is blocked, report the concrete blocker instead of claiming success.\n\nUser request:\n${prompt}`;
+}
+
+export function validateCodeRun(prompt: string, result: GooseRunResult): void {
+  if (result.toolCalls === 0) throw new Error('COD 没有执行任何项目工具，因此未将本次任务标记为完成。请重试；若仍出现此提示，请检查桌面端 Developer Tools。');
+  if (result.failedTools > 0 && result.completedTools === 0) throw new Error('COD 调用的项目工具全部失败，因此未将本次任务标记为完成。请查看工具状态后重试。');
+  if (mutationRequestPattern.test(prompt) && result.mutationTools === 0) throw new Error('COD 完成了项目检查，但没有执行文件修改，因此未将本次创建或修改任务标记为完成。');
 }
 
 function createWebSocketStream(wsUrl: string) {
@@ -62,11 +85,18 @@ function sessionUpdateText(notification: SessionNotification): GooseRunUpdate | 
   return null;
 }
 
-export async function runGooseTask(options: GooseRunOptions): Promise<string> {
+export async function runGooseTask(options: GooseRunOptions): Promise<GooseRunResult> {
   const stream = createWebSocketStream(options.acpUrl);
   let answer = '';
+  const toolCalls = new Map<string, TrackedToolCall>();
   const callbacks = (): GooseClientCallbacks => ({
     sessionUpdate: async (notification) => {
+      const sessionUpdate=notification.update;
+      if(sessionUpdate.sessionUpdate==='tool_call')toolCalls.set(sessionUpdate.toolCallId,{kind:sessionUpdate.kind??'other',status:sessionUpdate.status??'pending'});
+      if(sessionUpdate.sessionUpdate==='tool_call_update'){
+        const current=toolCalls.get(sessionUpdate.toolCallId)??{kind:'other' as const,status:'pending' as const};
+        toolCalls.set(sessionUpdate.toolCallId,{kind:sessionUpdate.kind??current.kind,status:sessionUpdate.status??current.status});
+      }
       const update = sessionUpdateText(notification);
       if (!update) return;
       if (update.kind === 'message') answer += update.text;
@@ -89,7 +119,14 @@ export async function runGooseTask(options: GooseRunOptions): Promise<string> {
     const sessionId = String(created.sessionId);
     options.onUpdate({ kind: 'status', text: 'Goose 会话已创建' });
     await client.prompt({ sessionId, prompt: [{ type: 'text', text: options.prompt }] });
-    return answer;
+    const executions=[...toolCalls.values()];
+    return {
+      answer,
+      toolCalls:executions.length,
+      completedTools:executions.filter((tool)=>tool.status==='completed').length,
+      failedTools:executions.filter((tool)=>tool.status==='failed').length,
+      mutationTools:executions.filter((tool)=>mutationKinds.has(tool.kind)&&tool.status!=='failed').length,
+    };
   } finally {
     stream.close();
   }

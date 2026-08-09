@@ -526,10 +526,11 @@ export function App() {
         const successful=results.filter((result)=>!result.error);if(!successful.length)throw new Error('所选模型均未返回可用回答。');
         reply=successful.map((result)=>`[${result.sourceLabel} · ${result.model}]\n${result.content}`).join('\n\n').slice(0,48_000);
       } else if (requestedMode === 'code' && hasDesktopBridge() && project.root && acpUrl) {
-        const { runGooseTask } = await import('./goose');
+        const { buildCodeExecutionPrompt, runGooseTask, validateCodeRun } = await import('./goose');
         setAgentStatus('连接本机 Goose');
         const contextualPrompt = conversationMessages.length === 1 ? submittedPrompt : `Continue this conversation using the current project.\n\n${conversationMessages.map((message) => `${message.role === 'user' ? 'User' : 'Assistant'}: ${message.content}`).join('\n\n')}`;
-        reply = await runGooseTask({ acpUrl, cwd: project.root, prompt: contextualPrompt, onUpdate: (update) => { if (update.kind === 'message') reply += update.text; if (update.kind === 'tool' || update.kind === 'status') setAgentStatus(update.text); }, requestPermission: (request) => new Promise((resolve) => { permissionResolver.current = resolve; setPendingPermission({ title: request.toolCall.title ?? '工具权限请求', options: request.options }); }) });
+        const run = await runGooseTask({ acpUrl, cwd: project.root, prompt: buildCodeExecutionPrompt(contextualPrompt), onUpdate: (update) => { if (update.kind === 'message') reply += update.text; if (update.kind === 'tool' || update.kind === 'status') setAgentStatus(update.text); }, requestPermission: (request) => new Promise((resolve) => { permissionResolver.current = resolve; setPendingPermission({ title: request.toolCall.title ?? '工具权限请求', options: request.options }); }) });
+        reply=run.answer;validateCodeRun(submittedPrompt,run);
         if (!reply) reply = 'Goose 已完成任务，请在右侧刷新文件与 Diff。';
       } else {
         if (requestedMode === 'code' && !hasDesktopBridge()) setNotice('Web 端仅提供代码问答；修改本机文件请使用 COD Desktop。');

@@ -116,13 +116,14 @@ async function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | 
   controlPlane.pathname = `${controlPlane.pathname.replace(/\/$/, '')}/v1/sources/${encodeURIComponent(config.sourceId)}`;
   controlPlane.search = '';
   controlPlane.hash = '';
-  const spawnedSidecar = spawn(binary, ['serve', '--host', '127.0.0.1', '--port', String(port)], {
+  const spawnedSidecar = spawn(binary, ['serve', '--host', '127.0.0.1', '--port', String(port), '--with-builtin', 'developer'], {
     stdio: 'ignore',
     env: {
       ...process.env,
       GOOSE_SERVER__SECRET_KEY: secret,
       GOOSE_PROVIDER: process.env.GOOSE_PROVIDER ?? 'openai',
       GOOSE_MODEL: config.modelId,
+      GOOSE_MODE: process.env.GOOSE_MODE ?? 'smart_approve',
       OPENAI_MODEL: config.modelId,
       OPENAI_BASE_URL: controlPlane.toString().replace(/\/$/, ''),
       OPENAI_API_KEY: config.token,

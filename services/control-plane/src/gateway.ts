@@ -52,15 +52,21 @@ function sourceNote(source: ModelSourceConfig, callable: boolean): string {
   return `模型目录来自 ${new URL(source.catalogUrl).host}；配置 ai.kai.com 密钥后即可调用`;
 }
 
-function responseHasAssistantContent(response: Response): Promise<boolean> {
+function responseHasAssistantAction(response: Response): Promise<boolean> {
   if (!response.ok) return Promise.resolve(true);
   return response.clone().json().then((body: unknown) => {
     if (!body || typeof body !== 'object') return false;
     const choice = (body as { choices?: unknown[] }).choices?.[0];
     if (!choice || typeof choice !== 'object') return false;
-    const content = ((choice as { message?: { content?: unknown } }).message?.content);
+    const message = (choice as { message?: { content?: unknown; tool_calls?: unknown } }).message;
+    const content = message?.content;
     if (typeof content === 'string') return Boolean(content.trim());
-    return Array.isArray(content) && content.some((part) => part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string' && Boolean(String((part as { text?: unknown }).text).trim()));
+    if (Array.isArray(content) && content.some((part) => part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string' && Boolean(String((part as { text?: unknown }).text).trim()))) return true;
+    return Array.isArray(message?.tool_calls) && message.tool_calls.some((call) => {
+      if (!call || typeof call !== 'object') return false;
+      const fn=(call as {function?:unknown}).function;
+      return typeof (call as {id?:unknown}).id==='string'&&fn!==null&&typeof fn==='object'&&typeof (fn as {name?:unknown}).name==='string'&&typeof (fn as {arguments?:unknown}).arguments==='string';
+    });
   }).catch(() => false);
 }
 
@@ -129,8 +135,8 @@ export class AiGateway {
           signal: AbortSignal.timeout(120_000),
         });
         const retryableStatus = [408, 425, 429, 500, 502, 503, 504].includes(response.status);
-        const hasContent = await responseHasAssistantContent(response);
-        if ((!retryableStatus && hasContent) || attempt === 1) return response;
+        const hasAction = await responseHasAssistantAction(response);
+        if ((!retryableStatus && hasAction) || attempt === 1) return response;
         lastError = new Error(retryableStatus ? `Retryable upstream status: ${response.status}` : 'Empty upstream response');
       } catch (error) {
         lastError = error;
