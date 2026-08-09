@@ -25,11 +25,13 @@ export interface GooseRunResult {
 
 interface TrackedToolCall { kind: ToolKind; status: ToolCallStatus }
 
-const mutationKinds = new Set<ToolKind>(['edit', 'delete', 'move']);
+// Goose reports its Developer shell tool as `execute`. Shell commands are a
+// supported way to create files, so they must count as a real project action.
+const mutationKinds = new Set<ToolKind>(['edit', 'delete', 'move', 'execute']);
 const mutationRequestPattern = /(?:创建|新建|生成|实现|开发|编写|修改|修复|优化|重构|添加|删除|替换|改成|做一个|搭建|安装|升级|create|build|implement|develop|write|modify|edit|fix|optimi[sz]e|refactor|add|delete|remove|replace|install|upgrade)/i;
 
 export function buildCodeExecutionPrompt(prompt: string): string {
-  return `You are COD's coding agent operating inside the selected local project. Execute the user's request now with the Developer tools available to you. Inspect the project before changing it, make the requested file changes, and verify the result with an appropriate command when possible. Do not merely promise to start, describe hypothetical work, or claim completion without using tools. If execution is blocked, report the concrete blocker instead of claiming success.\n\nUser request:\n${prompt}`;
+  return `You are COD's coding agent operating inside the selected local project. Execute the user's request now with the Developer tools available to you. Inspect the project before changing it, then use Developer write/edit/shell tools to make the requested file changes. For a creation or modification request, perform a real file-changing tool call before marking any TODO item complete or writing a completion message. Verify the result with an appropriate command when possible. Do not merely promise to start, describe hypothetical work, or claim completion without using tools. If execution is blocked, report the concrete blocker instead of claiming success.\n\nUser request:\n${prompt}`;
 }
 
 export function validateCodeRun(prompt: string, result: GooseRunResult): void {

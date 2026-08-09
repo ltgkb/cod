@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#faf8ef" />
+  <title>2048</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app" id="app">
+    <header class="header">
+      <h1 class="title">2048</h1>
+      <div class="scores" role="group" aria-label="Scores">
+        <div class="score-box" aria-live="polite" aria-atomic="true">
+          <span class="score-label">SCORE</span>
+          <span class="score-value" id="score">0</span>
+        </div>
+        <div class="score-box" aria-live="polite" aria-atomic="true">
+          <span class="score-label">BEST</span>
+          <span class="score-value" id="best">0</span>
+        </div>
+      </div>
+    </header>
+
+    <div class="subhead">
+      <p class="intro">
+        Join the tiles, get to <strong>2048!</strong>
+      </p>
+      <button class="new-game-btn" id="newGame" type="button" aria-label="Start a new game">
+        New Game
+      </button>
+    </div>
+
+    <main class="board-wrap" role="application" aria-label="2048 game board. Use arrow keys or WASD to move tiles.">
+      <div class="board" id="board" tabindex="0" aria-label="Game grid">
+        <!-- Background cells -->
+        <div class="grid" id="grid" aria-hidden="true"></div>
+        <!-- Tiles layer -->
+        <div class="tiles" id="tiles"></div>
+
+        <!-- Win overlay -->
+        <div class="overlay" id="winOverlay" role="dialog" aria-modal="true" aria-labelledby="winTitle" hidden>
+          <div class="overlay-card">
+            <h2 class="overlay-title" id="winTitle">You win! 🎉</h2>
+            <p class="overlay-text">You reached 2048!</p>
+            <div class="overlay-actions">
+              <button class="btn btn-primary" id="keepGoing" type="button">Keep going</button>
+              <button class="btn btn-secondary" id="winNewGame" type="button">New game</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Game over overlay -->
+        <div class="overlay" id="overOverlay" role="dialog" aria-modal="true" aria-labelledby="overTitle" hidden>
+          <div class="overlay-card">
+            <h2 class="overlay-title" id="overTitle">Game over</h2>
+            <p class="overlay-text">No moves left.</p>
+            <div class="overlay-actions">
+              <button class="btn btn-primary" id="overNewGame" type="button">Try again</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <footer class="footer">
+      <p class="hint">
+        <strong>How to play:</strong> Use <kbd>←</kbd> <kbd>↑</kbd> <kbd>→</kbd> <kbd>↓</kbd> arrow keys or
+        <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> to move. On mobile, swipe. Tiles with the same
+        number merge into one when they touch.
+      </p>
+    </footer>
+  </div>
+
+  <script src="game.js" defer></script>
+</body>
+</html>

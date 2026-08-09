@@ -7,6 +7,8 @@ describe('COD desktop execution guard',()=>{
   it('instructs the agent to execute instead of promising future work',()=>{
     const prompt=buildCodeExecutionPrompt('创建 2048 小游戏');
     expect(prompt).toContain('Execute the user\'s request now');
+    expect(prompt).toContain('Developer write/edit/shell tools');
+    expect(prompt).toContain('before marking any TODO item complete');
     expect(prompt).toContain('Do not merely promise to start');
     expect(prompt).toContain('创建 2048 小游戏');
   });
@@ -17,6 +19,7 @@ describe('COD desktop execution guard',()=>{
 
   it('requires a mutation tool for creation and modification requests',()=>{
     expect(()=>validateCodeRun('帮我创建 2048 小游戏',result({mutationTools:0}))).toThrow('没有执行文件修改');
+    expect(()=>validateCodeRun('帮我创建 2048 小游戏',result({mutationTools:1}))).not.toThrow();
     expect(()=>validateCodeRun('解释这个项目',result({mutationTools:0}))).not.toThrow();
   });
 
