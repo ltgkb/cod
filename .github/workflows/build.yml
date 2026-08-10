@@ -40,7 +40,7 @@ jobs:
           if [[ "${{ runner.os }}" == "Linux" ]]; then npm run package:linux; fi
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: cod-desktop-${{ runner.os }}
           path: apps/desktop/release/*
@@ -54,13 +54,13 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
       - run: npm ci
       - run: npm run package:android
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: cod-android-debug
           path: apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk
@@ -77,7 +77,7 @@ jobs:
       - run: npm ci
       - run: npm run package:ios
       - run: ditto -c -k --sequesterRsrc --keepParent apps/mobile/release/ios-simulator/Build/Products/Release-iphonesimulator/App.app apps/mobile/release/COD-ios-simulator.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: cod-ios-simulator
           path: apps/mobile/release/COD-ios-simulator.zip
