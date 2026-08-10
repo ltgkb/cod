@@ -9,7 +9,7 @@
     "open:android": "node ../../node_modules/@capacitor/cli/bin/capacitor open android",
     "open:ios": "node ../../node_modules/@capacitor/cli/bin/capacitor open ios",
     "build:android": "npm run sync && cd android && ./gradlew assembleDebug",
-    "build:ios:simulator": "npm run sync && xcodebuild -workspace ios/App/App.xcworkspace -scheme App -configuration Release -sdk iphonesimulator -derivedDataPath release/ios-simulator CODE_SIGNING_ALLOWED=NO"
+    "build:ios:simulator": "npm run sync && xcodebuild -project ios/App/App.xcodeproj -scheme App -configuration Release -sdk iphonesimulator -derivedDataPath release/ios-simulator CODE_SIGNING_ALLOWED=NO"
   },
   "dependencies": {
     "@capacitor/android": "8.4.2",
