@@ -83,6 +83,7 @@ function validateAgentGatewayConfig(config: AgentGatewayConfig): void {
   if (!config?.token || config.token.length > 8_192) throw new Error('A valid COD session is required');
   if (!/^[a-z0-9-]{2,40}$/.test(config.sourceId)) throw new Error('Invalid model source');
   if (!config.modelId || config.modelId.length > 200 || /[\r\n]/.test(config.modelId)) throw new Error('Invalid model');
+  if (!/^[a-f0-9-]{36}$/i.test(config.taskId)) throw new Error('Invalid task');
 }
 
 async function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | null> {
@@ -96,7 +97,7 @@ async function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | 
     return gooseAcpUrl;
   }
 
-  const configurationKey = createHash('sha256').update(`${config.token}\0${config.sourceId}\0${config.modelId}`).digest('hex');
+  const configurationKey = createHash('sha256').update(`${config.token}\0${config.sourceId}\0${config.modelId}\0${config.taskId}`).digest('hex');
   if (gooseAcpUrl && gooseConfigurationKey === configurationKey) return gooseAcpUrl;
   if (gooseSidecar) await stopGooseSidecar();
 
@@ -113,7 +114,7 @@ async function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | 
   if (controlPlane.protocol !== 'https:' && process.env.NODE_ENV === 'production') {
     throw new Error('COD_CONTROL_PLANE_URL must use HTTPS in production');
   }
-  controlPlane.pathname = `${controlPlane.pathname.replace(/\/$/, '')}/v1/sources/${encodeURIComponent(config.sourceId)}`;
+  controlPlane.pathname = `${controlPlane.pathname.replace(/\/$/, '')}/v1/tasks/${encodeURIComponent(config.taskId)}/sources/${encodeURIComponent(config.sourceId)}`;
   controlPlane.search = '';
   controlPlane.hash = '';
   const spawnedSidecar = spawn(binary, ['serve', '--host', '127.0.0.1', '--port', String(port), '--with-builtin', 'developer'], {

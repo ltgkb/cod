@@ -218,12 +218,13 @@ export class AiGateway {
     return inputTokens + outputTokens > 0 ? Math.max(1, Math.ceil(raw)) : 0;
   }
 
-  async proxyChat(sourceId: string, body: unknown, requestId: string = randomUUID()): Promise<Response> {
+  async proxyChat(sourceId: string, body: unknown, requestId: string = randomUUID(), signal?: AbortSignal): Promise<Response> {
     if (sourceId === 'demo') return this.demoResponse(body);
     const source = this.config.modelSources.find((item) => item.id === sourceId);
     if (!source?.apiKey) throw new HttpError('Selected model source is not configured', 503, 'source_unavailable');
     let lastError: unknown;
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (signal?.aborted) throw new HttpError('Task was cancelled', 409, 'task_cancelled');
       try {
         const providerBody = body && typeof body === 'object'
           ? { ...(body as Record<string, unknown>), stream: true, stream_options: { include_usage: true } }
@@ -232,7 +233,7 @@ export class AiGateway {
           method: 'POST',
           headers: { 'content-type': 'application/json', authorization: `Bearer ${source.apiKey}`, 'x-request-id': requestId, 'idempotency-key': requestId },
           body: JSON.stringify(providerBody),
-          signal: AbortSignal.timeout(120_000),
+          signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000),
         });
         const retryableStatus = [408, 425, 429, 500, 502, 503, 504].includes(response.status);
         const normalized = await normalizeStreamingResponse(response);
@@ -240,9 +241,11 @@ export class AiGateway {
         if ((!retryableStatus && hasAction) || attempt === 1) return normalized;
         lastError = new Error(retryableStatus ? `Retryable upstream status: ${response.status}` : 'Empty upstream response');
       } catch (error) {
+        if (signal?.aborted) throw new HttpError('Task was cancelled', 409, 'task_cancelled');
         lastError = error;
         if (attempt === 1) break;
       }
+      if (signal?.aborted) throw new HttpError('Task was cancelled', 409, 'task_cancelled');
       await new Promise((resolve) => setTimeout(resolve, 300));
     }
     const timedOut = lastError instanceof Error && (lastError.name === 'TimeoutError' || lastError.name === 'AbortError');

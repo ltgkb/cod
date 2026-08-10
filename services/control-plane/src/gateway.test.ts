@@ -70,4 +70,10 @@ describe('model source gateway', () => {
     expect(await response.json()).toMatchObject({ model: 'glm-5.2', choices: [{ message: { content: '推箱子已完成' }, finish_reason: 'stop' }], usage: { prompt_tokens: 12, completion_tokens: 34 } });
     expect(streamCancelled).toBe(true);
   });
+
+  it('propagates task cancellation to the upstream model without retrying',async()=>{
+    let attempts=0;let aborted=false;
+    const fetcher=vi.fn(async(input:string|URL|Request,init?:RequestInit):Promise<Response>=>{const url=String(input);if(url.endsWith('/api/pricing'))return Response.json({data:[{model_name:'slow-model',quota_type:0,model_ratio:1,completion_ratio:1,supported_endpoint_types:['openai']}]});if(url.endsWith('/api/status'))return Response.json({data:{quota_per_unit:500000,price:7}});if(url.endsWith('/models'))return Response.json({data:[{id:'slow-model'}]});if(url.endsWith('/chat/completions')){attempts+=1;return new Promise<Response>((_resolve,reject)=>init?.signal?.addEventListener('abort',()=>{aborted=true;reject(init.signal?.reason);},{once:true}));}throw new Error(`Unexpected request: ${url}`);});
+    const gateway=new AiGateway(loadConfig({NODE_ENV:'production',COD_SESSION_SECRET:'s'.repeat(32),DATABASE_URL:'postgresql://cod:test@127.0.0.1:5432/cod',COD_DEVELOPMENT_LOGIN_ENABLED:'false',KAI_API_KEY:'test-key'}),fetcher as typeof fetch);await gateway.listSources();const controller=new AbortController();const pending=gateway.proxyChat('ai-kai',{model:'slow-model',messages:[{role:'user',content:'slow'}]},'cancel-request',controller.signal);await vi.waitFor(()=>expect(attempts).toBe(1));controller.abort();await expect(pending).rejects.toMatchObject({code:'task_cancelled'});expect(aborted).toBe(true);expect(attempts).toBe(1);
+  });
 });

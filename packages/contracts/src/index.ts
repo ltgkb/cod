@@ -1,4 +1,4 @@
-export type TaskStatus = 'draft' | 'running' | 'waiting' | 'complete' | 'failed';
+export type TaskStatus = 'draft' | 'running' | 'waiting' | 'complete' | 'failed' | 'cancelled';
 
 export interface CodTask {
   id: string;
@@ -72,6 +72,7 @@ export interface AgentGatewayConfig {
   token: string;
   sourceId: string;
   modelId: string;
+  taskId: string;
 }
 
 export interface DesktopBridge {

@@ -60,6 +60,12 @@ describe('COD workspace', () => {
     await expect(sendChat('token', 'ai-kai', 'glm-5.2', [{ role: 'user', content: '问题' }])).rejects.toMatchObject({ code: 'empty_model_response' });
   });
 
+  it('binds model requests to a task and aborts without retrying when cancelled',async()=>{
+    let requestSignal:AbortSignal|undefined;let requestBody:Record<string,unknown>|null=null;let started:()=>void=()=>undefined;const requestStarted=new Promise<void>((resolve)=>{started=resolve;});
+    const fetchMock=vi.fn(async(_input:RequestInfo|URL,init?:RequestInit):Promise<Response>=>{requestSignal=init?.signal??undefined;requestBody=JSON.parse(String(init?.body)) as Record<string,unknown>;started();return new Promise<Response>((_resolve,reject)=>requestSignal?.addEventListener('abort',()=>reject(requestSignal?.reason),{once:true}));});
+    vi.stubGlobal('fetch',fetchMock);const controller=new AbortController();const pending=sendChat('token','ai-kai','model-1',[{role:'user',content:'长任务'}],{taskId:'task-1',signal:controller.signal});await requestStarted;controller.abort(new DOMException('Task cancelled','AbortError'));await expect(pending).rejects.toMatchObject({name:'AbortError'});expect(requestSignal?.aborted).toBe(true);expect(requestBody).toMatchObject({task_id:'task-1'});expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('shows the workspace first and opens login when the first message is sent', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => json(capabilities)));
     render(<App />);
@@ -174,6 +180,15 @@ describe('COD workspace', () => {
     expect(screen.queryByText('¥0.01')).not.toBeInTheDocument();
     const chatCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/v1/chat/completions'));
     expect(JSON.parse(String(chatCall?.[1]?.body)).messages).toEqual([{ role: 'user', content: '登录后自动发送' }]);
+  });
+
+  it('terminates a running task, aborts the model request, and renders the synchronized cancelled state',async()=>{
+    let taskVersion=1;let chatSignal:AbortSignal|undefined;let markChatStarted:()=>void=()=>undefined;const chatStarted=new Promise<void>((resolve)=>{markChatStarted=resolve;});
+    const fetchMock=vi.fn(async(input:RequestInfo|URL,init?:RequestInit):Promise<Response>=>{const url=String(input);if(url.endsWith('/api/capabilities'))return json(capabilities);if(url.endsWith('/api/auth/login'))return json({token:'test-token'});if(url.endsWith('/api/account'))return json({userId:'user',displayName:'developer',balanceCents:5000,currency:'CNY',plan:'developer'});if(url.endsWith('/api/model-sources'))return json([{id:'ai-kai',label:'AI.KAI.COM',status:'live',callable:true,paymentDirection:'钱包 → ai.kai.com',note:'已连接',models:[{id:'slow-model',label:'慢模型',contextWindow:128000,inputPricePerMillionCents:100,outputPricePerMillionCents:200}]}]);if(url.endsWith('/api/devices')&&init?.method==='POST')return json({id:'web-device',name:'COD Web',platform:'web',status:'online',lastSeenAt:new Date().toISOString()},201);if(url.endsWith('/api/devices'))return json([]);if(url.endsWith('/api/tasks'))return json([]);if(url.endsWith('/api/tasks')&&init?.method==='POST')throw new Error('unreachable');if(/\/api\/tasks\/task-cancel\/status$/.test(url)){taskVersion+=1;return json({id:'task-cancel',title:'终止测试',status:'running',deviceId:'web-device',updatedAt:new Date().toISOString(),version:taskVersion,result:null,error:null});}if(/\/api\/tasks\/task-cancel\/cancel$/.test(url)){taskVersion+=1;return json({task:{id:'task-cancel',title:'终止测试',status:'cancelled',deviceId:'web-device',updatedAt:new Date().toISOString(),version:taskVersion,result:null,error:null},cancelledRequests:1});}if(url.endsWith('/v1/chat/completions')){chatSignal=init?.signal??undefined;markChatStarted();return new Promise<Response>((_resolve,reject)=>chatSignal?.addEventListener('abort',()=>reject(chatSignal?.reason),{once:true}));}if(url.endsWith('/api/credit-packs'))return json(creditPacks);if(url.endsWith('/api/products')||url.endsWith('/api/ledger'))return json([]);throw new Error(`Unexpected request: ${url}`);});
+    vi.stubGlobal('fetch',fetchMock);window.localStorage.setItem('cod.device.id','web-device');window.localStorage.setItem('cod.session.token','test-token');
+    const originalList=fetchMock.getMockImplementation();fetchMock.mockImplementation(async(input,init)=>{const url=String(input);if(url.endsWith('/api/tasks')&&init?.method!=='POST')return json([{id:'task-cancel',title:'终止测试',status:'draft',deviceId:'web-device',updatedAt:new Date().toISOString(),version:taskVersion,result:null,error:null}]);return originalList!(input,init);});
+    render(<App/>);expect(await screen.findByRole('heading',{name:'终止测试',level:1})).toBeInTheDocument();fireEvent.click(screen.getByTitle('普通对话'));const composer=screen.getByPlaceholderText('问 COD 任何问题...');fireEvent.change(composer,{target:{value:'持续生成直到我终止'}});fireEvent.click(screen.getByRole('button',{name:'发送'}));await chatStarted;const cancelButton=await screen.findByRole('button',{name:'终止任务'});fireEvent.click(cancelButton);
+    expect(await screen.findByRole('button',{name:'重新执行'})).toBeInTheDocument();expect(screen.getByText(/模型请求已停止/)).toBeInTheDocument();expect(chatSignal?.aborted).toBe(true);const chatCall=fetchMock.mock.calls.find(([url])=>String(url).endsWith('/v1/chat/completions'));expect(JSON.parse(String(chatCall?.[1]?.body))).toMatchObject({task_id:'task-cancel'});expect(fetchMock.mock.calls.some(([url])=>String(url).endsWith('/api/tasks/task-cancel/cancel'))).toBe(true);
   });
 
   it('runs the same prompt through two selected models and renders a comparison', async()=>{

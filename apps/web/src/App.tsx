@@ -28,6 +28,7 @@ import {
   SidebarSimple,
   SignOut,
   Stack,
+  Stop,
   Storefront,
   Sun,
   TerminalWindow,
@@ -37,6 +38,7 @@ import {
 } from '@phosphor-icons/react';
 import type { DeviceRecord, KnowledgeHit, ProductManifest, TaskStatus, WorkspaceFile } from '@cod/contracts';
 import {
+  cancelRemoteTask,
   createRemoteTask,
   createComputeRequest,
   createClientId,
@@ -79,14 +81,15 @@ import { hasDesktopBridge, loadProject, openProject, readProjectFile } from './d
 import type { InspectorTab, ProjectSnapshot, WorkspaceMode } from './types';
 
 const statusLabels: Record<TaskStatus, string> = {
-  draft: '草稿', running: '运行中', waiting: '待确认', complete: '已完成', failed: '失败',
+  draft: '草稿', running: '运行中', waiting: '待确认', complete: '已完成', failed: '失败', cancelled: '已终止',
 };
 const emptyProject: ProjectSnapshot = { root: '', files: [], diff: '', selectedFile: null, selectedContent: '' };
 type Overlay = 'login' | 'new-task' | 'account' | 'commands' | 'models' | 'compute' | null;
 type AuthState = 'loading' | 'signed-out' | 'signed-in';
 type ColorMode = 'light' | 'dark';
 interface ComparisonResult { sourceId: string; sourceLabel: string; model: string; content: string; inputTokens?: number; outputTokens?: number; durationMs: number; error?: string }
-interface ChatMessage { id: string; role: 'user' | 'assistant' | 'comparison'; content: string; mode?: 'live' | 'demo'; sourceLabel?: string; model?: string; inputTokens?: number; outputTokens?: number; usageEstimated?: boolean; fallbackUsed?: boolean; failed?: boolean; retryPrompt?: string; comparisonResults?: ComparisonResult[]; createdAt: string }
+interface ChatMessage { id: string; role: 'user' | 'assistant' | 'comparison'; content: string; mode?: 'live' | 'demo'; sourceLabel?: string; model?: string; inputTokens?: number; outputTokens?: number; usageEstimated?: boolean; fallbackUsed?: boolean; failed?: boolean; cancelled?: boolean; retryPrompt?: string; comparisonResults?: ComparisonResult[]; createdAt: string }
+interface ActiveRun { taskId:string; controller:AbortController; cancelled:boolean; mode:WorkspaceMode }
 
 function sanitizeChatHistory(messages: ChatMessage[]): ChatMessage[] {
   return messages.filter((message) => message.role === 'comparison' ? Boolean(message.comparisonResults?.length) : typeof message.content === 'string' && message.content.trim().length > 0);
@@ -123,6 +126,9 @@ function chatFailureMessage(error: unknown): string {
   if (error instanceof ApiError && error.status >= 500) return '模型服务暂时波动，系统已自动重试但尚未恢复。你可以点击下方按钮继续重试，本次失败不会扣费。';
   return error instanceof Error ? error.message : 'COD 执行失败，本次失败不会扣费。';
 }
+function isTaskCancellation(error:unknown):boolean{
+  return error instanceof ApiError&&error.code==='task_cancelled'||error instanceof DOMException&&error.name==='AbortError'||error instanceof Error&&error.name==='AbortError';
+}
 function devicePlatform(): DeviceRecord['platform'] {
   if (!hasDesktopBridge()) return window.matchMedia?.('(max-width: 560px)').matches ? 'mobile' : 'web';
   if (window.codDesktop?.platform === 'darwin') return 'macos';
@@ -141,6 +147,7 @@ function StatusGlyph({ status }: { status: TaskStatus }) {
   if (status === 'running') return <CircleNotch className="spin status-running" weight="bold" />;
   if (status === 'waiting') return <Warning className="status-waiting" weight="fill" />;
   if (status === 'failed') return <Warning className="status-failed" weight="fill" />;
+  if (status === 'cancelled') return <Stop className="status-cancelled" weight="fill" />;
   if (status === 'complete') return <Check className="status-complete" weight="bold" />;
   return <ListChecks />;
 }
@@ -302,11 +309,13 @@ export function App() {
   const [messagesByTask, setMessagesByTask] = useState<Record<string, ChatMessage[]>>({});
   const [pendingSend, setPendingSend] = useState<{ prompt: string; mode: WorkspaceMode } | null>(null);
   const [isSending, setIsSending] = useState(false);
+  const [cancellingTaskId,setCancellingTaskId]=useState('');
   const [agentStatus, setAgentStatus] = useState('就绪');
   const [pendingPermission, setPendingPermission] = useState<{ title: string; options: Array<{ optionId: string; name: string; kind: string }> } | null>(null);
   const [project, setProject] = useState<ProjectSnapshot>(emptyProject);
   const permissionResolver = useRef<((optionId: string | null) => void) | null>(null);
   const pendingSendRunner = useRef<(prompt: string, mode: WorkspaceMode) => void>(() => undefined);
+  const activeRunRef=useRef<ActiveRun|null>(null);
 
   useEffect(() => {
     document.documentElement.dataset.colorMode = colorMode;
@@ -423,6 +432,14 @@ export function App() {
     return () => { window.clearInterval(interval); document.removeEventListener('visibilitychange',syncWhenVisible); };
   }, [session]);
 
+  useEffect(()=>{
+    const run=activeRunRef.current;if(!run||run.cancelled)return;
+    const task=tasks.find((item)=>item.id===run.taskId);if(task?.status!=='cancelled')return;
+    run.cancelled=true;run.controller.abort(new DOMException('Task cancelled','AbortError'));
+    permissionResolver.current?.(null);permissionResolver.current=null;setPendingPermission(null);setAgentStatus('已终止');
+    if(hasDesktopBridge())void window.codDesktop?.stopGoose();
+  },[tasks]);
+
   useEffect(() => {
     if (!hasDesktopBridge()) return;
     const recentRoot = storageGet('cod.project.root');
@@ -437,7 +454,7 @@ export function App() {
     const nextSession=await registerCod(input);
     await loadWorkspace(nextSession);setSession(nextSession);setAuthState('signed-in');setOverlay(null);
   };
-  const handleLogout = () => { void window.codDesktop?.stopGoose(); logoutCod(); setSession(null); setTasks([]); setDevices([]); setCreditPacks({ packs: [], summary: { availableCents: 0, grants: [] } }); setCurrentDeviceId(''); setPendingSend(null); setOverlay(null); setAuthState('signed-out'); };
+  const handleLogout = () => { const run=activeRunRef.current;if(run){run.cancelled=true;run.controller.abort(new DOMException('Signed out','AbortError'));}void window.codDesktop?.stopGoose(); logoutCod(); setSession(null); setTasks([]); setDevices([]); setCreditPacks({ packs: [], summary: { availableCents: 0, grants: [] } }); setCurrentDeviceId(''); setPendingSend(null); setOverlay(null); setAuthState('signed-out'); };
   const refreshWallet = async () => {
     if (!session) return;
     const [account, nextLedger, nextCreditPacks] = await Promise.all([refreshAccount(session.token), listLedger(session.token), getCreditPacks(session.token)]);
@@ -520,6 +537,7 @@ export function App() {
     let task = requestedTask;
     let promptAppended = false;
     let responseAppended = false;
+    let run:ActiveRun|null=null;
     if (task && task.deviceId !== currentDeviceId) { setNotice(`该任务应在 ${devices.find((device) => device.id === task!.deviceId)?.name ?? '目标设备'} 上执行`); return; }
     try {
       if (!task) {
@@ -537,12 +555,14 @@ export function App() {
       appendMessage(task.id, { id: createClientId(), role: 'user', content: submittedPrompt, createdAt: new Date().toISOString() });
       promptAppended = true;
       setPrompt(''); setIsSending(true); setAgentStatus('正在执行'); setNotice('');
+      run={taskId:task.id,controller:new AbortController(),cancelled:false,mode:requestedMode};activeRunRef.current=run;
       let reply = '';
       let replyMode: 'live' | 'demo' = capabilities?.ai.mode === 'demo' ? 'demo' : 'live';
-      const acpUrl = requestedMode === 'code' && selectedSource && selectedModelInfo ? await window.codDesktop?.getGooseAcpUrl({ token: session.token, sourceId: selectedSource.id, modelId: selectedModelInfo.id }) : null;
+      const acpUrl = requestedMode === 'code' && selectedSource && selectedModelInfo ? await window.codDesktop?.getGooseAcpUrl({ token: session.token, sourceId: selectedSource.id, modelId: selectedModelInfo.id, taskId:task.id }) : null;
       if(comparisonRequest){
         setAgentStatus(`正在并行请求 ${compareTargets.length} 个模型`);
-        const results=await Promise.all(compareTargets.map(async(target):Promise<ComparisonResult>=>{const startedAt=performance.now();try{const result=await sendChat(session.token,target.sourceId,target.model.id,conversationMessages);return{sourceId:target.sourceId,sourceLabel:target.sourceLabel,model:result.model,content:result.content,inputTokens:result.inputTokens,outputTokens:result.outputTokens,durationMs:Math.round(performance.now()-startedAt)};}catch(error){return{sourceId:target.sourceId,sourceLabel:target.sourceLabel,model:target.model.id,content:'',durationMs:Math.round(performance.now()-startedAt),error:error instanceof Error?error.message:'请求失败'};}}));
+        const results=await Promise.all(compareTargets.map(async(target):Promise<ComparisonResult>=>{const startedAt=performance.now();try{const result=await sendChat(session.token,target.sourceId,target.model.id,conversationMessages,{taskId:task!.id,signal:run!.controller.signal});return{sourceId:target.sourceId,sourceLabel:target.sourceLabel,model:result.model,content:result.content,inputTokens:result.inputTokens,outputTokens:result.outputTokens,durationMs:Math.round(performance.now()-startedAt)};}catch(error){return{sourceId:target.sourceId,sourceLabel:target.sourceLabel,model:target.model.id,content:'',durationMs:Math.round(performance.now()-startedAt),error:error instanceof Error?error.message:'请求失败'};}}));
+        if(run.cancelled)throw new DOMException('Task cancelled','AbortError');
         appendMessage(task.id,{id:createClientId(),role:'comparison',content:'多模型对比',comparisonResults:results,createdAt:new Date().toISOString()});
         responseAppended = true;
         const successful=results.filter((result)=>!result.error);if(!successful.length)throw new Error('所选模型均未返回可用回答。');
@@ -551,13 +571,13 @@ export function App() {
         const { buildCodeExecutionPrompt, runGooseTask, validateCodeRun } = await import('./goose');
         setAgentStatus('连接本机 Goose');
         const contextualPrompt = conversationMessages.length === 1 ? submittedPrompt : `Continue this conversation using the current project.\n\n${conversationMessages.map((message) => `${message.role === 'user' ? 'User' : 'Assistant'}: ${message.content}`).join('\n\n')}`;
-        const run = await runGooseTask({ acpUrl, cwd: project.root, prompt: buildCodeExecutionPrompt(contextualPrompt), onUpdate: (update) => { if (update.kind === 'message') reply += update.text; if (update.kind === 'tool' || update.kind === 'status') setAgentStatus(update.text); }, requestPermission: (request) => new Promise((resolve) => { permissionResolver.current = resolve; setPendingPermission({ title: request.toolCall.title ?? '工具权限请求', options: request.options }); }) });
-        reply=run.answer;validateCodeRun(submittedPrompt,run);
+        const gooseRun = await runGooseTask({ acpUrl, cwd: project.root, prompt: buildCodeExecutionPrompt(contextualPrompt), signal:run.controller.signal, onUpdate: (update) => { if (update.kind === 'message') reply += update.text; if (update.kind === 'tool' || update.kind === 'status') setAgentStatus(update.text); }, requestPermission: (request) => new Promise((resolve) => { permissionResolver.current = resolve; setPendingPermission({ title: request.toolCall.title ?? '工具权限请求', options: request.options }); }) });
+        reply=gooseRun.answer;validateCodeRun(submittedPrompt,gooseRun);
         if (!reply) reply = 'Goose 已完成任务，请在右侧刷新文件与 Diff。';
       } else {
         if (requestedMode === 'code' && !hasDesktopBridge()) setNotice('Web 端仅提供代码问答；修改本机文件请使用 COD Desktop。');
         if (!selectedSource?.callable || !selectedModelInfo) throw new Error('当前模型源仅供查看目录，配置该源密钥后才能调用。');
-        const result = await sendChat(session.token, selectedSource.id, selectedModelInfo.id, conversationMessages); reply = result.content; replyMode = result.mode;
+        const result = await sendChat(session.token, selectedSource.id, selectedModelInfo.id, conversationMessages,{taskId:task.id,signal:run.controller.signal}); reply = result.content; replyMode = result.mode;
         appendMessage(task.id, { id: createClientId(), role: 'assistant', content: reply, mode: replyMode, sourceLabel: selectedSource.label, model: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens, usageEstimated: result.usageEstimated, fallbackUsed: result.fallbackUsed, createdAt: new Date().toISOString() });
         responseAppended = true;
       }
@@ -566,11 +586,12 @@ export function App() {
       setAgentStatus('已完成'); await refreshWallet();
       if (hasDesktopBridge() && project.root) { const snapshot = await loadProject(project.root); if (snapshot) setProject(snapshot); }
     } catch (error) {
+      if(run?.cancelled||isTaskCancellation(error)){setAgentStatus('已终止');return;}
       const failure = chatFailureMessage(error);
       setAgentStatus('等待重试'); setNotice(failure);
       if (task && promptAppended && !responseAppended) appendMessage(task.id, { id: createClientId(), role: 'assistant', content: failure, failed: true, retryPrompt: promptText, createdAt: new Date().toISOString() });
       if (task && session && (task.status === 'draft' || task.status === 'running' || task.status === 'waiting')) { try { await changeTaskStatus(task, 'failed', { error: failure }); } catch { /* Preserve the original error. */ } }
-    } finally { setIsSending(false); }
+    } finally { if(run&&activeRunRef.current===run)activeRunRef.current=null;setIsSending(false); }
   };
   pendingSendRunner.current = (nextPrompt, nextMode) => { void handleSend(nextPrompt, null, nextMode); };
   useEffect(() => {
@@ -588,6 +609,20 @@ export function App() {
   const completeSynchronizedTask = (task: RemoteTask) => {
     if (task.deviceId !== currentDeviceId) { setNotice('请在任务指定的目标设备上更新状态。'); return; }
     void changeTaskStatus(task, 'complete', { result: task.result?.trim() || '用户在目标设备手动确认任务已完成。', error: null }).catch((error) => setNotice(error.message));
+  };
+  const cancelSynchronizedTask=async(task:RemoteTask)=>{
+    if(!session||cancellingTaskId)return;
+    setCancellingTaskId(task.id);setNotice('正在终止任务并释放预占额度…');
+    const run=activeRunRef.current;
+    if(run?.taskId===task.id){run.cancelled=true;run.controller.abort(new DOMException('Task cancelled','AbortError'));permissionResolver.current?.(null);permissionResolver.current=null;setPendingPermission(null);}
+    try{
+      const [result]=await Promise.all([cancelRemoteTask(session.token,task),hasDesktopBridge()&&run?.taskId===task.id?window.codDesktop?.stopGoose():Promise.resolve()]);
+      replaceTask(result.task);appendMessage(task.id,{id:createClientId(),role:'assistant',content:hasDesktopBridge()?'任务已由用户终止。模型请求和本机 Agent 已停止，预占额度已释放，本次终止不会产生模型用量扣费。':'任务已由用户终止。模型请求已停止，预占额度已释放，本次终止不会产生模型用量扣费。',cancelled:true,createdAt:new Date().toISOString()});
+      setAgentStatus('已终止');setNotice(result.cancelledRequests>0?`任务已终止，已取消 ${result.cancelledRequests} 个模型请求并释放预占额度。`:'任务已终止，当前没有仍在运行的模型请求。');await refreshWallet();
+    }catch(error){
+      try{const latest=await listTasks(session.token);setTasks(latest);if(latest.find((item)=>item.id===task.id)?.status==='cancelled'){setAgentStatus('已终止');setNotice('任务已在其他设备终止。');return;}}catch{/* Preserve the cancellation error. */}
+      setNotice(error instanceof Error?error.message:'终止任务失败');
+    }finally{setCancellingTaskId('');}
   };
   const resolvePermission = (optionId: string | null) => { permissionResolver.current?.(optionId); permissionResolver.current = null; setPendingPermission(null); };
   const handleOpenProject = async () => {
@@ -622,9 +657,9 @@ export function App() {
     {sidebarOpen && <button className="sidebar-scrim" aria-label="关闭任务栏" onClick={() => setSidebarOpen(false)} />}
     <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}><div className="sidebar-head"><div><small>工作区</small><strong>{mode === 'code' ? '代码任务' : '对话'}</strong></div><button className="new-task" onClick={() => setOverlay(session ? 'new-task' : 'login')}><Plus weight="bold" /> 新任务</button></div><div className="search"><MagnifyingGlass /><input aria-label="搜索任务" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="搜索任务或状态" /></div><TaskList tasks={filteredTasks} devices={devices} activeId={activeTaskId} onSelect={(id) => { setActiveTaskId(id); setSidebarOpen(false); }} /><div className="sidebar-bottom">{notice && <div className="remote-notice">{notice}</div>}<button className="project-switch" onClick={handleOpenProject}><span className="project-icon"><Folder weight="fill" /></span><span><small>当前项目</small><strong>{projectName}</strong></span><CaretDown /></button><div className="balance-preview"><Lightning weight="fill" /><span><small>可用使用额度</small><strong>{session ? `¥ ${((session.account.balanceCents + creditPacks.summary.availableCents) / 100).toFixed(2)}` : '登录后查看'}</strong></span><button onClick={() => setOverlay(session ? 'account' : 'login')}>{session ? '额度包' : '登录'}</button></div></div></aside>
     <main className="workspace"><header className="workspace-header"><div className="task-heading"><button className="mobile-only icon-button" title="打开任务栏" onClick={() => setSidebarOpen(true)}><SidebarSimple /></button><div><h1>{activeTask?.title ?? (session ? '新建或选择任务' : '新对话')}</h1><p>{project.root || (authState === 'loading' ? '正在连接 COD…' : session ? 'Web 远程工作区' : '输入消息即可开始')}</p></div></div><div className="header-actions">{activeTask && <span className={`header-status ${activeTask.status}`}>{statusLabels[activeTask.status]}</span>}<div className="mode-switch" aria-label="工作模式"><button className={mode === 'code' ? 'active' : ''} onClick={() => setMode('code')}><Code /> 代码</button><button className={mode === 'chat' ? 'active' : ''} onClick={() => setMode('chat')}><ChatCircleDots /> 对话</button></div><select className="source-picker" aria-label="模型源" value={selectedSource?.id ?? ''} onChange={(event) => handleSourceChange(event.target.value)} disabled={!session}><option value="">{authState === 'loading' ? '正在连接…' : '登录后选择模型源'}</option>{session?.sources.map((source) => <option key={source.id} value={source.id}>{source.label} · {source.callable ? '已连接' : source.status === 'catalog' ? '目录' : '不可用'}</option>)}</select><select className="model-picker" aria-label="模型" value={selectedModelInfo?.id ?? ''} onChange={(event) => handleModelChange(event.target.value)} disabled={!session || !sourceModels.length}><option value="">登录后选择模型</option>{sourceModels.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}</select><button className={`icon-button inspector-toggle${inspectorOpen ? ' active' : ''}`} title={inspectorOpen ? '隐藏右侧面板' : '显示右侧面板'} onClick={toggleInspector}><SidebarSimple /></button></div></header>
-      <section className="conversation"><div className="conversation-scroll">{!activeTask && <div className="empty-state"><div className="agent-avatar"><span>C</span></div><h2>{session ? '从一个真实任务开始' : '有什么可以帮你？'}</h2><p>{session ? '新建任务后，状态、目标设备和执行结果会同步保存。' : '直接输入你的第一条消息；发送时再登录，内容不会丢失。'}</p>{session && <button className="primary-button" onClick={() => setOverlay('new-task')}><Plus /> 新建任务</button>}</div>}{activeTask && !activeMessages.length && !activeTask.result && !activeTask.error && <div className="empty-state compact"><StatusGlyph status={activeTask.status} /><h2>{activeTask.title}</h2><p>任务已同步到 {devices.find((device) => device.id === activeTask.deviceId)?.name ?? '目标设备'}。输入内容开始执行。</p></div>}{activeTask && !activeMessages.length && (activeTask.result || activeTask.error) && <article className="agent-message"><div className="agent-avatar"><span>C</span></div><div><header><strong>{activeTask.error ? '远程任务失败' : '远程任务结果'}</strong></header><p>{activeTask.error ?? activeTask.result}</p><small>{formatTime(activeTask.updatedAt)}</small></div></article>}{activeMessages.map((message) => message.role === 'user' ? <article className="user-message" key={message.id}><p>{message.content}</p><small>{formatTime(message.createdAt)}</small></article> : message.role === 'comparison' ? <article className="comparison-message" key={message.id}><header><div><Stack weight="fill" /><span><strong>多模型对比</strong><small>同一问题 · {message.comparisonResults?.length ?? 0} 个模型</small></span></div><time>{formatTime(message.createdAt)}</time></header><div className="comparison-results">{message.comparisonResults?.map((result) => <section className={result.error ? 'failed' : ''} key={`${result.sourceId}-${result.model}`}><header><span><strong>{result.model}</strong><small>{result.sourceLabel}</small></span><div><i>{result.error ? '失败' : `${(result.durationMs / 1000).toFixed(1)}s`}</i>{!result.error&&<button onClick={()=>chooseComparisonModel(result.sourceId,result.model)}>选用此模型</button>}</div></header>{result.error ? <p className="comparison-error">{result.error}</p> : <p>{result.content}</p>}<footer>{result.inputTokens !== undefined && result.outputTokens !== undefined ? `输入 ${result.inputTokens.toLocaleString('zh-CN')} / 输出 ${result.outputTokens.toLocaleString('zh-CN')} Token` : '未返回 Token 用量'}</footer></section>)}</div></article> : <article className={`agent-message${message.failed ? ' failed' : ''}`} key={message.id}><div className="agent-avatar"><span>{message.failed ? '!' : 'C'}</span></div><div><header><strong>{message.failed ? '本次未扣费' : 'COD Agent'}</strong>{message.mode === 'demo' && <span className="demo-chip">演示响应</span>}{message.sourceLabel && <span className="source-chip">{message.sourceLabel} · {message.model}{message.fallbackUsed ? '（健康模型降级）' : ''}{message.inputTokens !== undefined && message.outputTokens !== undefined ? ` · 输入 ${message.inputTokens.toLocaleString('zh-CN')} / 输出 ${message.outputTokens.toLocaleString('zh-CN')} Token${message.usageEstimated ? '（估算）' : ''}` : ''}</span>}</header><p>{message.content}</p>{message.failed && message.retryPrompt && <button className="retry-message" disabled={isSending} onClick={() => void handleSend(message.retryPrompt, activeTask, mode)}><ArrowClockwise /> 重试这条消息</button>}<small>{formatTime(message.createdAt)}</small></div></article>)}{isSending && <div className="agent-intro"><div className="agent-avatar"><span>C</span></div><div><strong>COD Agent</strong><small>{agentStatus}</small></div><span className="live-chip"><CircleNotch className="spin" /> running</span></div>}{pendingPermission && <div className="live-permission"><strong>{pendingPermission.title}</strong><p>Goose 请求执行权限，请确认本次操作。</p><div>{pendingPermission.options.map((option) => <button className={option.kind.startsWith('allow') ? 'approve' : ''} key={option.optionId} onClick={() => resolvePermission(option.optionId)}>{option.name}</button>)}<button onClick={() => resolvePermission(null)}>取消</button></div></div>}</div>
+      <section className="conversation"><div className="conversation-scroll">{!activeTask && <div className="empty-state"><div className="agent-avatar"><span>C</span></div><h2>{session ? '从一个真实任务开始' : '有什么可以帮你？'}</h2><p>{session ? '新建任务后，状态、目标设备和执行结果会同步保存。' : '直接输入你的第一条消息；发送时再登录，内容不会丢失。'}</p>{session && <button className="primary-button" onClick={() => setOverlay('new-task')}><Plus /> 新建任务</button>}</div>}{activeTask && !activeMessages.length && !activeTask.result && !activeTask.error && <div className="empty-state compact"><StatusGlyph status={activeTask.status} /><h2>{activeTask.title}</h2><p>{activeTask.status==='cancelled'?'任务已终止，可重新执行。':`任务已同步到 ${devices.find((device) => device.id === activeTask.deviceId)?.name ?? '目标设备'}。输入内容开始执行。`}</p></div>}{activeTask && !activeMessages.length && (activeTask.result || activeTask.error) && <article className="agent-message"><div className="agent-avatar"><span>C</span></div><div><header><strong>{activeTask.error ? '远程任务失败' : '远程任务结果'}</strong></header><p>{activeTask.error ?? activeTask.result}</p><small>{formatTime(activeTask.updatedAt)}</small></div></article>}{activeMessages.map((message) => message.role === 'user' ? <article className="user-message" key={message.id}><p>{message.content}</p><small>{formatTime(message.createdAt)}</small></article> : message.role === 'comparison' ? <article className="comparison-message" key={message.id}><header><div><Stack weight="fill" /><span><strong>多模型对比</strong><small>同一问题 · {message.comparisonResults?.length ?? 0} 个模型</small></span></div><time>{formatTime(message.createdAt)}</time></header><div className="comparison-results">{message.comparisonResults?.map((result) => <section className={result.error ? 'failed' : ''} key={`${result.sourceId}-${result.model}`}><header><span><strong>{result.model}</strong><small>{result.sourceLabel}</small></span><div><i>{result.error ? '失败' : `${(result.durationMs / 1000).toFixed(1)}s`}</i>{!result.error&&<button onClick={()=>chooseComparisonModel(result.sourceId,result.model)}>选用此模型</button>}</div></header>{result.error ? <p className="comparison-error">{result.error}</p> : <p>{result.content}</p>}<footer>{result.inputTokens !== undefined && result.outputTokens !== undefined ? `输入 ${result.inputTokens.toLocaleString('zh-CN')} / 输出 ${result.outputTokens.toLocaleString('zh-CN')} Token` : '未返回 Token 用量'}</footer></section>)}</div></article> : <article className={`agent-message${message.failed ? ' failed' : message.cancelled?' cancelled':''}`} key={message.id}><div className="agent-avatar"><span>{message.failed ? '!' : message.cancelled?'■':'C'}</span></div><div><header><strong>{message.failed ? '本次未扣费' : message.cancelled?'任务已终止':'COD Agent'}</strong>{message.mode === 'demo' && <span className="demo-chip">演示响应</span>}{message.sourceLabel && <span className="source-chip">{message.sourceLabel} · {message.model}{message.fallbackUsed ? '（健康模型降级）' : ''}{message.inputTokens !== undefined && message.outputTokens !== undefined ? ` · 输入 ${message.inputTokens.toLocaleString('zh-CN')} / 输出 ${message.outputTokens.toLocaleString('zh-CN')} Token${message.usageEstimated ? '（估算）' : ''}` : ''}</span>}</header><p>{message.content}</p>{message.failed && message.retryPrompt && <button className="retry-message" disabled={isSending} onClick={() => void handleSend(message.retryPrompt, activeTask, mode)}><ArrowClockwise /> 重试这条消息</button>}<small>{formatTime(message.createdAt)}</small></div></article>)}{isSending && <div className="agent-intro"><div className="agent-avatar"><span>C</span></div><div><strong>COD Agent</strong><small>{agentStatus}</small></div><span className="live-chip"><CircleNotch className="spin" /> running</span></div>}{pendingPermission && <div className="live-permission"><strong>{pendingPermission.title}</strong><p>Goose 请求执行权限，请确认本次操作。</p><div>{pendingPermission.options.map((option) => <button className={option.kind.startsWith('allow') ? 'approve' : ''} key={option.optionId} onClick={() => resolvePermission(option.optionId)}>{option.name}</button>)}<button onClick={() => resolvePermission(null)}>取消</button></div></div>}</div>
         <div className="composer-wrap">
-          {activeTask && <div className="task-actions">{(activeTask.status === 'draft' || activeTask.status === 'failed' || activeTask.status === 'complete') && <button onClick={() => executeSynchronizedTask(activeTask)}><Play /> {activeTask.status === 'failed' ? '重试任务' : activeTask.status === 'complete' ? '继续任务' : '执行任务'}</button>}{(activeTask.status === 'running' || activeTask.status === 'waiting') && <button onClick={() => completeSynchronizedTask(activeTask)}><Check /> 标记完成</button>}</div>}
+          {activeTask && <div className="task-actions">{(activeTask.status === 'draft' || activeTask.status === 'failed' || activeTask.status === 'complete' || activeTask.status==='cancelled') && <button onClick={() => executeSynchronizedTask(activeTask)}><Play /> {activeTask.status === 'failed' ? '重试任务' : activeTask.status === 'complete' ? '继续任务' : activeTask.status==='cancelled'?'重新执行':'执行任务'}</button>}{(activeTask.status === 'running' || activeTask.status === 'waiting') && <><button onClick={() => completeSynchronizedTask(activeTask)} disabled={cancellingTaskId===activeTask.id}><Check /> 标记完成</button><button className="cancel-task" onClick={() => void cancelSynchronizedTask(activeTask)} disabled={Boolean(cancellingTaskId)}>{cancellingTaskId===activeTask.id?<CircleNotch className="spin"/>:<Stop weight="fill"/>}{cancellingTaskId===activeTask.id?'正在终止':'终止任务'}</button></>}</div>}
           {mode === 'chat' && <div className={`compare-bar${compareEnabled ? ' open' : ''}`}><button className="compare-toggle" aria-pressed={compareEnabled} onClick={() => setCompareEnabled((current) => !current)}><Stack weight={compareEnabled ? 'fill' : 'regular'} /><span><strong>多模型对比</strong><small>{compareEnabled ? `已选 ${compareTargets.length} 个模型` : '同一问题并行比较 2-4 个模型'}</small></span><i>{compareEnabled ? '已开启' : '开启'}</i></button>{compareEnabled && <div className="compare-picker"><header><span>选择模型</span><small>本次发送将产生 {compareTargets.length} 次独立计费请求</small></header><div>{callableModels.map((target) => { const checked=compareModelKeys.includes(target.key); return <label className={checked ? 'selected' : ''} key={target.key}><input type="checkbox" checked={checked} disabled={!checked&&compareModelKeys.length>=4} onChange={() => toggleCompareModel(target.key)} /><span><strong>{target.model.label}</strong><small>{target.sourceLabel} · 输入 ¥{(target.model.inputPricePerMillionCents/100).toFixed(2)} / 输出 ¥{(target.model.outputPricePerMillionCents/100).toFixed(2)} 每百万</small></span><Check weight="bold" /></label>;})}</div>{callableModels.length<2&&<p>当前可调用模型不足 2 个，暂时无法开始对比。</p>}</div>}</div>}
           <div className="context-strip"><span><Folder weight="fill" /> {projectName}</span><span><GitDiff /> {changeCount} 个改动</span><span><ShieldCheck /> 受控模式</span>{selectedSource && <span><Lightning weight="fill" /> {selectedSource.paymentDirection}</span>}{selectedModelInfo && <span>输入 ¥{(selectedModelInfo.inputPricePerMillionCents / 100).toFixed(2)} / 输出 ¥{(selectedModelInfo.outputPricePerMillionCents / 100).toFixed(2)} 每百万 Token</span>}<button onClick={handleKnowledge} disabled={knowledgeLoading}>{knowledgeLoading ? <CircleNotch className="spin" /> : <MagnifyingGlass />} 期算知识库</button><button onClick={handleRemoteTask}><PaperPlaneTilt /> 发送到设备</button></div>
           {notice && <div className="remote-notice"><span>{notice}</span><button title="关闭提示" onClick={() => setNotice('')}><X /></button></div>}

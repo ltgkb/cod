@@ -17,9 +17,10 @@ import { computeOfferCatalog, validateComputeRequest } from './compute-market.js
 export interface ControlPlaneOptions {
   config?: ControlPlaneConfig;
   database?: CodDatabase;
+  gateway?: AiGateway;
 }
 
-const validStatuses = new Set<TaskStatus>(['draft', 'running', 'waiting', 'complete', 'failed']);
+const validStatuses = new Set<TaskStatus>(['draft', 'running', 'waiting', 'complete', 'failed', 'cancelled']);
 const userIdFor = (email: string) => `usr_${createHash('sha256').update(email).digest('hex').slice(0, 20)}`;
 const tenantIdFor = (email: string) => `tenant_${email.split('@')[1]?.replace(/[^a-z0-9]+/g, '_') ?? 'unknown'}`;
 const principalFromSession = (session: NonNullable<ReturnType<typeof verifySessionToken>>): Principal => ({ userId: session.sub, tenantId: session.tenantId, email: session.email, role: session.role });
@@ -149,10 +150,25 @@ function queryInteger(raw: string | null, fallback: number, maximum = Number.MAX
 export function createControlPlane(options: ControlPlaneOptions = {}) {
   const config = options.config ?? loadConfig();
   const database = options.database ?? (config.databaseUrl ? new PostgresDatabase(config.databaseUrl) : new MemoryDatabase());
-  const gateway = new AiGateway(config);
+  const gateway = options.gateway ?? new AiGateway(config);
   const knowledge = new KnowledgeAdapter(config);
   const products = new ProductRegistry(config);
   const seenFeishuMessages = new Set<string>();
+  interface ActiveChatRequest { controller: AbortController; reservationId: string; reservationReady: Promise<void> }
+  const activeChats = new Map<string, Set<ActiveChatRequest>>();
+  const activeChatKey = (principal: Principal, taskId: string) => `${principal.tenantId}\0${principal.userId}\0${taskId}`;
+  const registerActiveChat = (principal: Principal, taskId: string, active: ActiveChatRequest) => {
+    const key = activeChatKey(principal, taskId);
+    const entries = activeChats.get(key) ?? new Set<ActiveChatRequest>();
+    entries.add(active); activeChats.set(key, entries);
+    return () => { entries.delete(active); if (!entries.size) activeChats.delete(key); };
+  };
+  const cancelActiveChats = async (principal: Principal, taskId: string): Promise<number> => {
+    const entries = [...(activeChats.get(activeChatKey(principal, taskId)) ?? [])];
+    for (const entry of entries) entry.controller.abort(new HttpError('Task was cancelled', 409, 'task_cancelled'));
+    await Promise.all(entries.map(async(entry)=>{await entry.reservationReady;await database.releaseUsage(principal,entry.reservationId);}));
+    return entries.length;
+  };
 
   return createServer(async (request, response) => {
     const requestId = /^[a-zA-Z0-9._-]{1,100}$/.test(String(request.headers['x-request-id'] ?? '')) ? String(request.headers['x-request-id']) : randomUUID();
@@ -185,7 +201,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         ai: { mode: await gateway.mode(), streaming: true, streamingMode: 'buffered-sse' },
         knowledge: { mode: knowledge.mode() },
         payments: { topupEnabled: config.developmentTopupEnabled, orderApi: Boolean(config.paymentWebhookSecret), mode: config.paymentWebhookSecret ? 'verified-webhook' : config.developmentTopupEnabled ? 'pilot-credit' : 'unavailable' },
-        synchronization: { transport: 'polling', taskStatusVersioning: true },
+        synchronization: { transport: 'polling', taskStatusVersioning: true, taskCancellation: true },
         remote: {
           feishu: config.feishuVerificationToken && config.feishuAppId && config.feishuAppSecret && Object.keys(config.feishuBindings).length ? 'live' : 'unavailable',
           wecom: process.env.COD_BOT_WEBHOOK_SECRET ? 'adapter' : 'unavailable',
@@ -320,6 +336,15 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       if (request.method === 'POST' && url.pathname.match(/^\/api\/devices\/[^/]+\/heartbeat$/)) return sendJson(response, 200, await database.heartbeat(principal, url.pathname.split('/')[3]));
       if (request.method === 'GET' && url.pathname === '/api/tasks') return sendJson(response, 200, await database.listTasks(principal));
       if (request.method === 'POST' && url.pathname === '/api/tasks') { const task=await database.createTask(principal,await readJson(request)); await database.audit(principal,'task.create','task',task.id); return sendJson(response,201,task); }
+      if (request.method === 'POST' && url.pathname.match(/^\/api\/tasks\/[^/]+\/cancel$/)) {
+        const taskId=decodeURIComponent(url.pathname.split('/')[3]);
+        const body=await readJson<{expectedVersion?:number}>(request);
+        if(!Number.isInteger(body.expectedVersion)||Number(body.expectedVersion)<1)throw new HttpError('Expected task version is required',400,'invalid_task_version');
+        const task=await database.updateTask(principal,taskId,'cancelled',Number(body.expectedVersion),{result:null,error:null});
+        const cancelledRequests=await cancelActiveChats(principal,taskId);
+        await database.audit(principal,'task.cancel','task',task.id,{cancelledRequests});
+        return sendJson(response,200,{task,cancelledRequests});
+      }
       if (request.method === 'POST' && url.pathname.match(/^\/api\/tasks\/[^/]+\/status$/)) { const body=await readJson<{status:TaskStatus;expectedVersion:number;result?:string|null;error?:string|null}>(request); if(!validStatuses.has(body.status)) throw new HttpError('Invalid task status',400,'invalid_status'); const task=await database.updateTask(principal,url.pathname.split('/')[3],body.status,body.expectedVersion,{result:body.result,error:body.error}); await database.audit(principal,'task.status','task',task.id,{status:body.status,hasResult:Boolean(body.result),hasError:Boolean(body.error)}); return sendJson(response,200,task); }
       if (request.method === 'GET' && url.pathname === '/api/events') return sendJson(response, 200, await database.eventsAfter(principal, queryInteger(url.searchParams.get('cursor'), 0)));
       if (request.method === 'POST' && url.pathname === '/api/topups') {
@@ -331,29 +356,39 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         if (principal.role !== 'admin') throw new HttpError('Usage ingestion requires a trusted service identity', 403, 'usage_forbidden');
         const event=await readJson<UsageEvent>(request); const entry=await database.recordUsage(principal,event); return sendJson(response,201,{entry,account:await database.getAccount(principal)});
       }
-      const chatRoute = url.pathname.match(/^\/v1(?:\/sources\/([a-z0-9-]{2,40}))?\/chat\/completions$/);
+      const chatRoute = url.pathname.match(/^\/v1(?:\/tasks\/([^/]+))?(?:\/sources\/([a-z0-9-]{2,40}))?\/chat\/completions$/);
       if (request.method === 'POST' && chatRoute) {
-        const body = await readJson<{ model?: string; source?: string } & Record<string, unknown>>(request);
+        const body = await readJson<{ model?: string; source?: string; task_id?: string } & Record<string, unknown>>(request);
         const clientRequestedStream=body.stream===true;
         if(!Array.isArray(body.messages) || body.messages.length === 0 || body.messages.length > 40)throw new HttpError('Chat must contain between 1 and 40 messages',400,'invalid_messages');
         const validMessages = body.messages.every(isValidChatMessage);
         if (!validMessages) throw new HttpError('Chat messages are invalid',400,'invalid_messages');
-        const routeSource = chatRoute[1];
+        const routeTaskId=chatRoute[1]?decodeURIComponent(chatRoute[1]):null;
+        const bodyTaskId=body.task_id===undefined?null:typeof body.task_id==='string'?body.task_id.trim():'';
+        if(body.task_id!==undefined&&!bodyTaskId)throw new HttpError('Task ID is invalid',400,'invalid_task_id');
+        if(routeTaskId&&bodyTaskId&&routeTaskId!==bodyTaskId)throw new HttpError('Task conflicts with the gateway route',400,'task_conflict');
+        const taskId=routeTaskId??bodyTaskId;
+        if(taskId&&(!/^[a-f0-9-]{36}$/i.test(taskId)))throw new HttpError('Task ID is invalid',400,'invalid_task_id');
+        if(taskId){const task=await database.getTask(principal,taskId);if(task.status!=='running'&&task.status!=='waiting')throw new HttpError('Task is not running',409,task.status==='cancelled'?'task_cancelled':'task_not_running');}
+        const routeSource = chatRoute[2];
         if (routeSource && body.source && routeSource !== body.source) throw new HttpError('Model source conflicts with the gateway route', 400, 'source_conflict');
         const sourceId=routeSource??body.source??(config.modelSources.some((source)=>source.apiKey)?config.modelSources.find((source)=>source.apiKey)!.id:'demo');
         const model=typeof body.model==='string'?body.model.trim():'';
         if(!model)throw new HttpError('Model is required',400,'model_required');
         const selection=await gateway.getModel(sourceId,model);const fallbackCandidate=sourceId==='demo'?null:await gateway.getFallbackModel(sourceId,model);
         const maxOutput=Number(body.max_completion_tokens??body.max_tokens??4096);if(!Number.isInteger(maxOutput)||maxOutput<1||maxOutput>20_000)throw new HttpError('Invalid max output tokens; COD allows at most 20000',400,'invalid_max_tokens');
-        const {source: _source, ...rawProviderBody}=body;const providerMaxOutput=Math.max(512,maxOutput);const providerBody={...rawProviderBody,stream:false,...(body.max_completion_tokens!==undefined?{max_completion_tokens:providerMaxOutput}:{max_tokens:providerMaxOutput})};const reservationId=randomUUID();const estimatedInput=estimatedInputTokens(providerBody);const reservedCost=Math.max(gateway.costCents(selection.model,estimatedInput,providerMaxOutput),fallbackCandidate?gateway.costCents(fallbackCandidate,estimatedInput,providerMaxOutput):0);await database.reserveUsage(principal,reservationId,reservedCost);
+        const {source: _source,task_id: _taskId, ...rawProviderBody}=body;const providerMaxOutput=Math.max(512,maxOutput);const providerBody={...rawProviderBody,stream:false,...(body.max_completion_tokens!==undefined?{max_completion_tokens:providerMaxOutput}:{max_tokens:providerMaxOutput})};const reservationId=randomUUID();const estimatedInput=estimatedInputTokens(providerBody);const reservedCost=Math.max(gateway.costCents(selection.model,estimatedInput,providerMaxOutput),fallbackCandidate?gateway.costCents(fallbackCandidate,estimatedInput,providerMaxOutput):0);
+        const controller=new AbortController();let markReservationReady:()=>void=()=>undefined;const reservationReady=new Promise<void>((resolve)=>{markReservationReady=resolve;});const activeChat:ActiveChatRequest={controller,reservationId,reservationReady};const unregisterActiveChat=taskId?registerActiveChat(principal,taskId,activeChat):()=>undefined;
+        const cancelOnDisconnect=()=>{if(!response.writableEnded&&!controller.signal.aborted)controller.abort(new HttpError('Client disconnected',409,'client_disconnected'));};response.once('close',cancelOnDisconnect);
         try {
-          let actualModel=model;let actualSelection=selection;let actualProviderBody=providerBody;let fallbackReason:'empty'|'length'|null=null;let upstream=await gateway.proxyChat(sourceId,actualProviderBody,requestId);let raw=await readResponseBuffer(upstream);
+          await database.reserveUsage(principal,reservationId,reservedCost);markReservationReady();if(controller.signal.aborted)throw controller.signal.reason;
+          let actualModel=model;let actualSelection=selection;let actualProviderBody=providerBody;let fallbackReason:'empty'|'length'|null=null;let upstream=await gateway.proxyChat(sourceId,actualProviderBody,requestId,controller.signal);let raw=await readResponseBuffer(upstream);if(controller.signal.aborted)throw controller.signal.reason;
           if(!upstream.ok){await database.releaseUsage(principal,reservationId);response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}
           let parsed:unknown;try{parsed=JSON.parse(raw.toString('utf8')) as unknown;}catch{throw new HttpError('Model returned an invalid response',502,'invalid_model_response');}let content=assistantContentFromResponse(parsed);let toolCalls=assistantToolCallsFromResponse(parsed);
           const primaryHasAction=assistantHasAction(parsed);const primaryIncomplete=assistantResponseIsIncomplete(parsed);
-          if((!primaryHasAction||primaryIncomplete)&&fallbackCandidate){fallbackReason=primaryIncomplete?'length':'empty';actualModel=fallbackCandidate.id;actualSelection={source:selection.source,model:fallbackCandidate};actualProviderBody={...providerBody,model:actualModel};upstream=await gateway.proxyChat(sourceId,actualProviderBody,`${requestId}.fallback`);raw=await readResponseBuffer(upstream);if(!upstream.ok){await database.releaseUsage(principal,reservationId);response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}try{parsed=JSON.parse(raw.toString('utf8')) as unknown;}catch{throw new HttpError('Fallback model returned an invalid response',502,'invalid_model_response');}content=assistantContentFromResponse(parsed);toolCalls=assistantToolCallsFromResponse(parsed);}
+          if((!primaryHasAction||primaryIncomplete)&&fallbackCandidate){fallbackReason=primaryIncomplete?'length':'empty';actualModel=fallbackCandidate.id;actualSelection={source:selection.source,model:fallbackCandidate};actualProviderBody={...providerBody,model:actualModel};upstream=await gateway.proxyChat(sourceId,actualProviderBody,`${requestId}.fallback`,controller.signal);raw=await readResponseBuffer(upstream);if(controller.signal.aborted)throw controller.signal.reason;if(!upstream.ok){await database.releaseUsage(principal,reservationId);response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}try{parsed=JSON.parse(raw.toString('utf8')) as unknown;}catch{throw new HttpError('Fallback model returned an invalid response',502,'invalid_model_response');}content=assistantContentFromResponse(parsed);toolCalls=assistantToolCallsFromResponse(parsed);}
           if(!assistantHasAction(parsed))throw new HttpError('Model returned an empty response after retry and fallback',502,'empty_model_response');if(assistantResponseIsIncomplete(parsed))throw new HttpError('Model output reached its token limit after fallback',502,'incomplete_model_response');const usage=usageFromResponse(parsed,actualProviderBody,content??JSON.stringify(toolCalls));const requestFingerprint=createHash('sha256').update(JSON.stringify(actualProviderBody)).digest('hex').slice(0,24);
-          const costCents=gateway.costCents(actualSelection.model,usage.inputTokens,usage.outputTokens);const commissionRateBps=actualSelection.source.commissionRateBps;const commissionCents=Math.round(costCents*commissionRateBps/10_000);await database.settleUsage(principal,reservationId,{idempotencyKey:`chat:${requestId}:${requestFingerprint}`,taskId:'chat',sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection:actualSelection.source.paymentDirection,model:actualModel,inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,costCents,commissionRateBps,commissionCents});await database.audit(principal,'chat.complete','model',actualModel,{requestedModel:model,fallbackUsed:actualModel!==model,fallbackReason,sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection:actualSelection.source.paymentDirection,...usage,costCents,commissionRateBps,commissionCents});
+          const costCents=gateway.costCents(actualSelection.model,usage.inputTokens,usage.outputTokens);const commissionRateBps=actualSelection.source.commissionRateBps;const commissionCents=Math.round(costCents*commissionRateBps/10_000);if(controller.signal.aborted)throw controller.signal.reason;await database.settleUsage(principal,reservationId,{idempotencyKey:`chat:${requestId}:${requestFingerprint}`,taskId:taskId??'chat',sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection:actualSelection.source.paymentDirection,model:actualModel,inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,costCents,commissionRateBps,commissionCents});await database.audit(principal,'chat.complete','model',actualModel,{taskId:taskId??null,requestedModel:model,fallbackUsed:actualModel!==model,fallbackReason,sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection:actualSelection.source.paymentDirection,...usage,costCents,commissionRateBps,commissionCents});
           const result={...(parsed as Record<string,unknown>),model:actualModel,usage:{...((parsed as {usage?:Record<string,unknown>}).usage??{}),prompt_tokens:usage.inputTokens,completion_tokens:usage.outputTokens,total_tokens:usage.inputTokens+usage.outputTokens},cod_source:sourceId,cod_upstream_source:actualSelection.source.upstreamSourceId,cod_payment_direction:actualSelection.source.paymentDirection,cod_charge_cents:costCents,cod_commission_rate_bps:commissionRateBps,cod_usage_estimated:usage.estimated,cod_requested_model:model,cod_fallback_used:actualModel!==model,cod_fallback_reason:fallbackReason};
           if(clientRequestedStream){
             const parsedRecord=parsed as Record<string,unknown>;const parsedChoices=Array.isArray(parsedRecord.choices)?parsedRecord.choices:[];const firstChoice=parsedChoices[0]&&typeof parsedChoices[0]==='object'?parsedChoices[0] as Record<string,unknown>:{};
@@ -366,7 +401,8 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
             response.write(`data: ${JSON.stringify(contentChunk)}\n\n`);response.write(`data: ${JSON.stringify(finishChunk)}\n\n`);response.end('data: [DONE]\n\n');return;
           }
           const output=Buffer.from(JSON.stringify(result));response.writeHead(upstream.status,{'content-type':'application/json; charset=utf-8','content-length':output.length});response.end(output);return;
-        } catch(error) { await database.releaseUsage(principal,reservationId); throw error; }
+        } catch(error) { markReservationReady();await database.releaseUsage(principal,reservationId);if(controller.signal.aborted)throw controller.signal.reason instanceof HttpError?controller.signal.reason:new HttpError('Task was cancelled',409,'task_cancelled');throw error; }
+        finally { response.removeListener('close',cancelOnDisconnect);unregisterActiveChat(); }
       }
       return sendJson(response, 404, { error: 'not_found' });
     } catch (error) {

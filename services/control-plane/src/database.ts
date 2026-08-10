@@ -167,6 +167,7 @@ export interface CodDatabase {
   registerDevice(principal: Principal, input: Pick<DeviceRecord, 'name' | 'platform'>): Promise<DeviceRecord>;
   heartbeat(principal: Principal, deviceId: string): Promise<DeviceRecord>;
   listTasks(principal: Principal): Promise<SyncedTask[]>;
+  getTask(principal: Principal, taskId: string): Promise<SyncedTask>;
   createTask(principal: Principal, input: Pick<SyncedTask, 'title' | 'deviceId'>): Promise<SyncedTask>;
   updateTask(principal: Principal, taskId: string, status: TaskStatus, expectedVersion: number, outcome?: TaskOutcome): Promise<SyncedTask>;
   eventsAfter(principal: Principal, cursor: number): Promise<TaskEvent[]>;
@@ -177,11 +178,12 @@ export interface CodDatabase {
 
 const devicePlatforms = new Set<DeviceRecord['platform']>(['macos', 'windows', 'linux', 'web', 'mobile']);
 const taskTransitions: Record<TaskStatus, ReadonlySet<TaskStatus>> = {
-  draft: new Set(['running', 'failed']),
-  running: new Set(['waiting', 'complete', 'failed']),
-  waiting: new Set(['running', 'complete', 'failed']),
+  draft: new Set(['running', 'failed', 'cancelled']),
+  running: new Set(['waiting', 'complete', 'failed', 'cancelled']),
+  waiting: new Set(['running', 'complete', 'failed', 'cancelled']),
   complete: new Set(['running']),
   failed: new Set(['running']),
+  cancelled: new Set(['running']),
 };
 
 export function validateDeviceInput(input: Pick<DeviceRecord, 'name' | 'platform'>): void {
@@ -492,6 +494,12 @@ export class PostgresDatabase implements CodDatabase {
       const existing=await client.query('SELECT * FROM cod_ledger WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3',[p.tenantId,p.userId,event.idempotencyKey]);
       if(existing.rows[0]){if(reservation.rows[0]?.status==='reserved')await this.releaseReservation(client,p,reservation.rows[0],reservationId);return ledgerFromRow(existing.rows[0]);}
       if(!reservation.rows[0]||reservation.rows[0].status!=='reserved')throw new HttpError('Usage reservation not found',409,'reservation_not_found');
+      if(event.taskId!=='chat'){
+        const task=await client.query('SELECT status FROM cod_tasks WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE',[event.taskId,p.tenantId,p.userId]);
+        if(!task.rows[0])throw new HttpError('Task not found',404,'task_not_found');
+        if(task.rows[0].status==='cancelled')throw new HttpError('Task was cancelled before settlement',409,'task_cancelled');
+        if(task.rows[0].status!=='running'&&task.rows[0].status!=='waiting')throw new HttpError('Task is not running',409,'task_not_running');
+      }
       const reservedGrants=parseGrantAllocations(reservation.rows[0].grant_allocations);const reservedWallet=Number(reservation.rows[0].wallet_cents);let remaining=event.costCents;let creditConsumed=0;
       for(const allocation of reservedGrants){const consumed=Math.min(allocation.amountCents,remaining);creditConsumed+=consumed;remaining-=consumed;const refund=allocation.amountCents-consumed;if(refund>0)await this.restoreGrants(client,[{grantId:allocation.grantId,amountCents:refund}]);}
       const walletConsumed=Math.min(reservedWallet,remaining);remaining-=walletConsumed;const walletRefund=reservedWallet-walletConsumed;if(walletRefund>0)await client.query('UPDATE cod_users SET balance_cents=balance_cents+$3,updated_at=now() WHERE tenant_id=$1 AND user_id=$2',[p.tenantId,p.userId,walletRefund]);
@@ -516,6 +524,7 @@ export class PostgresDatabase implements CodDatabase {
   async registerDevice(p: Principal,input:Pick<DeviceRecord,'name'|'platform'>) { validateDeviceInput(input); const id=randomUUID(); const {rows}=await this.pool.query(`INSERT INTO cod_devices (id,tenant_id,user_id,name,platform,status,last_seen_at) VALUES ($1,$2,$3,$4,$5,'online',now()) RETURNING *`,[id,p.tenantId,p.userId,input.name.trim().slice(0,100),input.platform]); const device=deviceFromRow(rows[0]); await this.append(p,'device.registered',id,device); return device; }
   async heartbeat(p: Principal,id:string) { const {rows}=await this.pool.query(`UPDATE cod_devices SET status='online',last_seen_at=now() WHERE id=$1 AND tenant_id=$2 AND user_id=$3 RETURNING *`,[id,p.tenantId,p.userId]); if(!rows[0]) throw new HttpError('Device not found',404,'device_not_found'); return deviceFromRow(rows[0]); }
   async listTasks(p: Principal) { const {rows}=await this.pool.query('SELECT * FROM cod_tasks WHERE tenant_id=$1 AND user_id=$2 ORDER BY updated_at DESC',[p.tenantId,p.userId]); return rows.map(taskFromRow); }
+  async getTask(p:Principal,id:string) { const {rows}=await this.pool.query('SELECT * FROM cod_tasks WHERE id=$1 AND tenant_id=$2 AND user_id=$3',[id,p.tenantId,p.userId]);if(!rows[0])throw new HttpError('Task not found',404,'task_not_found');return taskFromRow(rows[0]); }
   async createTask(p: Principal,input:Pick<SyncedTask,'title'|'deviceId'>) { if(!input.title?.trim()) throw new HttpError('Task title is required',400,'invalid_task'); const device=await this.pool.query('SELECT 1 FROM cod_devices WHERE id=$1 AND tenant_id=$2 AND user_id=$3',[input.deviceId,p.tenantId,p.userId]); if(!device.rows[0]) throw new HttpError('Device not found',404,'device_not_found'); const id=randomUUID(); const {rows}=await this.pool.query(`INSERT INTO cod_tasks (id,tenant_id,user_id,title,status,device_id) VALUES ($1,$2,$3,$4,'draft',$5) RETURNING *`,[id,p.tenantId,p.userId,input.title.trim().slice(0,500),input.deviceId]); const task=taskFromRow(rows[0]); await this.append(p,'task.created',id,task); return task; }
   async updateTask(p: Principal,id:string,status:TaskStatus,version:number,outcome:TaskOutcome={}) {
     return this.transaction(async (client) => {
@@ -532,6 +541,7 @@ export class PostgresDatabase implements CodDatabase {
       if (status === 'running' && current.status !== 'running') { nextResult = null; nextError = null; }
       if (status === 'complete') nextError = null;
       if (status === 'failed') nextResult = null;
+      if (status === 'cancelled') { nextResult = null; nextError = null; }
       validateTaskOutcome(status, nextResult, nextError);
       const { rows } = await client.query('UPDATE cod_tasks SET status=$1,result=$3,error=$4,version=version+1,updated_at=now() WHERE id=$2 RETURNING *', [status,id,nextResult,nextError]);
       const task = taskFromRow(rows[0]);

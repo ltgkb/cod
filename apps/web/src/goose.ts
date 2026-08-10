@@ -11,6 +11,7 @@ export interface GooseRunOptions {
   acpUrl: string;
   cwd: string;
   prompt: string;
+  signal?: AbortSignal;
   onUpdate(update: GooseRunUpdate): void;
   requestPermission(request: RequestPermissionRequest): Promise<string | null>;
 }
@@ -88,7 +89,9 @@ function sessionUpdateText(notification: SessionNotification): GooseRunUpdate | 
 }
 
 export async function runGooseTask(options: GooseRunOptions): Promise<GooseRunResult> {
+  if(options.signal?.aborted)throw options.signal.reason??new DOMException('Task cancelled','AbortError');
   const stream = createWebSocketStream(options.acpUrl);
+  const abort=()=>stream.close();options.signal?.addEventListener('abort',abort,{once:true});
   let answer = '';
   const toolCalls = new Map<string, TrackedToolCall>();
   const callbacks = (): GooseClientCallbacks => ({
@@ -117,10 +120,12 @@ export async function runGooseTask(options: GooseRunOptions): Promise<GooseRunRe
       clientCapabilities: {},
       clientInfo: { name: 'cod', version: '0.1.0' },
     });
+    if(options.signal?.aborted)throw options.signal.reason??new DOMException('Task cancelled','AbortError');
     const created = await client.newSession({ cwd: options.cwd, mcpServers: [], _meta: { client: 'cod-desktop' } });
     const sessionId = String(created.sessionId);
     options.onUpdate({ kind: 'status', text: 'Goose 会话已创建' });
     await client.prompt({ sessionId, prompt: [{ type: 'text', text: options.prompt }] });
+    if(options.signal?.aborted)throw options.signal.reason??new DOMException('Task cancelled','AbortError');
     const executions=[...toolCalls.values()];
     return {
       answer,
@@ -130,6 +135,7 @@ export async function runGooseTask(options: GooseRunOptions): Promise<GooseRunRe
       mutationTools:executions.filter((tool)=>mutationKinds.has(tool.kind)&&tool.status!=='failed').length,
     };
   } finally {
+    options.signal?.removeEventListener('abort',abort);
     stream.close();
   }
 }

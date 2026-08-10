@@ -25,6 +25,13 @@ describe('synchronization database contract', () => {
     await expect(database.registerDevice(principal, { name: 'Unknown', platform: 'watch' as 'linux' })).rejects.toMatchObject({ code: 'invalid_device_platform' });
   });
 
+  it('records cancellation as a terminal state and allows an explicit restart',async()=>{
+    const database=new MemoryDatabase();const device=await database.registerDevice(principal,{name:'Windows PC',platform:'windows'});const task=await database.createTask(principal,{title:'长任务',deviceId:device.id});const running=await database.updateTask(principal,task.id,'running',task.version);const cancelled=await database.updateTask(principal,task.id,'cancelled',running.version,{result:'partial',error:'ignored'});
+    expect(cancelled).toMatchObject({status:'cancelled',result:null,error:null});
+    await expect(database.updateTask(principal,cancelled.id,'complete',cancelled.version,{result:'不应完成'})).rejects.toMatchObject({code:'invalid_task_transition'});
+    const restarted=await database.updateTask(principal,cancelled.id,'running',cancelled.version);expect(restarted).toMatchObject({status:'running',result:null,error:null});
+  });
+
   it('does not expose devices and tasks across users', async () => {
     const database = new MemoryDatabase();
     const device = await database.registerDevice(principal, { name: 'Developer PC', platform: 'linux' });

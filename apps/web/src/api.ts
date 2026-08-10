@@ -34,7 +34,7 @@ export interface CapabilityReport {
   ai: { mode: 'live' | 'demo' | 'unavailable'; streaming: boolean; streamingMode: 'buffered-sse' };
   knowledge: { mode: 'live' | 'demo' };
   payments: { topupEnabled: boolean; orderApi: boolean; mode: 'pilot-credit' | 'verified-webhook' | 'unavailable' };
-  synchronization: { transport: 'polling'; taskStatusVersioning: boolean };
+  synchronization: { transport: 'polling'; taskStatusVersioning: boolean; taskCancellation?: boolean };
   remote: { feishu: 'live' | 'unavailable'; wecom: 'adapter' | 'unavailable' };
 }
 
@@ -304,6 +304,10 @@ export async function updateRemoteTask(token: string, task: RemoteTask, status: 
   });
 }
 
+export async function cancelRemoteTask(token:string,task:RemoteTask):Promise<{task:RemoteTask;cancelledRequests:number}>{
+  return request(`/api/tasks/${encodeURIComponent(task.id)}/cancel`,token,{method:'POST',body:JSON.stringify({expectedVersion:task.version})});
+}
+
 export async function listProducts(token: string): Promise<ProductManifest[]> {
   return request('/api/products', token);
 }
@@ -312,26 +316,41 @@ export async function launchProduct(token: string, productId: string): Promise<{
   return request(`/api/products/${encodeURIComponent(productId)}/launch`, token, { method: 'POST' });
 }
 
-export async function sendChat(token: string, source: string, model: string, messages: Array<{ role: 'user' | 'assistant'; content: string }>): Promise<{ content: string; mode: 'live' | 'demo'; source: string; model: string; upstreamSource: string; paymentDirection: string; inputTokens: number; outputTokens: number; usageEstimated: boolean; fallbackUsed: boolean }> {
+function requestSignal(parent:AbortSignal|undefined,timeoutMs:number):{signal:AbortSignal;dispose():void}{
+  const controller=new AbortController();
+  const timeout=globalThis.setTimeout(()=>controller.abort(new DOMException('Model request timed out','TimeoutError')),timeoutMs);
+  const abort=()=>controller.abort(parent?.reason??new DOMException('Task cancelled','AbortError'));
+  if(parent?.aborted)abort();else parent?.addEventListener('abort',abort,{once:true});
+  return{signal:controller.signal,dispose(){globalThis.clearTimeout(timeout);parent?.removeEventListener('abort',abort);}};
+}
+
+function abortableDelay(milliseconds:number,signal?:AbortSignal):Promise<void>{
+  if(signal?.aborted)return Promise.reject(signal.reason??new DOMException('Task cancelled','AbortError'));
+  return new Promise((resolve,reject)=>{const timeout=globalThis.setTimeout(()=>{signal?.removeEventListener('abort',abort);resolve();},milliseconds);const abort=()=>{globalThis.clearTimeout(timeout);reject(signal?.reason??new DOMException('Task cancelled','AbortError'));};signal?.addEventListener('abort',abort,{once:true});});
+}
+
+export async function sendChat(token: string, source: string, model: string, messages: Array<{ role: 'user' | 'assistant'; content: string }>, options: { taskId?: string; signal?: AbortSignal } = {}): Promise<{ content: string; mode: 'live' | 'demo'; source: string; model: string; upstreamSource: string; paymentDirection: string; inputTokens: number; outputTokens: number; usageEstimated: boolean; fallbackUsed: boolean }> {
   const sanitizedMessages = messages.filter((message) => typeof message.content === 'string' && message.content.trim().length > 0).slice(-20).map((message) => ({ ...message, content: message.content.trim() }));
   if (!sanitizedMessages.length) throw new ApiError('消息内容不能为空。', 400, 'empty_messages');
   const requestId = createClientId();
   let result: { model?: string; choices: Array<{ message: { content: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number; input_tokens?: number; output_tokens?: number }; cod_mode?: 'demo'; cod_source?: string; cod_upstream_source?: string; cod_payment_direction?: string; cod_usage_estimated?: boolean; cod_fallback_used?: boolean } | null = null;
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    const attemptSignal=requestSignal(options.signal,255_000);
     try {
       result = await request('/v1/chat/completions', token, {
         method: 'POST', headers: { 'x-request-id': requestId },
-        body: JSON.stringify({ source, model, messages: sanitizedMessages, max_tokens: 4_096, stream: false }),
-        signal: AbortSignal.timeout(255_000),
+        body: JSON.stringify({ source, model, messages: sanitizedMessages, max_tokens: 4_096, stream: false, ...(options.taskId?{task_id:options.taskId}:{}) }),
+        signal: attemptSignal.signal,
       });
       break;
     } catch (error) {
       lastError = error;
+      if(options.signal?.aborted)throw error;
       const retryable = !(error instanceof ApiError) || error.status === 429 || error.status >= 500;
       if (!retryable || attempt === 1) throw error;
-      await new Promise((resolve) => window.setTimeout(resolve, 500));
-    }
+      await abortableDelay(500,options.signal);
+    } finally { attemptSignal.dispose(); }
   }
   if (!result) throw lastError instanceof Error ? lastError : new ApiError('模型请求失败，请重试。', 502, 'chat_failed');
   const content = result.choices[0]?.message.content?.trim();

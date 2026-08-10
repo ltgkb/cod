@@ -1,18 +1,19 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash, createHmac } from 'node:crypto';
 import { assistantContentFromResponse, assistantFinishReasonFromResponse, assistantToolCallsFromResponse, createControlPlane, isValidChatMessage, usageFromResponse } from './server.js';
 import { loadConfig } from './config.js';
+import { AiGateway } from './gateway.js';
 import { MemoryDatabase } from './memory-database.js';
 
 const servers: Array<ReturnType<typeof createControlPlane>> = [];
 afterEach(async () => Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve())))));
 
-async function start(overrides: Record<string, string> = {}) {
+async function start(overrides: Record<string, string> = {}, gatewayFetcher?:typeof fetch) {
   const database = new MemoryDatabase();
   const email='developer@kai.com';
   await database.registerIdentity({userId:`usr_${createHash('sha256').update(email).digest('hex').slice(0,20)}`,tenantId:'tenant_kai_com',email,role:'member'},'scrypt$16384$8$1$dGVzdC1hdXRoLXNhbHQtMQ$OkZEwwvTyk_BXs8umIBKldU3L-Oit-AkHANDBB81kdN0CCW6-5kqg9cGUwmetGRwxs9g_NiohCkGSni7NtcayQ',null,false);
   const config = loadConfig({ NODE_ENV: 'test', COD_DEVELOPMENT_LOGIN_ENABLED: 'true', COD_DEVELOPMENT_LOGIN_EMAIL: 'developer@kai.com', COD_DEVELOPMENT_TOPUP_ENABLED: 'false', ...overrides });
-  const server = createControlPlane({ config, database }); servers.push(server);
+  const server = createControlPlane({ config, database, ...(gatewayFetcher?{gateway:new AiGateway(config,gatewayFetcher)}:{}) }); servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address(); if (!address || typeof address === 'string') throw new Error('missing address');
   return { base: `http://127.0.0.1:${address.port}`, database };
@@ -183,6 +184,35 @@ describe('control-plane production rules', () => {
     expect((await database.getCreditSummary(principal)).availableCents).toBe(999);
   });
 
+  it('cancels an in-flight task, aborts its provider request, and restores the full reservation',async()=>{
+    let markProviderStarted:()=>void=()=>undefined;const providerStarted=new Promise<void>((resolve)=>{markProviderStarted=resolve;});let providerAborted=false;
+    const fetcher=vi.fn(async(input:RequestInfo|URL,init?:RequestInit):Promise<Response>=>{
+      const url=String(input);
+      if(url.endsWith('/api/pricing'))return Response.json({data:[{model_name:'slow-model',quota_type:0,model_ratio:1,completion_ratio:1,supported_endpoint_types:['openai']}]});
+      if(url.endsWith('/api/status'))return Response.json({data:{quota_per_unit:500000,price:7}});
+      if(url.endsWith('/models'))return Response.json({data:[{id:'slow-model'}]});
+      if(url.endsWith('/chat/completions')){
+        markProviderStarted();
+        return new Promise<Response>((_resolve,reject)=>{const signal=init?.signal;if(signal?.aborted){providerAborted=true;reject(signal.reason);return;}signal?.addEventListener('abort',()=>{providerAborted=true;reject(signal.reason);},{once:true});});
+      }
+      throw new Error(`Unexpected provider request: ${url}`);
+    });
+    const {base,database}=await start({KAI_API_KEY:'test-key',KAI_AI_BASE_URL:'https://provider.example/v1',KAI_AI_CATALOG_URL:'https://provider.example/api/pricing',KAI_AI_STATUS_URL:'https://provider.example/api/status'},fetcher as typeof fetch);
+    const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com',password:'Password123'})});
+    const {token,user}=await login.json() as {token:string;user:{id:string;email:string}};const headers={authorization:`Bearer ${token}`,'content-type':'application/json'};
+    const device=await (await fetch(`${base}/api/devices`,{method:'POST',headers,body:JSON.stringify({name:'Windows test',platform:'windows'})})).json() as {id:string};
+    const created=await (await fetch(`${base}/api/tasks`,{method:'POST',headers,body:JSON.stringify({title:'取消慢任务',deviceId:device.id})})).json() as {id:string;version:number};
+    const running=await (await fetch(`${base}/api/tasks/${created.id}/status`,{method:'POST',headers,body:JSON.stringify({status:'running',expectedVersion:created.version})})).json() as {version:number};
+    const chat=fetch(`${base}/v1/chat/completions`,{method:'POST',headers,body:JSON.stringify({source:'ai-kai',model:'slow-model',task_id:created.id,messages:[{role:'user',content:'持续生成'}]})});
+    await providerStarted;
+    const cancelledResponse=await fetch(`${base}/api/tasks/${created.id}/cancel`,{method:'POST',headers,body:JSON.stringify({expectedVersion:running.version})});
+    expect(cancelledResponse.status).toBe(200);expect(await cancelledResponse.json()).toMatchObject({task:{status:'cancelled',result:null,error:null},cancelledRequests:1});
+    const chatResponse=await chat;expect(chatResponse.status).toBe(409);expect(await chatResponse.json()).toMatchObject({error:'task_cancelled'});expect(providerAborted).toBe(true);
+    const principal={userId:user.id,tenantId:'tenant_kai_com',email:user.email,role:'member' as const};
+    expect(await database.getLedger(principal)).toHaveLength(1);expect((await database.getCreditSummary(principal)).availableCents).toBe(1000);
+    expect(await database.getTask(principal,created.id)).toMatchObject({status:'cancelled',result:null,error:null});expect((await database.listAudit(principal,20)).some((entry)=>entry.action==='task.cancel')).toBe(true);
+  });
+
   it('enforces the 20000-token product limit at the billed gateway', async () => {
     const { base } = await start();
     const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com',password:'Password123' }) });
@@ -211,6 +241,8 @@ describe('control-plane production rules', () => {
     const response = await fetch(`${base}/v1/sources/demo/chat/completions`, { method: 'POST', headers, body: JSON.stringify({ model: 'coder-pro', messages: [{ role: 'user', content: 'desktop' }] }) });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ model: 'coder-pro', cod_source: 'demo', cod_payment_direction: '测试钱包 → COD Demo' });
+    const device=await (await fetch(`${base}/api/devices`,{method:'POST',headers,body:JSON.stringify({name:'COD Desktop (windows)',platform:'windows'})})).json() as {id:string};const task=await (await fetch(`${base}/api/tasks`,{method:'POST',headers,body:JSON.stringify({title:'Desktop Agent',deviceId:device.id})})).json() as {id:string;version:number};const running=await (await fetch(`${base}/api/tasks/${task.id}/status`,{method:'POST',headers,body:JSON.stringify({status:'running',expectedVersion:task.version})})).json() as {version:number};
+    const taskBound=await fetch(`${base}/v1/tasks/${task.id}/sources/demo/chat/completions`,{method:'POST',headers,body:JSON.stringify({model:'coder-pro',messages:[{role:'user',content:'desktop task'}]})});expect(taskBound.status).toBe(200);expect(await taskBound.json()).toMatchObject({model:'coder-pro',cod_source:'demo'});expect(running.version).toBe(2);
     const conflict = await fetch(`${base}/v1/sources/demo/chat/completions`, { method: 'POST', headers, body: JSON.stringify({ source: 'other', model: 'coder-pro', messages: [{ role: 'user', content: 'desktop' }] }) });
     expect(conflict.status).toBe(400);
     expect(await conflict.json()).toMatchObject({ error: 'source_conflict' });
