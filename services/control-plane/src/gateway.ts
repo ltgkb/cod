@@ -104,6 +104,10 @@ async function readLimitedText(response: Response, maximumBytes = 5 * 1024 * 102
       throw new HttpError('KAI model response is too large', 502, 'model_response_too_large');
     }
     text += decoder.decode(value, { stream: true });
+    if (/(?:^|\r?\n)data:\s*\[DONE\](?:\r?\n|$)/m.test(text)) {
+      await reader.cancel();
+      return text;
+    }
   }
   return text + decoder.decode();
 }

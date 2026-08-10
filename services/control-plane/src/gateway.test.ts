@@ -41,6 +41,7 @@ describe('model source gateway', () => {
   });
 
   it('uses upstream SSE to keep long generations alive and normalizes the final answer for billing', async () => {
+    let streamCancelled = false;
     const fetcher = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith('/api/pricing')) return Response.json({ data: [{ model_name: 'glm-5.2', quota_type: 0, model_ratio: 0.597, completion_ratio: 3.5, supported_endpoint_types: ['openai'] }] });
@@ -53,7 +54,12 @@ describe('model source gateway', () => {
           { id: 'stream-1', model: 'glm-5.2', created: 1, choices: [{ delta: { content: '已完成' }, finish_reason: 'stop' }] },
           { id: 'stream-1', model: 'glm-5.2', created: 1, choices: [], usage: { prompt_tokens: 12, completion_tokens: 34, total_tokens: 46 } },
         ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join('') + 'data: [DONE]\n\n';
-        return new Response(events, { headers: { 'content-type': 'text/event-stream; charset=utf-8' } });
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) { controller.enqueue(encoder.encode(events)); },
+          cancel() { streamCancelled = true; },
+        });
+        return new Response(stream, { headers: { 'content-type': 'text/event-stream; charset=utf-8' } });
       }
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -62,5 +68,6 @@ describe('model source gateway', () => {
     const response = await gateway.proxyChat('ai-kai', { model: 'glm-5.2', messages: [{ role: 'user', content: '做个游戏' }], stream: false }, 'stream-request');
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ model: 'glm-5.2', choices: [{ message: { content: '推箱子已完成' }, finish_reason: 'stop' }], usage: { prompt_tokens: 12, completion_tokens: 34 } });
+    expect(streamCancelled).toBe(true);
   });
 });
