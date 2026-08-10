@@ -40,6 +40,12 @@ jobs:
           if [[ "${{ runner.os }}" == "Linux" ]]; then npm run package:linux; fi
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      - name: Verify macOS package
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          codesign --verify --deep --strict --verbose=2 apps/desktop/release/mac-arm64/cod.app
+          hdiutil verify apps/desktop/release/COD-*-mac-arm64.dmg
       - uses: actions/upload-artifact@v7
         with:
           name: cod-desktop-${{ runner.os }}
