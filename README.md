@@ -25,7 +25,7 @@ npm run package:win
 
 ## Product behavior
 
-- Web and desktop clients use email/password authentication and retain the signed session on the current device. Production registration is invite-only by default, and existing users can copy their immutable invite code from the account panel.
+- Web and desktop clients use email/password authentication and retain the signed session on the current device. The deployed production configuration enables invite-only registration, and existing users can copy their immutable invite code from the account panel.
 - Tasks, devices, status transitions, wallet entries, and audit records come from the control plane; the UI does not render static task or terminal-success fixtures.
 - The Web client can create, search, synchronize, execute, retry, and complete tasks, including persisted results and errors that remain visible from another Web/mobile session. Local files, Git Diff, terminal commands, and Goose execution are available only through the desktop bridge.
 - Model sources are discovered from their live catalogs. The selected source controls the model list, upstream route, displayed price, wallet settlement, and ledger payment direction.
