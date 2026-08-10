@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createHash, createHmac } from 'node:crypto';
-import { assistantContentFromResponse, assistantToolCallsFromResponse, createControlPlane, isValidChatMessage, usageFromResponse } from './server.js';
+import { assistantContentFromResponse, assistantFinishReasonFromResponse, assistantToolCallsFromResponse, createControlPlane, isValidChatMessage, usageFromResponse } from './server.js';
 import { loadConfig } from './config.js';
 import { MemoryDatabase } from './memory-database.js';
 
@@ -42,6 +42,9 @@ describe('control-plane production rules', () => {
     expect(assistantContentFromResponse({ choices: [] })).toBeNull();
     expect(assistantToolCallsFromResponse({choices:[{message:{content:null,tool_calls:[{id:'call-1',type:'function',function:{name:'developer__file_write',arguments:'{"path":"game.html"}'}}]}}]})).toHaveLength(1);
     expect(assistantToolCallsFromResponse({choices:[{message:{tool_calls:[{id:'call-1',function:{name:'developer__file_write'}}]}}]})).toHaveLength(0);
+    expect(assistantFinishReasonFromResponse({choices:[{finish_reason:'length'}]})).toBe('length');
+    expect(assistantFinishReasonFromResponse({choices:[{finish_reason:'stop'}]})).toBe('stop');
+    expect(assistantFinishReasonFromResponse({choices:[]})).toBeNull();
     expect(isValidChatMessage({role:'assistant',content:null,tool_calls:[{id:'call-1',type:'function',function:{name:'developer__file_write',arguments:'{}'}}]})).toBe(true);
     expect(isValidChatMessage({role:'tool',tool_call_id:'call-1',content:'written'})).toBe(true);
     expect(isValidChatMessage({role:'assistant',content:null})).toBe(false);
