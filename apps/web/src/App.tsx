@@ -118,6 +118,7 @@ function formatTime(value: string): string {
 function chatFailureMessage(error: unknown): string {
   if (error instanceof ApiError && error.code === 'insufficient_balance') return '余额和可用额度不足，请充值钱包或购买额度包后重试。';
   if (error instanceof ApiError && error.status === 429) return '模型请求较多，自动重试后仍未成功。请稍后再次发送。';
+  if (error instanceof ApiError && (error.status === 504 || error.code === 'ai_upstream_timeout')) return '模型生成超时，系统已自动重试且本次未扣费。请重试、缩短任务，或切换其他模型。';
   if (error instanceof ApiError && error.status >= 500) return '模型服务暂时波动，系统已自动重试但尚未恢复。你可以点击下方按钮继续重试，本次失败不会扣费。';
   return error instanceof Error ? error.message : 'COD 执行失败，本次失败不会扣费。';
 }

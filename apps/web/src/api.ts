@@ -322,7 +322,7 @@ export async function sendChat(token: string, source: string, model: string, mes
     try {
       result = await request('/v1/chat/completions', token, {
         method: 'POST', headers: { 'x-request-id': requestId },
-        body: JSON.stringify({ source, model, messages: sanitizedMessages, max_tokens: 20_000, stream: false }),
+        body: JSON.stringify({ source, model, messages: sanitizedMessages, max_tokens: 4_096, stream: false }),
         signal: AbortSignal.timeout(255_000),
       });
       break;

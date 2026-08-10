@@ -39,4 +39,28 @@ describe('model source gateway', () => {
     expect(toolResponse.status).toBe(200);
     expect(chatAttempts).toBe(3);
   });
+
+  it('uses upstream SSE to keep long generations alive and normalizes the final answer for billing', async () => {
+    const fetcher = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/api/pricing')) return Response.json({ data: [{ model_name: 'glm-5.2', quota_type: 0, model_ratio: 0.597, completion_ratio: 3.5, supported_endpoint_types: ['openai'] }] });
+      if (url.endsWith('/api/status')) return Response.json({ data: { quota_per_unit: 500_000, price: 7 } });
+      if (url.endsWith('/models')) return Response.json({ data: [{ id: 'glm-5.2' }] });
+      if (url.endsWith('/chat/completions')) {
+        expect(JSON.parse(String(init?.body))).toMatchObject({ stream: true, stream_options: { include_usage: true } });
+        const events = [
+          { id: 'stream-1', model: 'glm-5.2', created: 1, choices: [{ delta: { role: 'assistant', content: '推箱子' }, finish_reason: null }] },
+          { id: 'stream-1', model: 'glm-5.2', created: 1, choices: [{ delta: { content: '已完成' }, finish_reason: 'stop' }] },
+          { id: 'stream-1', model: 'glm-5.2', created: 1, choices: [], usage: { prompt_tokens: 12, completion_tokens: 34, total_tokens: 46 } },
+        ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join('') + 'data: [DONE]\n\n';
+        return new Response(events, { headers: { 'content-type': 'text/event-stream; charset=utf-8' } });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const gateway = new AiGateway(loadConfig({ NODE_ENV: 'production', COD_SESSION_SECRET: 's'.repeat(32), DATABASE_URL: 'postgresql://cod:test@127.0.0.1:5432/cod', COD_DEVELOPMENT_LOGIN_ENABLED: 'false', KAI_API_KEY: 'test-key' }), fetcher as typeof fetch);
+    await gateway.listSources();
+    const response = await gateway.proxyChat('ai-kai', { model: 'glm-5.2', messages: [{ role: 'user', content: '做个游戏' }], stream: false }, 'stream-request');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ model: 'glm-5.2', choices: [{ message: { content: '推箱子已完成' }, finish_reason: 'stop' }], usage: { prompt_tokens: 12, completion_tokens: 34 } });
+  });
 });

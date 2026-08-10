@@ -52,7 +52,7 @@ describe('COD workspace', () => {
     expect(await sendChat('token', 'ai-kai', 'model-1', [{ role: 'user', content: '第一问' }, { role: 'assistant', content: '   ' }, { role: 'assistant', content: '第一答' }, { role: 'user', content: '继续' }])).toMatchObject({ inputTokens: 12, outputTokens: 34 });
     const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as { messages: Array<{ role: string; content: string }>; max_tokens: number };
     expect(body.messages).toEqual([{ role: 'user', content: '第一问' }, { role: 'assistant', content: '第一答' }, { role: 'user', content: '继续' }]);
-    expect(body).toMatchObject({ max_tokens: 20_000 });
+    expect(body).toMatchObject({ max_tokens: 4_096 });
   });
 
   it('rejects empty model responses instead of rendering a blank reply', async () => {

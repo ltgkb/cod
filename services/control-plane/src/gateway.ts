@@ -35,6 +35,25 @@ interface PricingStatus {
   price?: number;
 }
 
+interface StreamToolCall {
+  index?: number;
+  id?: string;
+  type?: string;
+  function?: { name?: string; arguments?: string };
+}
+
+interface StreamChunk {
+  id?: string;
+  model?: string;
+  created?: number;
+  error?: { message?: string } | string;
+  choices?: Array<{
+    delta?: { content?: string; reasoning_content?: string; tool_calls?: StreamToolCall[] };
+    finish_reason?: string | null;
+  }>;
+  usage?: Record<string, unknown>;
+}
+
 const demoModels: ModelInfo[] = [
   { id: 'coder-pro', label: 'KAI Coder Pro', contextWindow: 200_000, inputPricePerMillionCents: 260, outputPricePerMillionCents: 1_040 },
   { id: 'chat-fast', label: 'KAI Chat Fast', contextWindow: 128_000, inputPricePerMillionCents: 80, outputPricePerMillionCents: 320 },
@@ -68,6 +87,80 @@ function responseHasAssistantAction(response: Response): Promise<boolean> {
       return typeof (call as {id?:unknown}).id==='string'&&fn!==null&&typeof fn==='object'&&typeof (fn as {name?:unknown}).name==='string'&&typeof (fn as {arguments?:unknown}).arguments==='string';
     });
   }).catch(() => false);
+}
+
+async function readLimitedText(response: Response, maximumBytes = 5 * 1024 * 1024): Promise<string> {
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let size = 0;
+  let text = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maximumBytes) {
+      await reader.cancel();
+      throw new HttpError('KAI model response is too large', 502, 'model_response_too_large');
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  return text + decoder.decode();
+}
+
+async function normalizeStreamingResponse(response: Response): Promise<Response> {
+  if (!response.ok || !response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')) return response;
+  const raw = await readLimitedText(response);
+  const toolCalls = new Map<number, { id: string; type: string; function: { name: string; arguments: string } }>();
+  let id = '';
+  let model = '';
+  let created = 0;
+  let content = '';
+  let reasoningContent = '';
+  let finishReason: string | null = null;
+  let usage: Record<string, unknown> | undefined;
+
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.startsWith('data:')) continue;
+    const data = line.slice(5).trim();
+    if (!data || data === '[DONE]') continue;
+    let chunk: StreamChunk;
+    try { chunk = JSON.parse(data) as StreamChunk; } catch { throw new Error('KAI model returned malformed SSE'); }
+    if (chunk.error) throw new Error(typeof chunk.error === 'string' ? chunk.error : chunk.error.message ?? 'KAI model stream failed');
+    id ||= chunk.id ?? '';
+    model ||= chunk.model ?? '';
+    created ||= chunk.created ?? 0;
+    if (chunk.usage) usage = chunk.usage;
+    const choice = chunk.choices?.[0];
+    if (!choice) continue;
+    if (typeof choice.delta?.content === 'string') content += choice.delta.content;
+    if (typeof choice.delta?.reasoning_content === 'string') reasoningContent += choice.delta.reasoning_content;
+    if (choice.finish_reason) finishReason = choice.finish_reason;
+    for (const [position, fragment] of (choice.delta?.tool_calls ?? []).entries()) {
+      const index = Number.isInteger(fragment.index) ? Number(fragment.index) : position;
+      const current = toolCalls.get(index) ?? { id: '', type: 'function', function: { name: '', arguments: '' } };
+      if (fragment.id) current.id = fragment.id;
+      if (fragment.type) current.type = fragment.type;
+      if (fragment.function?.name) current.function.name += fragment.function.name;
+      if (fragment.function?.arguments) current.function.arguments += fragment.function.arguments;
+      toolCalls.set(index, current);
+    }
+  }
+
+  const message = {
+    role: 'assistant',
+    content: content || null,
+    ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
+    ...(toolCalls.size ? { tool_calls: [...toolCalls.entries()].sort(([left], [right]) => left - right).map(([, call]) => call) } : {}),
+  };
+  return Response.json({
+    id: id || `chatcmpl-${randomUUID()}`,
+    object: 'chat.completion',
+    created: created || Math.floor(Date.now() / 1000),
+    model,
+    choices: [{ index: 0, message, finish_reason: finishReason ?? (toolCalls.size ? 'tool_calls' : 'stop') }],
+    ...(usage ? { usage } : {}),
+  });
 }
 
 export class AiGateway {
@@ -128,15 +221,19 @@ export class AiGateway {
     let lastError: unknown;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
+        const providerBody = body && typeof body === 'object'
+          ? { ...(body as Record<string, unknown>), stream: true, stream_options: { include_usage: true } }
+          : body;
         const response = await this.fetcher(`${source.baseUrl.replace(/\/$/, '')}/chat/completions`, {
           method: 'POST',
           headers: { 'content-type': 'application/json', authorization: `Bearer ${source.apiKey}`, 'x-request-id': requestId, 'idempotency-key': requestId },
-          body: JSON.stringify(body),
+          body: JSON.stringify(providerBody),
           signal: AbortSignal.timeout(120_000),
         });
         const retryableStatus = [408, 425, 429, 500, 502, 503, 504].includes(response.status);
-        const hasAction = await responseHasAssistantAction(response);
-        if ((!retryableStatus && hasAction) || attempt === 1) return response;
+        const normalized = await normalizeStreamingResponse(response);
+        const hasAction = await responseHasAssistantAction(normalized);
+        if ((!retryableStatus && hasAction) || attempt === 1) return normalized;
         lastError = new Error(retryableStatus ? `Retryable upstream status: ${response.status}` : 'Empty upstream response');
       } catch (error) {
         lastError = error;
@@ -144,7 +241,8 @@ export class AiGateway {
       }
       await new Promise((resolve) => setTimeout(resolve, 300));
     }
-    throw new HttpError(lastError instanceof Error && lastError.name === 'TimeoutError' ? 'KAI model request timed out' : 'KAI model provider is unavailable', 502, 'ai_upstream_unavailable');
+    const timedOut = lastError instanceof Error && (lastError.name === 'TimeoutError' || lastError.name === 'AbortError');
+    throw new HttpError(timedOut ? 'KAI model request timed out' : 'KAI model provider is unavailable', timedOut ? 504 : 502, timedOut ? 'ai_upstream_timeout' : 'ai_upstream_unavailable');
   }
 
   private async loadSource(source: ModelSourceConfig): Promise<ModelSourceInfo> {
