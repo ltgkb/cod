@@ -169,10 +169,10 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       if (request.method === 'GET' && url.pathname === '/metrics') { const ready=await database.health(); response.writeHead(200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8' }); response.end(renderMetrics(ready)); return; }
       if (request.method === 'GET' && url.pathname === '/version') return sendJson(response, 200, { revision: process.env.COD_REVISION ?? 'development', node: process.version });
       if (request.method === 'GET' && url.pathname === '/api/capabilities') return sendJson(response, 200, {
-        authentication: { mode: 'password', registrationEnabled: true, inviteCodeOptional: true, accessCodeRequired: false },
-        ai: { mode: await gateway.mode(), streaming: true },
+        authentication: { mode: 'password', registrationEnabled: config.registrationEnabled, inviteCodeOptional: !config.inviteCodeRequired, inviteCodeRequired: config.inviteCodeRequired, accessCodeRequired: false },
+        ai: { mode: await gateway.mode(), streaming: true, streamingMode: 'buffered-sse' },
         knowledge: { mode: knowledge.mode() },
-        payments: { topupEnabled: config.developmentTopupEnabled, orderApi: true, mode: config.paymentWebhookSecret ? 'verified-webhook' : config.developmentTopupEnabled ? 'pilot-credit' : 'unavailable' },
+        payments: { topupEnabled: config.developmentTopupEnabled, orderApi: Boolean(config.paymentWebhookSecret), mode: config.paymentWebhookSecret ? 'verified-webhook' : config.developmentTopupEnabled ? 'pilot-credit' : 'unavailable' },
         synchronization: { transport: 'polling', taskStatusVersioning: true },
         remote: {
           feishu: config.feishuVerificationToken && config.feishuAppId && config.feishuAppSecret && Object.keys(config.feishuBindings).length ? 'live' : 'unavailable',
@@ -193,6 +193,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         return sendJson(response, 200, { token, user: { id: principal.userId, email } });
       }
       if(request.method==='POST'&&url.pathname==='/api/auth/register'){
+        if(!config.registrationEnabled)throw new HttpError('账号注册暂未开放',503,'registration_unavailable');
         const body=await readJson<{email?:string;password?:string;inviteCode?:string;legacyAccessCode?:string}>(request);
         const email=validateAuthEmail(body.email);
         let password:string;try{password=validatePassword(body.password);}catch(error){throw new HttpError(error instanceof Error?error.message:'密码不符合要求',400,'invalid_password');}
@@ -200,6 +201,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         if(inviteCode&&(!/^[A-Z0-9-]{4,32}$/.test(inviteCode)))throw new HttpError('邀请码格式无效',400,'invalid_invite_code');
         const existing=await database.findIdentityByEmail(email);
         const allowExisting=Boolean(existing&&!existing.passwordHash&&verifyLegacyAccessCode(body.legacyAccessCode,config));
+        if(!allowExisting&&config.inviteCodeRequired&&!inviteCode)throw new HttpError('请输入有效邀请码',400,'invite_code_required');
         const principal:Principal={userId:userIdFor(email),tenantId:tenantIdFor(email),email,role:'member'};
         const result=await database.registerIdentity(principal,await hashPassword(password),inviteCode,allowExisting);
         await database.audit(result.identity.principal,result.created?'auth.register':'auth.legacy_migrated','user',result.identity.principal.userId,{inviteCodeUsed:result.identity.referralCodeUsed});
@@ -282,6 +284,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         return sendJson(response,201,result);
       }
       if (request.method === 'POST' && url.pathname === '/api/payment-orders') {
+        if(!config.paymentWebhookSecret)throw new HttpError('支付渠道尚未接入',503,'payments_unavailable');
         const key=String(request.headers['idempotency-key']??'');if(!key)throw new HttpError('idempotency-key is required',400,'idempotency_required');
         const body=await readJson<{amountCents?:number;channel?:'wechat'|'alipay'}>(request);
         const order=await database.createPaymentOrder(principal,{amountCents:Number(body.amountCents),channel:body.channel as 'wechat'|'alipay',idempotencyKey:key});

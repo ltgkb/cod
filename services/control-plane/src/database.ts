@@ -194,6 +194,11 @@ export function validateTaskTransition(current: TaskStatus, next: TaskStatus): v
   if (!taskTransitions[current].has(next)) throw new HttpError(`Task cannot move from ${current} to ${next}`, 409, 'invalid_task_transition');
 }
 
+export function validateTaskOutcome(status: TaskStatus, result: string | null, error: string | null): void {
+  if (status === 'complete' && !result?.trim()) throw new HttpError('Completed tasks require a result', 400, 'task_result_required');
+  if (status === 'failed' && !error?.trim()) throw new HttpError('Failed tasks require an error', 400, 'task_error_required');
+}
+
 const schema = `
 CREATE TABLE IF NOT EXISTS cod_users (
   tenant_id text NOT NULL, user_id text NOT NULL, email text NOT NULL, display_name text NOT NULL,
@@ -522,8 +527,12 @@ export class PostgresDatabase implements CodDatabase {
       if (outcome.result !== undefined && outcome.result !== null && outcome.result.length > 50_000) throw new HttpError('Task result is too large', 400, 'task_result_too_large');
       if (outcome.error !== undefined && outcome.error !== null && outcome.error.length > 5_000) throw new HttpError('Task error is too large', 400, 'task_error_too_large');
       if (current.status === status && outcome.result === undefined && outcome.error === undefined) return current;
-      const nextResult = outcome.result === undefined ? current.result : outcome.result;
-      const nextError = outcome.error === undefined ? current.error : outcome.error;
+      let nextResult = outcome.result === undefined ? current.result : outcome.result;
+      let nextError = outcome.error === undefined ? current.error : outcome.error;
+      if (status === 'running' && current.status !== 'running') { nextResult = null; nextError = null; }
+      if (status === 'complete') nextError = null;
+      if (status === 'failed') nextResult = null;
+      validateTaskOutcome(status, nextResult, nextError);
       const { rows } = await client.query('UPDATE cod_tasks SET status=$1,result=$3,error=$4,version=version+1,updated_at=now() WHERE id=$2 RETURNING *', [status,id,nextResult,nextError]);
       const task = taskFromRow(rows[0]);
       await client.query('INSERT INTO cod_events (tenant_id,user_id,type,entity_id,data) VALUES ($1,$2,$3,$4,$5)', [p.tenantId,p.userId,'task.updated',id,JSON.stringify(task)]);

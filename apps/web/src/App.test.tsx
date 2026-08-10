@@ -1,8 +1,21 @@
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { createClientId, sendChat } from './api';
+
+beforeEach(() => {
+  const values = new Map<string, string>();
+  const storage: Storage = {
+    get length() { return values.size; },
+    clear: () => values.clear(),
+    getItem: (key) => values.get(key) ?? null,
+    key: (index) => [...values.keys()][index] ?? null,
+    removeItem: (key) => { values.delete(key); },
+    setItem: (key, value) => { values.set(key, String(value)); },
+  };
+  Object.defineProperty(window, 'localStorage', { configurable: true, value: storage });
+});
 
 afterEach(() => {
   cleanup();
@@ -11,10 +24,10 @@ afterEach(() => {
 });
 
 const capabilities = {
-  authentication: { mode: 'password', registrationEnabled: true, inviteCodeOptional: true, accessCodeRequired: false },
-  ai: { mode: 'demo', streaming: false },
+  authentication: { mode: 'password', registrationEnabled: true, inviteCodeOptional: true, inviteCodeRequired: false, accessCodeRequired: false },
+  ai: { mode: 'demo', streaming: false, streamingMode: 'buffered-sse' as const },
   knowledge: { mode: 'demo' },
-  payments: { topupEnabled: false, orderApi: true, mode: 'unavailable' as const },
+  payments: { topupEnabled: false, orderApi: false, mode: 'unavailable' as const },
   synchronization: { transport: 'polling', taskStatusVersioning: true },
   remote: { feishu: 'unavailable' as const, wecom: 'unavailable' as const },
 };

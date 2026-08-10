@@ -402,6 +402,13 @@ button:active { transform: translateY(1px); }
 .service-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--border-subtle); border: 1px solid var(--border-subtle); }
 .service-grid span { display: flex; justify-content: space-between; gap: 8px; padding: 10px; color: var(--muted-foreground); background: var(--layer-01); font-size: 9px; }
 .service-grid strong { color: var(--ink); }
+.invite-panel { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 12px; background: var(--accent-soft); border: 1px solid var(--border-subtle); }
+.invite-panel span, .invite-panel small, .invite-panel code, .invite-panel i { display: block; }
+.invite-panel small { color: var(--muted-foreground); font-size: 8px; }
+.invite-panel code { margin-top: 3px; color: var(--ink); font: 12px var(--mono); user-select: all; }
+.invite-panel i { margin-top: 3px; color: var(--muted-foreground); font-size: 8px; font-style: normal; }
+.invite-panel button { display: flex; align-items: center; gap: 5px; padding: 8px 10px; color: var(--accent); background: var(--layer-01); border: 1px solid var(--border-strong); font-size: 9px; white-space: nowrap; }
+.invite-panel button svg { width: 12px; }
 .topup-panel { display: grid; gap: 10px; padding: 12px; background: var(--field-01); border: 1px solid var(--border-subtle); border-radius: 0; }
 .topup-panel strong, .topup-panel small { display: block; }
 .topup-panel strong { color: var(--ink); font-size: 10px; }
@@ -410,6 +417,10 @@ button:active { transform: translateY(1px); }
 .topup-panel button { flex: 1; padding: 8px; color: var(--accent); background: var(--layer-01); border: 1px solid var(--border-subtle); border-right: 0; border-radius: 0; font: 9px var(--mono); }
 .topup-panel button:last-child { border-right: 1px solid var(--border-subtle); }
 .topup-panel button:hover { background: var(--accent-soft); }
+.payment-status { display: grid; gap: 4px; padding: 11px 12px; border: 1px solid var(--border-subtle); }
+.payment-status strong { color: var(--ink); font-size: 10px; }
+.payment-status small { color: var(--muted-foreground); font-size: 9px; line-height: 1.55; }
+.payment-status.unavailable { color: var(--warning); background: var(--warning-soft); border-left: 3px solid var(--warning); }
 .ledger { overflow: hidden; border: 1px solid var(--border-subtle); border-radius: 0; }
 .ledger > header, .ledger > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 11px; border-bottom: 1px solid var(--border-subtle); }
 .ledger > header { background: var(--field-01); }
@@ -565,8 +576,10 @@ button:active { transform: translateY(1px); }
   .mobile-only { display: grid; }
   .conversation-scroll { padding: 22px 16px; }
   .composer-wrap { padding: 8px 12px 12px; }
-  .workspace-header { padding: 0 12px; }
-  .source-picker, .model-picker { display: none; }
+  .workspace-header { align-items: stretch; flex-direction: column; height: auto; min-height: 106px; padding: 0 12px 10px; }
+  .task-heading { flex: 1; min-height: 58px; }
+  .header-actions { display: grid; grid-template-columns: auto minmax(0, .9fr) minmax(0, 1.1fr); gap: 6px; }
+  .source-picker, .model-picker { display: block; width: 100%; min-width: 0; max-width: none; }
   .inspector-toggle { display: none; }
   .credit-pack-grid { grid-template-columns: repeat(2, 1fr); }
   .comparison-message { margin-left: 0; }
@@ -582,7 +595,7 @@ button:active { transform: translateY(1px); }
   .rail-footer { flex-direction: row; width: auto; margin: 0 0 0 auto; }
   .icon-button { width: 42px; height: 40px; }
   .workspace { padding-bottom: 56px; }
-  .workspace-header { height: 60px; }
+  .workspace-header { height: auto; min-height: 106px; }
   .task-heading p { max-width: 150px; }
   .mode-switch button { padding: 6px; }
   .mode-switch button svg { width: 15px; }

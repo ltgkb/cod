@@ -30,8 +30,8 @@ export interface CodSession {
 }
 
 export interface CapabilityReport {
-  authentication: { mode: 'password'; registrationEnabled: boolean; inviteCodeOptional: boolean; accessCodeRequired: false };
-  ai: { mode: 'live' | 'demo' | 'unavailable'; streaming: boolean };
+  authentication: { mode: 'password'; registrationEnabled: boolean; inviteCodeOptional: boolean; inviteCodeRequired: boolean; accessCodeRequired: false };
+  ai: { mode: 'live' | 'demo' | 'unavailable'; streaming: boolean; streamingMode: 'buffered-sse' };
   knowledge: { mode: 'live' | 'demo' };
   payments: { topupEnabled: boolean; orderApi: boolean; mode: 'pilot-credit' | 'verified-webhook' | 'unavailable' };
   synchronization: { transport: 'polling'; taskStatusVersioning: boolean };
@@ -85,6 +85,14 @@ export interface CreditGrant {
   purchasedAt: string;
   expiresAt: string;
   status: 'active' | 'depleted' | 'expired';
+}
+
+export interface ReferralSummary {
+  inviteCode: string;
+  referredUsers: number;
+  commissionRateBps: number;
+  pendingCommissionCents: number;
+  settledCommissionCents: number;
 }
 
 export interface CreditPackState { packs: CreditPackDefinition[]; summary: { availableCents: number; grants: CreditGrant[] } }
@@ -224,6 +232,10 @@ export async function refreshAccount(token: string): Promise<AccountSummary> {
 
 export async function listLedger(token: string): Promise<LedgerEntry[]> {
   return request('/api/ledger', token);
+}
+
+export async function getReferralSummary(token: string): Promise<ReferralSummary> {
+  return request('/api/referrals', token);
 }
 
 export async function getCreditPacks(token:string):Promise<CreditPackState>{return request('/api/credit-packs',token);}

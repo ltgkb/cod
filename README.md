@@ -25,11 +25,11 @@ npm run package:win
 
 ## Product behavior
 
-- Web and desktop clients use a pilot access-code login and retain the signed session on the current device.
+- Web and desktop clients use email/password authentication and retain the signed session on the current device. Production registration is invite-only by default, and existing users can copy their immutable invite code from the account panel.
 - Tasks, devices, status transitions, wallet entries, and audit records come from the control plane; the UI does not render static task or terminal-success fixtures.
 - The Web client can create, search, synchronize, execute, retry, and complete tasks, including persisted results and errors that remain visible from another Web/mobile session. Local files, Git Diff, terminal commands, and Goose execution are available only through the desktop bridge.
 - Model sources are discovered from their live catalogs. The selected source controls the model list, upstream route, displayed price, wallet settlement, and ledger payment direction.
-- `ai.kai.com` can run as a live OpenAI-compatible source. `chase.kai.com` is included as a catalog-only example until its own key is configured; catalog-only sources cannot execute prompts.
+- `ai.kai.com` is the only upstream model gateway. Display sources such as `AI.KAI.COM` and `CHASE.KAI.COM` reuse its verified catalog and callable route while keeping source attribution, commission, payment direction, and ledger records separate.
 - Goose receives the signed COD user session, selected source, and selected model through the Electron IPC boundary. It calls the billed COD gateway rather than holding a company provider key, so desktop Agent usage follows the same reservation, settlement, and ledger path as Web chat.
 - The pilot wallet supports explicitly labelled test-credit preloads. A production callback adapter accepts only recent HMAC-signed, CNY `paid` events and credits them idempotently; checkout acquisition, refunds, invoices, and provider settlement remain provider-owned dependencies.
 - Real payment callbacks must match a previously created COD payment order. Amount, currency, channel, provider payment ID, and provider event ID are checked before the wallet and immutable ledger are updated in one transaction. See `PAYMENTS.md`.
@@ -40,7 +40,7 @@ npm run package:win
 
 ## Production configuration
 
-The control plane requires PostgreSQL and a pilot access-code hash in production. Generate the hash without storing the plaintext code in Git:
+The control plane requires PostgreSQL and a pilot access-code hash in production when legacy pilot login is enabled. Generate the hash without storing the plaintext code in Git:
 
 ```bash
 printf %s 'your-access-code' | sha256sum
@@ -52,4 +52,4 @@ Configure model source keys only in `/etc/cod/control-plane.env`, for example `K
 
 `deploy/control-plane.env.example` lists all production-only secret and integration settings. Do not copy real values into Git.
 
-See `FUNCTION_AUDIT.md` for the verified internal scope and the external integrations that still require provider contracts or credentials.
+See `AUDIT_2026-08-10.md` for the latest verified production state, and `FUNCTION_AUDIT.md` for the broader internal scope and external integration boundaries.

@@ -15,7 +15,7 @@ const encode = (value: string) => Buffer.from(value).toString('base64url');
 
 export function validatePassword(password: unknown): string {
   if (typeof password !== 'string' || !passwordPattern.test(password)) {
-    throw new Error('密码须为 10–128 位，并同时包含字母和数字');
+    throw new Error('密码须为 10-128 位，并同时包含字母和数字');
   }
   return password;
 }

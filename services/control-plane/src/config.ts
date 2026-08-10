@@ -16,6 +16,8 @@ export interface ControlPlaneConfig {
   databaseUrl: string | null;
   allowedEmailDomains: string[];
   allowedOrigins: string[];
+  registrationEnabled: boolean;
+  inviteCodeRequired: boolean;
   developmentLoginEnabled: boolean;
   developmentLoginEmail: string;
   pilotAccessCodeHash: string | null;
@@ -85,6 +87,8 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
   const sessionSecret = environment.COD_SESSION_SECRET ?? 'cod-local-development-secret';
   const databaseUrl = environment.DATABASE_URL ?? null;
   const pilotAccessCodeHash = environment.COD_PILOT_ACCESS_CODE_HASH ?? null;
+  const registrationEnabled = environment.COD_REGISTRATION_ENABLED === undefined ? !production : environment.COD_REGISTRATION_ENABLED === 'true';
+  const inviteCodeRequired = environment.COD_INVITE_CODE_REQUIRED === undefined ? production : environment.COD_INVITE_CODE_REQUIRED === 'true';
   const developmentLoginEnabled = environment.COD_DEVELOPMENT_LOGIN_ENABLED === 'true' || !production;
   const demoMode = environment.COD_DEMO_MODE === 'true' || !production;
   const paymentWebhookSecret = environment.COD_PAYMENT_WEBHOOK_SECRET ?? null;
@@ -117,6 +121,8 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     databaseUrl,
     allowedEmailDomains: (environment.COD_ALLOWED_EMAIL_DOMAINS ?? 'kai.com').split(',').map((value) => value.trim().toLowerCase()).filter(Boolean),
     allowedOrigins: (environment.COD_ALLOWED_ORIGINS ?? 'http://127.0.0.1:5173,http://localhost:5173,null').split(',').map((value) => value.trim()).filter(Boolean),
+    registrationEnabled,
+    inviteCodeRequired,
     developmentLoginEnabled,
     developmentLoginEmail: (environment.COD_DEVELOPMENT_LOGIN_EMAIL ?? 'developer@kai.com').toLowerCase(),
     pilotAccessCodeHash,

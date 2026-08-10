@@ -31,6 +31,8 @@ describe('control-plane production rules', () => {
       COD_DEVELOPMENT_TOPUP_ENABLED: 'true',
     });
     expect(config.developmentTopupEnabled).toBe(false);
+    expect(config.registrationEnabled).toBe(false);
+    expect(config.inviteCodeRequired).toBe(true);
   });
 
   it('rejects empty assistant content before it can be settled as a successful reply', () => {
@@ -72,10 +74,23 @@ describe('control-plane production rules', () => {
     expect((await database.getReferralSummary(principal)).referredUsers).toBe(1);
   });
 
+  it('fails closed when registration or payment ordering is unavailable',async()=>{
+    const disabled=await start({COD_REGISTRATION_ENABLED:'false'});
+    const registration=await fetch(`${disabled.base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'new@example.com',password:'Password123'})});
+    expect(registration.status).toBe(503);expect(await registration.json()).toMatchObject({error:'registration_unavailable'});
+    const {base}=await start({COD_INVITE_CODE_REQUIRED:'true'});
+    const missingInvite=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'new@example.com',password:'Password123'})});
+    expect(missingInvite.status).toBe(400);expect(await missingInvite.json()).toMatchObject({error:'invite_code_required'});
+    const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com',password:'Password123'})});
+    const {token}=await login.json() as {token:string};
+    const order=await fetch(`${base}/api/payment-orders`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':'unavailable-order'},body:JSON.stringify({amountCents:1200,channel:'wechat'})});
+    expect(order.status).toBe(503);expect(await order.json()).toMatchObject({error:'payments_unavailable'});
+  });
+
   it('reports integration capabilities and rejects invalid JSON and origins', async () => {
     const { base } = await start({ COD_ALLOWED_ORIGINS: 'https://cod.example' });
     const capabilities = await fetch(`${base}/api/capabilities`);
-    expect(await capabilities.json()).toMatchObject({ ai: { mode: 'demo' }, payments: { topupEnabled: false } });
+    expect(await capabilities.json()).toMatchObject({ authentication: { registrationEnabled: true, inviteCodeRequired: false }, ai: { mode: 'demo', streamingMode: 'buffered-sse' }, payments: { topupEnabled: false, orderApi: false } });
     const malformed = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{' });
     expect(malformed.status).toBe(400);
     expect(await malformed.json()).toMatchObject({ error: 'invalid_json' });
