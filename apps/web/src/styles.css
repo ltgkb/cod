@@ -670,6 +670,10 @@ button:active { transform: translateY(1px); }
   .inspector-toggle { display: none; }
   .credit-pack-grid { grid-template-columns: repeat(2, 1fr); }
   .comparison-message { margin-left: 0; }
+  html[data-cod-host-platform], html[data-cod-host-platform] body, html[data-cod-host-platform] #root { height: 100%; min-height: 0; }
+  html[data-cod-host-platform] body { overflow: hidden; }
+  html[data-cod-host-platform] .app-shell { min-height: 0; height: 100%; }
+  html[data-cod-host-platform] .workspace { min-height: 0; }
 }
 
 @media (max-width: 600px) {

@@ -46,6 +46,16 @@ const CodWorkspace = forwardRef<CodWorkspaceHandle, CodWorkspaceProps>(function 
 }, ref) {
   const [nativeBridgeCapability,setNativeBridgeCapability]=useState(tryReadNativeBridgeCapability);
   useEffect(()=>{
+    const root=document.documentElement;
+    const previousHostPlatform=root.dataset.codHostPlatform;
+    if(hostPlatform)root.dataset.codHostPlatform=hostPlatform;
+    else delete root.dataset.codHostPlatform;
+    return()=>{
+      if(previousHostPlatform)root.dataset.codHostPlatform=previousHostPlatform;
+      else delete root.dataset.codHostPlatform;
+    };
+  },[hostPlatform]);
+  useEffect(()=>{
     if(nativeBridgeCapability)return undefined;
     const readCapability=()=>{
       const nextCapability=tryReadNativeBridgeCapability();
