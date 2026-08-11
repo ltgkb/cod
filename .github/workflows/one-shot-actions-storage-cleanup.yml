@@ -1,0 +1,100 @@
+name: One-shot Actions storage cleanup
+
+on:
+  push:
+    branches:
+      - maintenance/actions-storage-cleanup-20260811
+    paths:
+      - .github/workflows/one-shot-actions-storage-cleanup.yml
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: one-shot-actions-storage-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Stop other runs started by this maintenance branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          for state in queued in_progress; do
+            while IFS= read -r run_id; do
+              [[ -z "${run_id}" || "${run_id}" == "${CURRENT_RUN_ID}" ]] && continue
+              echo "Cancelling ${state} run ${run_id} on ${BRANCH}"
+              gh api -X POST "repos/${REPO}/actions/runs/${run_id}/cancel" >/dev/null 2>&1 || true
+            done < <(gh api --paginate "repos/${REPO}/actions/runs?branch=${BRANCH}&status=${state}&per_page=100" --jq '.workflow_runs[].id')
+          done
+
+      - name: Delete all repository Actions artifacts and caches
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          deleted_artifacts=0
+          deleted_artifact_bytes=0
+          deleted_caches=0
+          deleted_cache_bytes=0
+
+          for pass in 1 2 3; do
+            echo "Cleanup pass ${pass}"
+
+            artifact_list=$(mktemp)
+            gh api --paginate "repos/${REPO}/actions/artifacts?per_page=100" \
+              --jq '.artifacts[] | [.id, .size_in_bytes, .name] | @tsv' > "${artifact_list}"
+            while IFS=$'\t' read -r artifact_id size name; do
+              [[ -z "${artifact_id}" ]] && continue
+              echo "Deleting artifact ${name} (${size} bytes, id ${artifact_id})"
+              if gh api -X DELETE "repos/${REPO}/actions/artifacts/${artifact_id}" >/dev/null 2>&1; then
+                deleted_artifacts=$((deleted_artifacts + 1))
+                deleted_artifact_bytes=$((deleted_artifact_bytes + size))
+              fi
+            done < "${artifact_list}"
+            rm -f "${artifact_list}"
+
+            cache_list=$(mktemp)
+            gh api --paginate "repos/${REPO}/actions/caches?per_page=100" \
+              --jq '.actions_caches[] | [.id, .size_in_bytes, .key] | @tsv' > "${cache_list}"
+            while IFS=$'\t' read -r cache_id size key; do
+              [[ -z "${cache_id}" ]] && continue
+              echo "Deleting cache ${key} (${size} bytes, id ${cache_id})"
+              if gh api -X DELETE "repos/${REPO}/actions/caches/${cache_id}" >/dev/null 2>&1; then
+                deleted_caches=$((deleted_caches + 1))
+                deleted_cache_bytes=$((deleted_cache_bytes + size))
+              fi
+            done < "${cache_list}"
+            rm -f "${cache_list}"
+
+            remaining_artifacts=$(gh api "repos/${REPO}/actions/artifacts?per_page=1" --jq '.total_count')
+            remaining_caches=$(gh api "repos/${REPO}/actions/caches?per_page=1" --jq '.total_count')
+            echo "Remaining after pass ${pass}: ${remaining_artifacts} artifacts, ${remaining_caches} caches"
+            [[ "${remaining_artifacts}" == "0" && "${remaining_caches}" == "0" ]] && break
+            sleep 10
+          done
+
+          remaining_artifacts=$(gh api "repos/${REPO}/actions/artifacts?per_page=1" --jq '.total_count')
+          remaining_caches=$(gh api "repos/${REPO}/actions/caches?per_page=1" --jq '.total_count')
+
+          echo "Deleted artifacts: ${deleted_artifacts}"
+          echo "Deleted artifact bytes: ${deleted_artifact_bytes}"
+          echo "Deleted caches: ${deleted_caches}"
+          echo "Deleted cache bytes: ${deleted_cache_bytes}"
+          echo "Remaining artifacts: ${remaining_artifacts}"
+          echo "Remaining caches: ${remaining_caches}"
+
+          [[ "${remaining_artifacts}" == "0" && "${remaining_caches}" == "0" ]]
