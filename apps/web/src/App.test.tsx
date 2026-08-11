@@ -37,7 +37,7 @@ afterEach(async () => {
 });
 
 const capabilities = {
-  authentication: { mode: 'password', registrationEnabled: true, inviteCodeOptional: true, inviteCodeRequired: false, accessCodeRequired: false },
+  authentication: { mode: 'password', registrationEnabled: true, legacyMigrationEnabled: false, inviteCodeOptional: true, inviteCodeRequired: false, accessCodeRequired: false },
   ai: { mode: 'demo', streaming: false, streamingMode: 'buffered-sse' as const },
   knowledge: { mode: 'demo' },
   payments: { topupEnabled: false, orderApi: false, mode: 'unavailable' as const },
@@ -677,6 +677,33 @@ describe('COD workspace', () => {
     fireEvent.click(within(dialog).getByRole('tab', { name: '注册账号' }));
     expect(within(dialog).getByLabelText('邀请码')).not.toBeRequired();
     expect(within(dialog).getByText(/邀请码选填，用于绑定邀请人与后续返佣/)).toBeInTheDocument();
+  });
+
+  it('offers only the one-time legacy migration flow when public registration is closed', async () => {
+    const migrationCapabilities={...capabilities,authentication:{...capabilities.authentication,registrationEnabled:false,legacyMigrationEnabled:true}};
+    vi.stubGlobal('fetch',vi.fn(async()=>json(migrationCapabilities)));
+    render(<App />);
+    await screen.findByRole('heading',{name:'新对话'});
+    fireEvent.click(screen.getByTitle('登录'));
+    const dialog=await screen.findByRole('dialog',{name:'登录 COD'});
+    expect(within(dialog).queryByRole('tab',{name:'注册账号'})).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('tab',{name:'旧账号迁移'}));
+    expect(within(dialog).getByRole('heading',{name:'迁移旧账号'})).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('旧试点访问码')).toBeRequired();
+    expect(within(dialog).queryByLabelText('邀请码')).not.toBeInTheDocument();
+    expect(within(dialog).queryByText(/试用金|领取/)).not.toBeInTheDocument();
+    expect(within(dialog).getByRole('button',{name:/迁移旧账号/})).toBeInTheDocument();
+  });
+
+  it('does not expose enrollment while authentication capabilities are unavailable', async () => {
+    vi.stubGlobal('fetch',vi.fn(async()=>{throw new Error('offline');}));
+    render(<App />);
+    await screen.findByRole('heading',{name:'新对话'});
+    fireEvent.click(screen.getByTitle('登录'));
+    const dialog=await screen.findByRole('dialog',{name:'登录 COD'});
+    expect(within(dialog).queryByRole('tab',{name:'注册账号'})).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole('tab',{name:'旧账号迁移'})).not.toBeInTheDocument();
+    expect(within(dialog).getByText(/当前仅开放已有账号登录/)).toBeInTheDocument();
   });
 
   it('keeps only two primary mobile context items outside the more disclosure', async () => {

@@ -31,7 +31,7 @@ export interface CodSession {
 }
 
 export interface CapabilityReport {
-  authentication: { mode: 'password'; registrationEnabled: boolean; inviteCodeOptional: boolean; inviteCodeRequired: boolean; accessCodeRequired: false };
+  authentication: { mode: 'password'; registrationEnabled: boolean; legacyMigrationEnabled: boolean; inviteCodeOptional: boolean; inviteCodeRequired: boolean; accessCodeRequired: false };
   ai: { mode: 'live' | 'demo' | 'unavailable'; streaming: boolean; streamingMode: 'buffered-sse' };
   knowledge: { mode: 'live' | 'demo' };
   payments: { topupEnabled: boolean; orderApi: boolean; channels?: Array<'wechat' | 'alipay'>; mode: 'pilot-credit' | 'verified-webhook' | 'official-merchant' | 'unavailable' };

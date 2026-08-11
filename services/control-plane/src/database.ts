@@ -383,6 +383,48 @@ CREATE INDEX IF NOT EXISTS cod_chat_requests_expiry_idx ON cod_chat_requests(exp
 `;
 
 export const taskExecutionLeaseSchemaMigration = `
+DO $drop_strict_task_execution_lease$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='cod_tasks'::regclass
+      AND conname='cod_tasks_execution_lease_check'
+      AND COALESCE(obj_description(oid,'pg_constraint'),'')<>'cod:task-execution-lease-compatibility-v1'
+  ) THEN
+    ALTER TABLE cod_tasks DROP CONSTRAINT cod_tasks_execution_lease_check;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='cod_tasks'::regclass AND conname='cod_tasks_execution_lease_compat_check'
+  ) THEN
+    ALTER TABLE cod_tasks DROP CONSTRAINT cod_tasks_execution_lease_compat_check;
+  END IF;
+END
+$drop_strict_task_execution_lease$;
+CREATE OR REPLACE FUNCTION cod_tasks_normalize_terminal_lease() RETURNS trigger
+LANGUAGE plpgsql AS $cod_task_lease_compatibility$
+BEGIN
+  IF NEW.status NOT IN ('running','waiting') THEN
+    NEW.execution_id := NULL;
+    NEW.claim_id_hash := NULL;
+    NEW.lease_token_hash := NULL;
+    NEW.lease_expires_at := NULL;
+  END IF;
+  RETURN NEW;
+END
+$cod_task_lease_compatibility$;
+DO $task_execution_lease_trigger$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger
+    WHERE tgrelid='cod_tasks'::regclass AND tgname='cod_tasks_normalize_terminal_lease_trigger' AND NOT tgisinternal
+  ) THEN
+    CREATE TRIGGER cod_tasks_normalize_terminal_lease_trigger
+      BEFORE INSERT OR UPDATE ON cod_tasks
+      FOR EACH ROW EXECUTE FUNCTION cod_tasks_normalize_terminal_lease();
+  END IF;
+END
+$task_execution_lease_trigger$;
 DO $task_execution_lease$
 BEGIN
   IF NOT EXISTS (
@@ -390,13 +432,18 @@ BEGIN
     WHERE conrelid='cod_tasks'::regclass AND conname='cod_tasks_execution_lease_check'
   ) THEN
     ALTER TABLE cod_tasks ADD CONSTRAINT cod_tasks_execution_lease_check CHECK (
-      (status IN ('running','waiting') AND execution_id IS NOT NULL AND claim_id_hash IS NOT NULL AND claim_id_hash ~ '^[a-f0-9]{64}$' AND lease_token_hash IS NOT NULL AND lease_token_hash ~ '^[a-f0-9]{64}$' AND lease_expires_at IS NOT NULL)
+      (status IN ('running','waiting') AND (
+        (execution_id IS NULL AND claim_id_hash IS NULL AND lease_token_hash IS NULL AND lease_expires_at IS NULL)
+        OR
+        (execution_id IS NOT NULL AND claim_id_hash IS NOT NULL AND claim_id_hash ~ '^[a-f0-9]{64}$' AND lease_token_hash IS NOT NULL AND lease_token_hash ~ '^[a-f0-9]{64}$' AND lease_expires_at IS NOT NULL)
+      ))
       OR
       (status NOT IN ('running','waiting') AND execution_id IS NULL AND claim_id_hash IS NULL AND lease_token_hash IS NULL AND lease_expires_at IS NULL)
     ) NOT VALID;
   END IF;
 END
 $task_execution_lease$;
+COMMENT ON CONSTRAINT cod_tasks_execution_lease_check ON cod_tasks IS 'cod:task-execution-lease-compatibility-v1';
 `;
 
 export const usageReservationLeaseSchemaMigration = `

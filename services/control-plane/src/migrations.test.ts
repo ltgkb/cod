@@ -59,7 +59,13 @@ describe('production-safe migrations and rate limits', () => {
     expect(databaseSource).toContain('ALTER TABLE cod_tasks ADD COLUMN IF NOT EXISTS lease_token_hash text');
     expect(databaseSource).toContain('cod_tasks_active_lease_idx');
     expect(taskExecutionLeaseSchemaMigration).toContain("status IN ('running','waiting')");
-    expect(taskExecutionLeaseSchemaMigration).toContain('claim_id_hash IS NOT NULL');
+    expect(taskExecutionLeaseSchemaMigration).toContain("cod:task-execution-lease-compatibility-v1");
+    expect(taskExecutionLeaseSchemaMigration).toContain('ADD CONSTRAINT cod_tasks_execution_lease_check');
+    expect(taskExecutionLeaseSchemaMigration).toContain('ALTER TABLE cod_tasks DROP CONSTRAINT cod_tasks_execution_lease_check');
+    expect(taskExecutionLeaseSchemaMigration).toContain('cod_tasks_normalize_terminal_lease_trigger');
+    expect(taskExecutionLeaseSchemaMigration).toContain("IF NEW.status NOT IN ('running','waiting')");
+    expect(taskExecutionLeaseSchemaMigration).toContain('execution_id IS NULL AND claim_id_hash IS NULL AND lease_token_hash IS NULL AND lease_expires_at IS NULL');
+    expect(taskExecutionLeaseSchemaMigration).toContain('execution_id IS NOT NULL AND claim_id_hash IS NOT NULL');
     expect(taskExecutionLeaseSchemaMigration).toContain("claim_id_hash ~ '^[a-f0-9]{64}$'");
     expect(taskExecutionLeaseSchemaMigration).toContain('lease_token_hash IS NOT NULL');
     expect(taskExecutionLeaseSchemaMigration).toContain("lease_token_hash ~ '^[a-f0-9]{64}$'");
@@ -133,5 +139,14 @@ describe('production-safe migrations and rate limits', () => {
     const deployScript = readFileSync(new URL('../../../scripts/deploy-server.sh', import.meta.url), 'utf8');
     expect(deployScript).toContain('sudo install -o root -g root -m 755 "${node_binary}" "${release_staging}/bin/node"');
     expect(deployScript).toContain('sudo useradd --system --gid cod --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin cod');
+  });
+
+  it('keeps production registration closed until email ownership is verified', () => {
+    const runtime = readFileSync(new URL('../../../deploy/runtime.env', import.meta.url), 'utf8');
+    const example = readFileSync(new URL('../../../deploy/control-plane.env.example', import.meta.url), 'utf8');
+
+    expect(runtime).toMatch(/^COD_REGISTRATION_ENABLED=false$/m);
+    expect(example).toMatch(/^COD_REGISTRATION_ENABLED=false$/m);
+    expect(example).toContain('verifies email ownership');
   });
 });

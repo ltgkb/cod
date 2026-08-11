@@ -246,17 +246,20 @@ function LoginForm({ capabilities, capabilityError, resumeConversation, onLogin,
   const [showLegacyMigration,setShowLegacyMigration]=useState(false);
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const registrationAvailable=capabilities?.authentication.registrationEnabled!==false;
+  const registrationAvailable=capabilities?.authentication.registrationEnabled===true;
+  const legacyMigrationAvailable=!registrationAvailable&&capabilities?.authentication.legacyMigrationEnabled===true;
+  const enrollmentAvailable=registrationAvailable||legacyMigrationAvailable;
+  const migrationMode=mode==='register'&&legacyMigrationAvailable;
   const inviteRequired=capabilities?.authentication.inviteCodeRequired===true;
-  useEffect(()=>{if(!registrationAvailable&&mode==='register'){setMode('login');setPassword('');setConfirmPassword('');setLegacyAccessCode('');}},[registrationAvailable,mode]);
+  useEffect(()=>{if(!enrollmentAvailable&&mode==='register'){setMode('login');setPassword('');setConfirmPassword('');setLegacyAccessCode('');}},[enrollmentAvailable,mode]);
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setSubmitting(true); setError('');
     try {
       if(mode==='login')await onLogin(email,password);
       else{
-        if(!registrationAvailable)throw new Error('当前暂未开放新账号注册');
+        if(!enrollmentAvailable)throw new Error('当前暂未开放账号注册或迁移');
         if(password!==confirmPassword)throw new Error('两次输入的密码不一致');
-        await onRegister({email,password,inviteCode:inviteCode.trim()||undefined,legacyAccessCode:legacyAccessCode||undefined});
+        await onRegister({email,password,inviteCode:registrationAvailable?inviteCode.trim()||undefined:undefined,legacyAccessCode:migrationMode||showLegacyMigration?legacyAccessCode||undefined:undefined});
       }
     } catch (nextError) {
       if(nextError instanceof ApiError&&nextError.code==='legacy_migration_required')setShowLegacyMigration(true);
@@ -264,7 +267,32 @@ function LoginForm({ capabilities, capabilityError, resumeConversation, onLogin,
     } finally { setSubmitting(false); }
   };
   const switchMode=(next:'login'|'register')=>{setMode(next);setPassword('');setConfirmPassword('');setError('');setShowLegacyMigration(false);setLegacyAccessCode('');};
-  return <div className="login-form"><div className={`auth-tabs${registrationAvailable?'':' single'}`} role="tablist"><button type="button" role="tab" aria-selected={mode==='login'} className={mode==='login'?'active':''} onClick={()=>switchMode('login')}>密码登录</button>{registrationAvailable&&<button type="button" role="tab" aria-selected={mode==='register'} className={mode==='register'?'active':''} onClick={()=>switchMode('register')}>注册账号</button>}</div><div className="login-copy"><span className="eyebrow">KAI ACCOUNT</span><h2>{resumeConversation ? `${mode==='login'?'登录':'注册'}后继续对话` : mode==='login'?'登录 COD':'注册 COD'}</h2><p>{resumeConversation ? '登录窗口保持打开期间会保留这条消息；认证成功后会自动发送。' : mode==='login'?(registrationAvailable?'使用邮箱和密码登录。':'当前仅开放已有账号登录。'):`注册即获 ¥10 试用金，有效期 30 天。${inviteRequired?'需要有效邀请码。':'邀请码选填，用于绑定邀请人与后续返佣。'}`}</p></div>{capabilityError && <div className="notice error">{capabilityError}</div>}<form onSubmit={submit}><label>邮箱<input aria-label="邮箱" name="email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" required autoFocus /></label><label>密码<input key={`password-${mode}`} aria-label="密码" name={mode==='login'?'loginPassword':'newPassword'} type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode==='login'?'current-password':'new-password'} minLength={10} maxLength={128} required /></label>{mode==='register'&&<><label>确认密码<input key="confirm-register-password" aria-label="确认密码" name="confirmPassword" type="password" value={confirmPassword} onChange={(event)=>setConfirmPassword(event.target.value)} autoComplete="new-password" minLength={10} maxLength={128} required /></label><label>邀请码 <small>{inviteRequired?'必填':'选填'}</small><input aria-label="邀请码" name="inviteCode" value={inviteCode} onChange={(event)=>setInviteCode(event.target.value.toUpperCase())} autoComplete="off" maxLength={32} placeholder="例如 KAI-XXXXXXXXXX" required={inviteRequired} /></label>{showLegacyMigration&&<label>旧试点访问码 <small>仅迁移一次</small><input key="legacy-access-code" aria-label="旧试点访问码" name="legacyAccessCode" type="password" value={legacyAccessCode} onChange={(event)=>setLegacyAccessCode(event.target.value)} autoComplete="off" required /></label>}<p className="password-hint">密码须为 10-128 位，并同时包含字母和数字。邀请关系注册后不可自行更改。</p></>}{error && <div className="notice error" role="alert">{error}</div>}<button type="submit" className="primary-button" disabled={submitting}>{submitting ? <CircleNotch className="spin" /> : <Key />} {resumeConversation ? `${mode==='login'?'登录':'注册'}并继续` : mode==='login'?'登录':'注册并领取试用金'}</button></form><div className="capability-summary"><span className={capabilities?.ai.mode === 'live' ? 'live' : 'demo'}>模型：{capabilities?.ai.mode === 'live' ? '已连接' : capabilities?.ai.mode === 'demo' ? '演示模式' : '待检测'}</span><span>认证：邮箱密码</span></div></div>;
+  const actionName=mode==='login'?'登录':migrationMode?'迁移':'注册';
+  return <div className="login-form">
+    <div className={`auth-tabs${enrollmentAvailable?'':' single'}`} role="tablist">
+      <button type="button" role="tab" aria-selected={mode==='login'} className={mode==='login'?'active':''} onClick={()=>switchMode('login')}>密码登录</button>
+      {enrollmentAvailable&&<button type="button" role="tab" aria-selected={mode==='register'} className={mode==='register'?'active':''} onClick={()=>switchMode('register')}>{migrationMode?'旧账号迁移':legacyMigrationAvailable?'旧账号迁移':'注册账号'}</button>}
+    </div>
+    <div className="login-copy">
+      <span className="eyebrow">KAI ACCOUNT</span>
+      <h2>{resumeConversation?`${actionName}后继续对话`:mode==='login'?'登录 COD':migrationMode?'迁移旧账号':'注册 COD'}</h2>
+      <p>{resumeConversation?'登录窗口保持打开期间会保留这条消息；认证成功后会自动发送。':mode==='login'?(registrationAvailable?'使用邮箱和密码登录。':legacyMigrationAvailable?'已有账号可直接登录；旧试点账号可完成一次性迁移。':'当前仅开放已有账号登录。'):migrationMode?'使用旧试点访问码为原账号设置新密码；迁移仅可完成一次。':`注册即获 ¥10 试用金，有效期 30 天。${inviteRequired?'需要有效邀请码。':'邀请码选填，用于绑定邀请人与后续返佣。'}`}</p>
+    </div>
+    {capabilityError&&<div className="notice error">{capabilityError}</div>}
+    <form onSubmit={submit}>
+      <label>邮箱<input aria-label="邮箱" name="email" type="email" value={email} onChange={(event)=>setEmail(event.target.value)} autoComplete="username" required autoFocus /></label>
+      <label>密码<input key={`password-${mode}`} aria-label="密码" name={mode==='login'?'loginPassword':'newPassword'} type="password" value={password} onChange={(event)=>setPassword(event.target.value)} autoComplete={mode==='login'?'current-password':'new-password'} minLength={10} maxLength={128} required /></label>
+      {mode==='register'&&<>
+        <label>确认密码<input key="confirm-register-password" aria-label="确认密码" name="confirmPassword" type="password" value={confirmPassword} onChange={(event)=>setConfirmPassword(event.target.value)} autoComplete="new-password" minLength={10} maxLength={128} required /></label>
+        {registrationAvailable&&<label>邀请码 <small>{inviteRequired?'必填':'选填'}</small><input aria-label="邀请码" name="inviteCode" value={inviteCode} onChange={(event)=>setInviteCode(event.target.value.toUpperCase())} autoComplete="off" maxLength={32} placeholder="例如 KAI-XXXXXXXXXX" required={inviteRequired} /></label>}
+        {(migrationMode||showLegacyMigration)&&<label>旧试点访问码 <small>仅迁移一次</small><input key="legacy-access-code" aria-label="旧试点访问码" name="legacyAccessCode" type="password" value={legacyAccessCode} onChange={(event)=>setLegacyAccessCode(event.target.value)} autoComplete="off" maxLength={256} required /></label>}
+        <p className="password-hint">密码须为 10-128 位，并同时包含字母和数字。{migrationMode?'迁移成功后请使用新密码登录。':'邀请关系注册后不可自行更改。'}</p>
+      </>}
+      {error&&<div className="notice error" role="alert">{error}</div>}
+      <button type="submit" className="primary-button" disabled={submitting}>{submitting?<CircleNotch className="spin" />:<Key />} {resumeConversation?`${actionName}并继续`:mode==='login'?'登录':migrationMode?'迁移旧账号':'注册并领取试用金'}</button>
+    </form>
+    <div className="capability-summary"><span className={capabilities?.ai.mode==='live'?'live':'demo'}>模型：{capabilities?.ai.mode==='live'?'已连接':capabilities?.ai.mode==='demo'?'演示模式':'待检测'}</span><span>认证：邮箱密码</span></div>
+  </div>;
 }
 
 function ModelLibrary({ sources, error, signedIn, onLogin }: { sources: PublicModelSourceInfo[]; error: string; signedIn: boolean; onLogin: () => void }) {

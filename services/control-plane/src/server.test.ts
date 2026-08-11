@@ -94,6 +94,54 @@ describe('control-plane production rules', () => {
     expect((await database.getReferralSummary(principal)).referredUsers).toBe(1);
   });
 
+  it('binds the one-time legacy access code to the configured pilot account',async()=>{
+    const database=new MemoryDatabase();
+    const configuredEmail='legacy-owner@kai.com';
+    const otherEmail='legacy-other@kai.com';
+    const principalFor=(email:string)=>({userId:`usr_${createHash('sha256').update(email).digest('hex').slice(0,20)}`,tenantId:'tenant_kai_com',email,role:'member' as const});
+    await database.ensurePrincipal(principalFor(configuredEmail));
+    await database.ensurePrincipal(principalFor(otherEmail));
+    const identityBefore=await database.findIdentityByEmail(configuredEmail);
+    const creditsBefore=await database.getCreditSummary(principalFor(configuredEmail));
+    const legacyAccessCode='LegacyAccess123';
+    const {base}=await start({
+      COD_REGISTRATION_ENABLED:'false',
+      COD_DEVELOPMENT_LOGIN_ENABLED:'true',
+      COD_DEVELOPMENT_LOGIN_EMAIL:configuredEmail,
+      COD_PILOT_ACCESS_CODE_HASH:createHash('sha256').update(legacyAccessCode).digest('hex'),
+    },undefined,database);
+
+    const capabilities=await fetch(`${base}/api/capabilities`);
+    expect(await capabilities.json()).toMatchObject({authentication:{registrationEnabled:false,legacyMigrationEnabled:true}});
+
+    const takeover=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:otherEmail,password:'Password123',legacyAccessCode})});
+    expect(takeover.status).toBe(503);
+    expect(await takeover.json()).toMatchObject({error:'registration_unavailable'});
+
+    const newAccount=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'brand-new@kai.com',password:'Password123',legacyAccessCode})});
+    expect(newAccount.status).toBe(503);
+    expect(await newAccount.json()).toMatchObject({error:'registration_unavailable'});
+
+    const wrongCode=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:configuredEmail,password:'Password123',legacyAccessCode:'WrongLegacy123'})});
+    expect(wrongCode.status).toBe(503);
+    expect(await wrongCode.json()).toMatchObject({error:'registration_unavailable'});
+
+    const migration=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:configuredEmail,password:'Password123',legacyAccessCode})});
+    expect(migration.status).toBe(200);
+    const migratedCapabilities=await fetch(`${base}/api/capabilities`);
+    expect(await migratedCapabilities.json()).toMatchObject({authentication:{registrationEnabled:false,legacyMigrationEnabled:false}});
+    const identityAfter=await database.findIdentityByEmail(configuredEmail);
+    const creditsAfter=await database.getCreditSummary(principalFor(configuredEmail));
+    expect(identityAfter?.principal).toEqual(identityBefore?.principal);
+    expect(identityAfter?.inviteCode).toBe(identityBefore?.inviteCode);
+    expect(creditsAfter).toEqual(creditsBefore);
+    const repeated=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:configuredEmail,password:'AnotherPass123',legacyAccessCode})});
+    expect(repeated.status).toBe(503);
+    expect(await repeated.json()).toMatchObject({error:'registration_unavailable'});
+    const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:configuredEmail,password:'Password123'})});
+    expect(login.status).toBe(200);
+  });
+
   it('fails closed when registration or payment ordering is unavailable',async()=>{
     const disabled=await start({COD_REGISTRATION_ENABLED:'false'});
     const registration=await fetch(`${disabled.base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'new@example.com',password:'Password123'})});
