@@ -1,0 +1,235 @@
+name: Publish installers
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Branch, tag, or commit to package
+        required: true
+        default: main
+        type: string
+      release_tag:
+        description: Optional release tag (defaults to a versioned build tag)
+        required: false
+        type: string
+
+concurrency:
+  group: publish-installers-${{ inputs.source_ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.metadata.outputs.source_sha }}
+      tag: ${{ steps.metadata.outputs.tag }}
+      version: ${{ steps.metadata.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_ref }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Resolve release metadata
+        id: metadata
+        shell: bash
+        env:
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse HEAD)"
+          version="$(node -p "require('./apps/desktop/package.json').version")"
+          tag="${REQUESTED_TAG:-cod-v${version}-build.${GITHUB_RUN_NUMBER}}"
+
+          if [[ ! "$tag" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "Invalid release tag: $tag" >&2
+            exit 1
+          fi
+
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  release:
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create or resume matching draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          existing="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,targetCommitish --jq '[.isDraft, .targetCommitish] | @tsv' 2>/dev/null || true)"
+
+          if [[ -n "$existing" ]]; then
+            IFS=$'\t' read -r is_draft target_commitish <<< "$existing"
+            if [[ "$is_draft" != "true" || "$target_commitish" != "$SOURCE_SHA" ]]; then
+              echo "Refusing to overwrite existing non-matching release $RELEASE_TAG" >&2
+              exit 1
+            fi
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$SOURCE_SHA" \
+              --title "COD ${VERSION} (build ${GITHUB_RUN_NUMBER})" \
+              --notes "Automated internal-testing build from ${SOURCE_SHA}. macOS is ad-hoc signed and not notarized; Windows is not production-signed; Android is a debug APK; the iOS package is simulator-only." \
+              --draft \
+              --prerelease \
+              --latest=false
+          fi
+
+  desktop:
+    needs: [prepare, release]
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run build
+      - name: Package desktop
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then npm run package:win; fi
+          if [[ "${{ runner.os }}" == "macOS" ]]; then npm run package:mac; fi
+          if [[ "${{ runner.os }}" == "Linux" ]]; then npm run package:linux; fi
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      - name: Verify macOS package
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          codesign --verify --deep --strict --verbose=2 apps/desktop/release/mac-arm64/cod.app
+          hdiutil verify apps/desktop/release/COD-*-mac-arm64.dmg
+      - name: Upload desktop installers to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          installers=(
+            apps/desktop/release/*.exe
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.zip
+            apps/desktop/release/*.AppImage
+            apps/desktop/release/*.deb
+          )
+
+          if (( ${#installers[@]} == 0 )); then
+            echo "No desktop installers were produced" >&2
+            exit 1
+          fi
+
+          checksum="apps/desktop/release/SHA256SUMS-${{ runner.os }}.txt"
+          for installer in "${installers[@]}"; do
+            if command -v sha256sum >/dev/null 2>&1; then
+              digest="$(sha256sum "$installer" | awk '{print $1}')"
+            else
+              digest="$(shasum -a 256 "$installer" | awk '{print $1}')"
+            fi
+            printf '%s  %s\n' "$digest" "$(basename "$installer")"
+          done > "$checksum"
+
+          gh release upload "$RELEASE_TAG" "${installers[@]}" "$checksum" --repo "$GITHUB_REPOSITORY" --clobber
+
+  android:
+    needs: [prepare, release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+      - run: npm run package:android
+      - name: Upload Android APK to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          source_path="apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk"
+          release_path="apps/mobile/android/app/build/outputs/apk/debug/COD-${VERSION}-android-debug.apk"
+          checksum="apps/mobile/android/app/build/outputs/apk/debug/SHA256SUMS-Android.txt"
+          cp "$source_path" "$release_path"
+          digest="$(sha256sum "$release_path" | awk '{print $1}')"
+          printf '%s  %s\n' "$digest" "$(basename "$release_path")" > "$checksum"
+          gh release upload "$RELEASE_TAG" "$release_path" "$checksum" --repo "$GITHUB_REPOSITORY" --clobber
+
+  ios-simulator:
+    needs: [prepare, release]
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run package:ios
+      - name: Archive and upload iOS simulator package
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          release_path="apps/mobile/release/COD-${VERSION}-ios-simulator.zip"
+          checksum="apps/mobile/release/SHA256SUMS-iOS-Simulator.txt"
+          ditto -c -k --sequesterRsrc --keepParent apps/mobile/release/ios-simulator/Build/Products/Release-iphonesimulator/App.app "$release_path"
+          unzip -t "$release_path"
+          digest="$(shasum -a 256 "$release_path" | awk '{print $1}')"
+          printf '%s  %s\n' "$digest" "$(basename "$release_path")" > "$checksum"
+          gh release upload "$RELEASE_TAG" "$release_path" "$checksum" --repo "$GITHUB_REPOSITORY" --clobber
+
+  publish-release:
+    needs: [prepare, release, desktop, android, ios-simulator]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish completed prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json url --jq '"Release: " + .url' >> "$GITHUB_STEP_SUMMARY"
