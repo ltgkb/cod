@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { BackHandler, KeyboardAvoidingView, Linking, Platform, StyleSheet, useColorScheme } from 'react-native';
+import { isRunningInExpoGo } from 'expo';
+import Constants from 'expo-constants';
 import { StatusBar } from 'expo-status-bar';
 import * as Clipboard from 'expo-clipboard';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
@@ -10,32 +12,19 @@ import type { NativeHttpRequest, NativeHttpResponse } from '../web/src/runtime';
 
 const controlPlaneUrl = process.env.EXPO_PUBLIC_COD_CONTROL_PLANE_URL ?? 'https://cod.kai.com';
 const hostPlatform = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : undefined;
-const domBootstrap = hostPlatform ? createDomBootstrap(hostPlatform, controlPlaneUrl) : undefined;
+const runningInExpoGo = isRunningInExpoGo();
+
+function getExpoGoDomUri(): string {
+  const debuggerHost = Constants.expoGoConfig?.debuggerHost ?? Constants.expoConfig?.hostUri;
+  if (!debuggerHost) throw new Error('Expo Go did not provide its Metro host');
+  return new URL('/_cod/expo-dom-bootstrap', `http://${debuggerHost}`).href;
+}
 
 function parseHttpUrl(value: string): URL {
   const url = new URL(value);
   if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('Only HTTP and HTTPS URLs are allowed');
   if (url.username || url.password) throw new Error('URLs containing credentials are not allowed');
   return url;
-}
-
-function createDomBootstrap(platform: 'android' | 'ios', apiUrl: string): string {
-  // Expo Go 57.0.3 ships React Native WebView without ExpoDomWebView's native ViewManager.
-  // Its fallback WebView also omits injectedObjectJson on some Android WebView builds, so
-  // polyfill the exact JSON hook that Expo's generated DOM HTML reads at document start.
-  const initialProps = {
-    names: ['nativeRequest', 'cancelNativeRequest', 'openExternalUrl', 'copyText', 'setNativeColorMode'],
-    props: { controlPlaneUrl: apiUrl, hostPlatform: platform },
-  };
-  const injectedObjectJson = JSON.stringify({
-    EXPO_DOM_HOST_OS: platform,
-    initialProps,
-  });
-  return [
-    "if (!window.ReactNativeWebView) { throw new Error('React Native WebView bridge is unavailable'); }",
-    `if (typeof window.ReactNativeWebView.injectedObjectJson !== 'function') { Object.defineProperty(window.ReactNativeWebView, 'injectedObjectJson', { configurable: true, value: function () { return ${JSON.stringify(injectedObjectJson)}; } }); }`,
-    'true;',
-  ].join('\n');
 }
 
 export default function App() {
@@ -116,10 +105,10 @@ export default function App() {
             setNativeColorMode={setNativeColorMode}
             setNativeTopmostUiVisible={setNativeTopmostUiVisible}
             dom={{
-              useExpoDOMWebView: false,
+              useExpoDOMWebView: !runningInExpoGo,
+              overrideUri: runningInExpoGo ? getExpoGoDomUri() : undefined,
               scrollEnabled: false,
               contentInsetAdjustmentBehavior: 'never',
-              injectedJavaScriptBeforeContentLoaded: domBootstrap,
               style: styles.workspace,
             }}
           />
