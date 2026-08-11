@@ -7,7 +7,7 @@
  * These domains are display and attribution aliases. Model traffic continues
  * to use the shared ai.kai.com upstream configured by the control plane.
  */
-export const tokenRetailDomains = [
+const tokenRetailDirectorySnapshot = [
   '135.kai.com',
   'account.kai.com',
   'ander.kai.com',
@@ -97,6 +97,13 @@ export const tokenRetailDomains = [
   'hashrate.kai.com',
   'authtest.kai.com',
 ] as const;
+
+export const nonPublicTokenRetailDomains = ['staging-pmai.kai.com', 'authtest.kai.com'] as const;
+const nonPublicTokenRetailDomainSet = new Set<string>(nonPublicTokenRetailDomains);
+
+// Test and pre-production aliases remain documented in the upstream snapshot,
+// but must never become selectable billing or attribution sources in COD.
+export const tokenRetailDomains = tokenRetailDirectorySnapshot.filter((domain) => !nonPublicTokenRetailDomainSet.has(domain));
 
 export function tokenRetailSourceId(domain: string): string {
   if (!/^[a-z0-9-]+\.kai\.com$/.test(domain)) throw new Error(`Invalid Token retail domain: ${domain}`);

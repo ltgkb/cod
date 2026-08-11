@@ -1003,6 +1003,9 @@ describe('COD workspace', () => {
     expect(screen.getByText('没有匹配的任务')).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('搜索任务'), { target: { value: '' } });
     expect(screen.getByRole('button', { name: /真实同步任务/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByTitle('普通对话'));
+    expect(screen.getByRole('heading', { name: '新建或选择任务', level: 1 })).toBeInTheDocument();
+    expect(screen.getByDisplayValue('不能从目录源调用')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '终端' }));
     expect(screen.getByText('Web 端不会执行或伪造终端结果。请使用 COD Desktop。')).toBeInTheDocument();

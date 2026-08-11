@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { loadConfig } from './config.js';
 import { AiGateway } from './gateway.js';
-import { tokenRetailDomains, tokenRetailSourceId } from './token-retail-directory.js';
+import { nonPublicTokenRetailDomains, tokenRetailDomains, tokenRetailSourceId } from './token-retail-directory.js';
 
 describe('model source gateway', () => {
   it('routes every display source through ai.kai.com and retries an empty answer', async () => {
@@ -30,7 +30,9 @@ describe('model source gateway', () => {
       KAI_API_KEY: 'test-key',
     }), fetcher as typeof fetch);
     const sources = await gateway.listSources();
-    expect(tokenRetailDomains).toHaveLength(88);
+    expect(tokenRetailDomains).toHaveLength(86);
+    expect(nonPublicTokenRetailDomains).toEqual(['staging-pmai.kai.com', 'authtest.kai.com']);
+    for (const domain of nonPublicTokenRetailDomains) expect(tokenRetailDomains).not.toContain(domain);
     expect(sources).toHaveLength(tokenRetailDomains.length + 1);
     expect(new Set(sources.map((source) => source.id)).size).toBe(sources.length);
     expect(sources.every((source) => /^[a-z0-9-]{2,40}$/.test(source.id))).toBe(true);
@@ -44,6 +46,37 @@ describe('model source gateway', () => {
     const toolResponse=await gateway.proxyChat('ai-kai',{model:'glm-5.2',messages:[],tools:[{type:'function',function:{name:'developer__file_write'}}]},'request-tools');
     expect(toolResponse.status).toBe(200);
     expect(chatAttempts).toBe(3);
+  });
+
+  it('keeps client-selected source attribution non-financial in production', () => {
+    expect(() => loadConfig({
+      NODE_ENV: 'production',
+      COD_SESSION_SECRET: 's'.repeat(32),
+      DATABASE_URL: 'postgresql://cod:test@127.0.0.1:5432/cod',
+      COD_DEVELOPMENT_LOGIN_ENABLED: 'false',
+      KAI_API_KEY: 'test-key',
+      TOKEN_RETAIL_COMMISSION_RATE_BPS: '1',
+    })).toThrow('Production source commissions require server-bound attribution');
+    for (const id of ['staging-pmai-kai', 'authtest-kai']) {
+      expect(() => loadConfig({
+        NODE_ENV: 'production',
+        COD_SESSION_SECRET: 's'.repeat(32),
+        DATABASE_URL: 'postgresql://cod:test@127.0.0.1:5432/cod',
+        COD_DEVELOPMENT_LOGIN_ENABLED: 'false',
+        KAI_API_KEY: 'test-key',
+        COD_MODEL_SOURCES_JSON: JSON.stringify([{ id, label: id.toUpperCase() }]),
+      })).toThrow('is non-public');
+    }
+    for (const [index, label] of ['STAGING-PMAI.KAI.COM', 'AUTHTEST.KAI.COM'].entries()) {
+      expect(() => loadConfig({
+        NODE_ENV: 'production',
+        COD_SESSION_SECRET: 's'.repeat(32),
+        DATABASE_URL: 'postgresql://cod:test@127.0.0.1:5432/cod',
+        COD_DEVELOPMENT_LOGIN_ENABLED: 'false',
+        KAI_API_KEY: 'test-key',
+        COD_MODEL_SOURCES_JSON: JSON.stringify([{ id: `public-alias-${index}`, label }]),
+      })).toThrow('is non-public');
+    }
   });
 
   it('uses upstream SSE to keep long generations alive and normalizes the final answer for billing', async () => {

@@ -13,6 +13,13 @@ export interface CatalogModelGroup {
   callable: boolean;
 }
 
+export interface CallableModelTarget {
+  key: string;
+  sourceId: string;
+  sourceLabel: string;
+  model: ModelInfo;
+}
+
 function modelPriceKey(model: ModelInfo): string {
   return [model.id, model.contextWindow, model.inputPricePerMillionCents, model.outputPricePerMillionCents].join('\u0000');
 }
@@ -40,4 +47,19 @@ export function filterModelCatalog(groups: CatalogModelGroup[], query: string): 
   if (!normalized) return groups;
   return groups.filter((group) =>
     `${group.model.label} ${group.model.id} ${group.sources.map((source) => source.label).join(' ')}`.toLowerCase().includes(normalized));
+}
+
+export function uniqueCallableModels(sources: PublicModelSourceInfo[]): CallableModelTarget[] {
+  const identities = new Set<string>();
+  const targets: CallableModelTarget[] = [];
+  for (const source of sources) {
+    if (!source.callable) continue;
+    for (const model of source.models) {
+      const identity = [source.upstreamSourceId, modelPriceKey(model)].join('\u0000');
+      if (identities.has(identity)) continue;
+      identities.add(identity);
+      targets.push({ key: `${source.id}::${model.id}`, sourceId: source.id, sourceLabel: source.label, model });
+    }
+  }
+  return targets;
 }

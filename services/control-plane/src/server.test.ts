@@ -189,6 +189,7 @@ describe('control-plane production rules', () => {
     expect(response.status).toBe(200);
     const catalog = await response.json() as Array<{ id: string; callable: boolean; note:string; models: Array<{ id: string; inputPricePerMillionCents: number; outputPricePerMillionCents: number }> }>;
     expect(catalog).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'ai-kai', callable: true }),expect.objectContaining({id:'chase-kai',callable:true})]));
+    expect(catalog.some((source)=>['authtest-kai','staging-pmai-kai'].includes(source.id))).toBe(false);
     expect(catalog[0]?.models[0]).toEqual(expect.objectContaining({ id: expect.any(String), inputPricePerMillionCents: expect.any(Number), outputPricePerMillionCents: expect.any(Number) }));
     expect(catalog.some((source)=>Object.prototype.hasOwnProperty.call(source,'commissionRateBps'))).toBe(false);
     expect(JSON.stringify(catalog)).not.toMatch(/api[_-]?key|authorization|secret|3\.75%|渠道分成|分成比例/i);
@@ -196,6 +197,7 @@ describe('control-plane production rules', () => {
     const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com',password:'Password123'})});
     const {token}=await login.json() as {token:string};
     const internalSources=await (await fetch(`${base}/api/model-sources`,{headers:{authorization:`Bearer ${token}`}})).json() as Array<{id:string;commissionRateBps:number;note:string}>;
+    expect(internalSources.some((source)=>['authtest-kai','staging-pmai-kai'].includes(source.id))).toBe(false);
     expect(internalSources.find((source)=>source.id==='chase-kai')).toMatchObject({commissionRateBps:375});
     expect(internalSources.find((source)=>source.id==='chase-kai')?.note).not.toContain('3.75%');
   });

@@ -1,5 +1,8 @@
 import { existsSync } from 'node:fs';
-import { tokenRetailDomains, tokenRetailSourceId } from './token-retail-directory.js';
+import { nonPublicTokenRetailDomains, tokenRetailDomains, tokenRetailSourceId } from './token-retail-directory.js';
+
+const nonPublicTokenRetailSourceIds = new Set(nonPublicTokenRetailDomains.map(tokenRetailSourceId));
+const nonPublicTokenRetailLabels = new Set<string>(nonPublicTokenRetailDomains);
 
 export interface ModelSourceConfig {
   id: string;
@@ -126,6 +129,7 @@ function loadModelSources(environment: NodeJS.ProcessEnv): ModelSourceConfig[] {
     const id = String(source.id ?? '').trim(); const label = String(source.label ?? '').trim();
     const commissionRateBps = Number(source.commissionRateBps ?? 0);
     if (!/^[a-z0-9-]{2,40}$/.test(id) || !label || !Number.isInteger(commissionRateBps) || commissionRateBps < 0 || commissionRateBps > 10_000) throw new Error(`Model source ${index} is incomplete`);
+    if (nonPublicTokenRetailSourceIds.has(id) || nonPublicTokenRetailLabels.has(label.toLowerCase())) throw new Error(`Model source ${index} is non-public`);
     return {
       id, label, upstreamSourceId: 'ai-kai', baseUrl: aiBaseUrl, catalogUrl, statusUrl,
       paymentDirection: `钱包/额度 → ai.kai.com · 归因 ${label}`, commissionRateBps, apiKey: environment.KAI_API_KEY ?? null,
@@ -214,6 +218,10 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
       feishuBindings = Object.fromEntries(Object.entries(parsed).map(([key, value]) => [key, String(value).trim().toLowerCase()]));
     } catch { throw new Error('COD_FEISHU_BINDINGS_JSON must be a JSON object'); }
   }
+  const modelSources = loadModelSources(environment);
+  if (production && modelSources.some((source) => source.commissionRateBps !== 0)) {
+    throw new Error('Production source commissions require server-bound attribution');
+  }
   return {
     port: Number(environment.COD_CONTROL_PORT ?? 8787),
     sessionSecret,
@@ -236,7 +244,7 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     feishuAppSecret: environment.COD_FEISHU_APP_SECRET ?? null,
     feishuBindings,
     demoMode,
-    modelSources: loadModelSources(environment),
+    modelSources,
     wikiBaseUrl: environment.KAI_WIKI_BASE_URL ?? 'https://wiki.kai.com',
     wikiSearchEndpoint: environment.KAI_WIKI_SEARCH_ENDPOINT ?? null,
     wikiApiKey: environment.KAI_WIKI_API_KEY ?? null,

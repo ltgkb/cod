@@ -85,7 +85,7 @@ import {
 } from './api';
 import { hasDesktopBridge, loadProject, openProject, readProjectFile } from './desktop';
 import { chatFailureMessage } from './chat-errors';
-import { filterModelCatalog, groupModelCatalog } from './model-catalog';
+import { filterModelCatalog, groupModelCatalog, uniqueCallableModels } from './model-catalog';
 import {
   permissionOptionLabel,
   permissionOptionsRequirePersistentWarning,
@@ -472,7 +472,7 @@ export function App() {
   const selectedSource = session?.sources.find((source) => source.id === selectedSourceId) ?? session?.sources[0] ?? null;
   const sourceModels = selectedSource?.models ?? [];
   const selectedModelInfo = sourceModels.find((model) => model.id === selectedModel) ?? sourceModels[0] ?? null;
-  const callableModels = useMemo(() => session?.sources.flatMap((source) => source.callable ? source.models.map((model) => ({ key: `${source.id}::${model.id}`, sourceId: source.id, sourceLabel: source.label, model })) : []) ?? [], [session]);
+  const callableModels = useMemo(() => uniqueCallableModels(session?.sources ?? []), [session]);
   const compareTargets = callableModels.filter((target) => compareModelKeys.includes(target.key));
   const onlineDesktopDevices = useMemo(() => devices.filter((device) => device.status === 'online' && !['web', 'mobile'].includes(device.platform)), [devices]);
   const activeMessages = activeTaskId ? messagesByTask[activeTaskId] ?? [] : [];
@@ -531,8 +531,9 @@ export function App() {
     const storedModel = nextSource ? storageGet(`cod.model.${nextSource.id}`) : null;
     setSelectedModel(nextSource?.models.find((model) => model.id === storedModel)?.id ?? nextSource?.models[0]?.id ?? 'coder-pro');
     setCompareModelKeys((current) => {
-      const valid=current.filter((key)=>nextSession.sources.some((source)=>source.callable&&source.models.some((model)=>`${source.id}::${model.id}`===key)));
-      return valid.length>=2?valid:nextSession.sources.flatMap((source)=>source.callable?source.models.map((model)=>`${source.id}::${model.id}`):[]).slice(0,2);
+      const available=uniqueCallableModels(nextSession.sources);
+      const valid=current.filter((key)=>available.some((target)=>target.key===key));
+      return valid.length>=2?valid:available.map((target)=>target.key).slice(0,2);
     });
   };
 
@@ -716,6 +717,7 @@ export function App() {
   };
   const selectWorkspaceMode=(nextMode:WorkspaceMode)=>{
     if(nextMode==='code'&&!hasDesktopBridge()){setMode('chat');setNotice('代码执行需要 COD Desktop 和已选择的本机项目；Web 端不会把普通聊天标记为代码任务完成。');return;}
+    if(nextMode==='chat'&&activeTask&&activeTask.deviceId!==currentDeviceId)setActiveTaskId(null);
     setMode(nextMode);
   };
   const handleModelChange = (modelId: string) => { setSelectedModel(modelId); storageSet(`cod.model.${selectedSourceId}`, modelId); };
