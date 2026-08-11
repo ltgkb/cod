@@ -139,7 +139,10 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
   const databaseUrl = environment.DATABASE_URL ?? null;
   const pilotAccessCodeHash = environment.COD_PILOT_ACCESS_CODE_HASH ?? null;
   const registrationEnabled = environment.COD_REGISTRATION_ENABLED === undefined ? !production : environment.COD_REGISTRATION_ENABLED === 'true';
-  const inviteCodeRequired = environment.COD_INVITE_CODE_REQUIRED === undefined ? production : environment.COD_INVITE_CODE_REQUIRED === 'true';
+  // Invitation codes are a referral attribution mechanism, not an account gate.
+  // Keep the capability field for older clients, but registration must remain open
+  // when a code is omitted in every environment.
+  const inviteCodeRequired = false;
   const developmentLoginEnabled = environment.COD_DEVELOPMENT_LOGIN_ENABLED === 'true' || !production;
   const demoMode = environment.COD_DEMO_MODE === 'true' || !production;
   const paymentWebhookSecret = environment.COD_PAYMENT_WEBHOOK_SECRET ?? null;

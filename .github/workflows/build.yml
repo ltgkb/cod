@@ -60,20 +60,17 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: 21
       - run: npm ci
-      - run: npm run package:android
+      - run: npm run doctor -w @cod/mobile
+      - run: npm run export:android
       - uses: actions/upload-artifact@v7
         with:
-          name: cod-android-debug
-          path: apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          name: cod-android-expo-bundle
+          path: apps/mobile/release/android
           if-no-files-found: error
 
-  ios-simulator:
-    runs-on: macos-latest
+  ios:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -81,10 +78,9 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run package:ios
-      - run: ditto -c -k --sequesterRsrc --keepParent apps/mobile/release/ios-simulator/Build/Products/Release-iphonesimulator/App.app apps/mobile/release/COD-ios-simulator.zip
+      - run: npm run export:ios
       - uses: actions/upload-artifact@v7
         with:
-          name: cod-ios-simulator
-          path: apps/mobile/release/COD-ios-simulator.zip
+          name: cod-ios-expo-bundle
+          path: apps/mobile/release/ios
           if-no-files-found: error
