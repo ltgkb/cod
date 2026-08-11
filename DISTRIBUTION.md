@@ -17,13 +17,19 @@ npm run package:ios
 
 The desktop packaging command automatically selects the Goose binary matching the build runner's operating system and CPU architecture. A manually supplied release binary can be selected with `COD_GOOSE_BINARY`.
 
-GitHub Actions builds and retains these artifacts on native runners:
+The manually dispatched `Publish installers` GitHub Actions workflow publishes a
+versioned GitHub prerelease containing these native-runner builds:
 
 - macOS ARM installer (`.dmg`) and portable archive (`.zip`)
 - Windows installer (`.exe`)
 - Linux AppImage and Debian package
 - Android debug-signed APK
 - iOS Simulator application archive
+
+Packages are uploaded directly to the draft release, so they do not consume
+GitHub Actions artifact storage. The draft is published only after every build
+and verification job succeeds. If a job fails, the incomplete draft remains
+private until the workflow is rerun or the draft is removed.
 
 ## Signing boundary
 

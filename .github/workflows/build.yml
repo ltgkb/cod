@@ -3,7 +3,6 @@ name: build-and-package
 on:
   push:
     branches: [main]
-  workflow_dispatch:
 
 concurrency:
   group: build-and-package-${{ github.ref }}
@@ -48,21 +47,6 @@ jobs:
         run: |
           codesign --verify --deep --strict --verbose=2 apps/desktop/release/mac-arm64/cod.app
           hdiutil verify apps/desktop/release/COD-*-mac-arm64.dmg
-      - name: Upload desktop installers
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v7
-        with:
-          name: cod-desktop-${{ runner.os }}
-          path: |
-            apps/desktop/release/*.exe
-            apps/desktop/release/*.exe.blockmap
-            apps/desktop/release/*.dmg
-            apps/desktop/release/*.dmg.blockmap
-            apps/desktop/release/*.AppImage
-            apps/desktop/release/*.deb
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 1
 
   android:
     runs-on: ubuntu-latest
@@ -77,15 +61,6 @@ jobs:
           java-version: 21
       - run: npm ci
       - run: npm run package:android
-      - name: Upload Android APK
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v7
-        with:
-          name: cod-android-debug
-          path: apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 1
 
   ios-simulator:
     runs-on: macos-latest
@@ -96,13 +71,3 @@ jobs:
           node-version: 22
       - run: npm ci
       - run: npm run package:ios
-      - run: ditto -c -k --sequesterRsrc --keepParent apps/mobile/release/ios-simulator/Build/Products/Release-iphonesimulator/App.app apps/mobile/release/COD-ios-simulator.zip
-      - name: Upload iOS simulator package
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v7
-        with:
-          name: cod-ios-simulator
-          path: apps/mobile/release/COD-ios-simulator.zip
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 1
