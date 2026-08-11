@@ -18,8 +18,9 @@ describe('COD desktop execution guard',()=>{
   });
 
   it('requires a mutation tool for creation and modification requests',()=>{
-    expect(()=>validateCodeRun('帮我创建 2048 小游戏',result({mutationTools:0}))).toThrow('没有执行文件修改');
+    expect(()=>validateCodeRun('帮我创建 2048 小游戏',result({mutationTools:0}))).toThrow('没有检测到真实文件改动');
     expect(()=>validateCodeRun('帮我创建 2048 小游戏',result({mutationTools:1}))).not.toThrow();
+    expect(()=>validateCodeRun('帮我调整并补全 2048 小游戏',result({mutationTools:0}),true)).not.toThrow();
     expect(()=>validateCodeRun('解释这个项目',result({mutationTools:0}))).not.toThrow();
   });
 

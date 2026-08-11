@@ -27,6 +27,7 @@ interface WechatTransaction {
 }
 
 const paymentDescription = 'COD 钱包充值';
+const merchantRequestTimeoutMs = 15_000;
 const timestampSeconds = () => Math.floor(Date.now() / 1000);
 const pem = (path: string) => readFileSync(path, 'utf8');
 
@@ -83,7 +84,12 @@ export class OfficialPaymentService {
     const nonce = randomBytes(16).toString('hex');
     const signature = rsaSign(`POST\n${path}\n${timestamp}\n${nonce}\n${body}\n`, config.merchantPrivateKeyPath);
     const authorization = `WECHATPAY2-SHA256-RSA2048 mchid="${config.mchId}",nonce_str="${nonce}",timestamp="${timestamp}",serial_no="${config.merchantSerialNo}",signature="${signature}"`;
-    const response = await this.fetcher(`https://api.mch.weixin.qq.com${path}`, { method: 'POST', headers: { authorization, accept: 'application/json', 'content-type': 'application/json', 'user-agent': 'COD/1.0' }, body });
+    let response: Response;
+    try {
+      response = await this.fetcher(`https://api.mch.weixin.qq.com${path}`, { method: 'POST', headers: { authorization, accept: 'application/json', 'content-type': 'application/json', 'user-agent': 'COD/1.0' }, body, signal: AbortSignal.timeout(merchantRequestTimeoutMs) });
+    } catch {
+      throw new HttpError('微信支付下单超时，请稍后重试', 502, 'wechat_payment_timeout');
+    }
     const rawResponse = await response.text();
     const responseTimestamp = response.headers.get('wechatpay-timestamp') ?? '';
     const responseNonce = response.headers.get('wechatpay-nonce') ?? '';

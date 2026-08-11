@@ -53,7 +53,7 @@ export interface RemoteTask {
 
 export interface LedgerEntry {
   id: string;
-  type: 'topup' | 'usage' | 'pack_purchase' | 'credit_grant' | 'trial_credit';
+  type: 'topup' | 'usage' | 'pack_purchase' | 'credit_grant' | 'trial_credit' | 'opening_balance';
   amountCents: number;
   walletAmountCents: number;
   creditAmountCents: number;
@@ -215,14 +215,16 @@ export async function loginCod(email: string, password: string): Promise<CodSess
     method: 'POST',
     body: JSON.stringify({ email, password }),
   });
-  storageSet(sessionStorageKey, login.token);
   return hydrateSession(login.token);
 }
 
 export async function registerCod(input:{email:string;password:string;inviteCode?:string;legacyAccessCode?:string}):Promise<CodSession>{
   const registration=await request<{token:string}>('/api/auth/register',undefined,{method:'POST',body:JSON.stringify(input)});
-  storageSet(sessionStorageKey,registration.token);
   return hydrateSession(registration.token);
+}
+
+export function persistCodSession(token:string):void{
+  storageSet(sessionStorageKey,token);
 }
 
 export function logoutCod(): void {

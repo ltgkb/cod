@@ -16,6 +16,7 @@ describe('wallet database contract', () => {
     const ledger = await database.getLedger(principal);
     expect(ledger).toHaveLength(3);
     expect(ledger[0]).toMatchObject({ sourceId: 'ai-kai', model: 'coder-pro', paymentDirection: '钱包 → ai.kai.com', walletAmountCents: 0, creditAmountCents: -120 });
+    expect(ledger.every((entry) => entry.amountCents === entry.walletAmountCents + entry.creditAmountCents)).toBe(true);
   });
 
   it('reserves, settles, and releases model usage without leaking balance', async () => {
@@ -24,6 +25,7 @@ describe('wallet database contract', () => {
     expect((await database.getAccount(principal)).balanceCents).toBe(0);
     await database.settleUsage(principal, 'reserve-1', { idempotencyKey: 'settle-1', taskId: 'chat', sourceId: 'ai-kai', paymentDirection: '钱包 → ai.kai.com', model: 'coder-pro', inputTokens: 10, outputTokens: 20, costCents: 40 });
     expect((await database.getCreditSummary(principal)).availableCents).toBe(960);
+    expect((await database.getLedger(principal)).every((entry) => entry.amountCents === entry.walletAmountCents + entry.creditAmountCents)).toBe(true);
     await database.reserveUsage(principal, 'reserve-duplicate', 100);
     await database.settleUsage(principal, 'reserve-duplicate', { idempotencyKey: 'settle-1', taskId: 'chat', sourceId: 'ai-kai', paymentDirection: '钱包 → ai.kai.com', model: 'coder-pro', inputTokens: 10, outputTokens: 20, costCents: 40 });
     expect((await database.getCreditSummary(principal)).availableCents).toBe(960);
@@ -31,6 +33,20 @@ describe('wallet database contract', () => {
     await database.reserveUsage(principal, 'reserve-2', 100);
     await database.releaseUsage(principal, 'reserve-2');
     expect((await database.getCreditSummary(principal)).availableCents).toBe(960);
+  });
+
+  it('commits a cached chat response and its completion audit once with usage',async()=>{
+    const database=new MemoryDatabase();const requestKey='memory-chat-request';const fingerprint='a'.repeat(64);
+    expect(await database.claimChatRequest(principal,requestKey,fingerprint)).toEqual({state:'claimed'});
+    await database.reserveUsage(principal,'memory-chat-reservation',100);
+    const event={idempotencyKey:`chat:${requestKey}:${fingerprint}`,taskId:'chat',sourceId:'ai-kai',paymentDirection:'钱包 → ai.kai.com',model:'coder-pro',inputTokens:10,outputTokens:20,costCents:40};
+    const completion={requestKey,fingerprint,responsePayload:{choices:[{message:{content:'完成'}}]},audit:{entityId:'coder-pro',data:{sourceId:'ai-kai',inputTokens:10,outputTokens:20}}};
+    const first=await database.settleUsage(principal,'memory-chat-reservation',event,completion);
+    const duplicate=await database.settleUsage(principal,'memory-chat-reservation',event,completion);
+    expect(duplicate.id).toBe(first.id);
+    expect(await database.claimChatRequest(principal,requestKey,fingerprint)).toMatchObject({state:'complete',responsePayload:completion.responsePayload});
+    expect((await database.listAudit(principal,20)).filter((entry)=>entry.action==='chat.complete')).toEqual([expect.objectContaining({entityType:'model',entityId:'coder-pro',data:completion.audit.data})]);
+    expect(await database.getLedger(principal)).toHaveLength(2);
   });
 
   it('rejects spending above the wallet balance', async () => {
@@ -41,8 +57,8 @@ describe('wallet database contract', () => {
   it('records admin test usage without consuming wallet or credits', async () => {
     const database = new MemoryDatabase(); const admin: Principal = { ...principal, userId: 'admin', email: 'admin@kai.com', role: 'admin' };
     await database.reserveUsage(admin, 'admin-reservation', 900_000);
-    const entry = await database.settleUsage(admin, 'admin-reservation', { idempotencyKey: 'admin-usage', taskId: 'chat', sourceId: 'ai-kai', paymentDirection: '钱包 → ai.kai.com', model: 'coder-pro', inputTokens: 100, outputTokens: 200, costCents: 900_000 });
-    expect(entry).toMatchObject({ amountCents: 0, walletAmountCents: 0, creditAmountCents: 0, paymentDirection: '管理员测试免计费' });
+    const entry = await database.settleUsage(admin, 'admin-reservation', { idempotencyKey: 'admin-usage', taskId: 'chat', sourceId: 'ai-kai', paymentDirection: '钱包 → ai.kai.com', model: 'coder-pro', inputTokens: 100, outputTokens: 200, costCents: 900_000, commissionRateBps: 2_000, commissionCents: 180_000 });
+    expect(entry).toMatchObject({ amountCents: 0, walletAmountCents: 0, creditAmountCents: 0, commissionRateBps: 0, commissionCents: 0, paymentDirection: '管理员测试免计费' });
     expect(await database.getCreditSummary(admin)).toMatchObject({ availableCents: 1000 });
     expect(await database.getAccount(admin)).toMatchObject({ role: 'admin', billingExempt: true });
   });

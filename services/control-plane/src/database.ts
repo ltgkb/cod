@@ -34,7 +34,7 @@ export interface ReferralSummary {
 
 export interface LedgerEntry {
   id: string;
-  type: 'topup' | 'usage' | 'pack_purchase' | 'credit_grant' | 'trial_credit';
+  type: 'topup' | 'usage' | 'pack_purchase' | 'credit_grant' | 'trial_credit' | 'opening_balance';
   amountCents: number;
   walletAmountCents: number;
   creditAmountCents: number;
@@ -142,6 +142,23 @@ export interface AuditEntry {
   createdAt: string;
 }
 
+export interface ChatRequestCompletion {
+  requestKey: string;
+  fingerprint: string;
+  responsePayload: Record<string, unknown>;
+  audit: {
+    entityId: string;
+    data: unknown;
+  };
+}
+
+export type ChatRequestClaim =
+  | { state: 'claimed' }
+  | { state: 'pending' }
+  | { state: 'complete'; responsePayload: Record<string, unknown> };
+
+export const CHAT_RESPONSE_CACHE_MAX_BYTES = 512 * 1024;
+
 export interface CodDatabase {
   initialize(): Promise<void>;
   health(): Promise<boolean>;
@@ -158,8 +175,10 @@ export interface CodDatabase {
   getPaymentOrder(principal: Principal, orderId: string): Promise<PaymentOrder>;
   completePaymentOrder(event: PaymentCompletion): Promise<{ order: PaymentOrder; entry: LedgerEntry }>;
   recordUsage(principal: Principal, event: UsageEvent): Promise<LedgerEntry>;
+  claimChatRequest(principal: Principal, requestKey: string, fingerprint: string): Promise<ChatRequestClaim>;
+  failChatRequest(principal: Principal, requestKey: string, fingerprint: string): Promise<void>;
   reserveUsage(principal: Principal, reservationId: string, amountCents: number): Promise<void>;
-  settleUsage(principal: Principal, reservationId: string, event: UsageEvent): Promise<LedgerEntry>;
+  settleUsage(principal: Principal, reservationId: string, event: UsageEvent, completion?: ChatRequestCompletion): Promise<LedgerEntry>;
   releaseUsage(principal: Principal, reservationId: string): Promise<void>;
   createComputeRequest(principal: Principal, input: ComputeRequestInput, idempotencyKey: string): Promise<ComputeRequest>;
   listComputeRequests(principal: Principal): Promise<ComputeRequest[]>;
@@ -201,6 +220,112 @@ export function validateTaskOutcome(status: TaskStatus, result: string | null, e
   if (status === 'failed' && !error?.trim()) throw new HttpError('Failed tasks require an error', 400, 'task_error_required');
 }
 
+export const legacyInviteCodeBackfillMigration = `
+UPDATE cod_users
+SET invite_code='KAI-' || upper(substr(md5(tenant_id || ':' || user_id),1,20))
+WHERE invite_code IS NULL;
+`;
+
+export const ledgerAllocationBackfillMigration = `
+UPDATE cod_ledger
+SET wallet_amount_cents=amount_cents
+WHERE wallet_amount_cents=0 AND credit_amount_cents=0 AND amount_cents<>0
+  AND type IN ('topup','usage','pack_purchase');
+UPDATE cod_ledger
+SET credit_amount_cents=amount_cents
+WHERE wallet_amount_cents=0 AND credit_amount_cents=0 AND amount_cents<>0
+  AND type IN ('credit_grant','trial_credit');
+DO $ledger_allocation$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='cod_ledger'::regclass AND conname='cod_ledger_allocation_check'
+  ) THEN
+    ALTER TABLE cod_ledger ADD CONSTRAINT cod_ledger_allocation_check
+      CHECK (amount_cents=wallet_amount_cents+credit_amount_cents) NOT VALID;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='cod_ledger'::regclass AND conname='cod_ledger_allocation_check' AND NOT convalidated
+  ) THEN
+    ALTER TABLE cod_ledger VALIDATE CONSTRAINT cod_ledger_allocation_check;
+  END IF;
+END
+$ledger_allocation$;
+`;
+
+export const ledgerTypeConstraintMigration = `
+DO $ledger_type$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='cod_ledger'::regclass AND conname='cod_ledger_type_check'
+      AND position('opening_balance' in pg_get_constraintdef(oid))=0
+  ) THEN
+    ALTER TABLE cod_ledger DROP CONSTRAINT cod_ledger_type_check;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='cod_ledger'::regclass AND conname='cod_ledger_type_check'
+  ) THEN
+    ALTER TABLE cod_ledger ADD CONSTRAINT cod_ledger_type_check
+      CHECK (type IN ('topup','usage','pack_purchase','credit_grant','trial_credit','opening_balance')) NOT VALID;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='cod_ledger'::regclass AND conname='cod_ledger_type_check' AND NOT convalidated
+  ) THEN
+    ALTER TABLE cod_ledger VALIDATE CONSTRAINT cod_ledger_type_check;
+  END IF;
+END
+$ledger_type$;
+`;
+
+export const walletOpeningBalanceMigration = `
+WITH wallet_ledger AS (
+  SELECT tenant_id,user_id,sum(wallet_amount_cents) AS wallet_net
+  FROM cod_ledger GROUP BY tenant_id,user_id
+), reserved_wallet AS (
+  SELECT tenant_id,user_id,sum(wallet_cents) AS reserved_cents
+  FROM cod_usage_reservations WHERE status='reserved' GROUP BY tenant_id,user_id
+), opening_balances AS (
+  SELECT u.tenant_id,u.user_id,
+    u.balance_cents+coalesce(r.reserved_cents,0)-coalesce(l.wallet_net,0) AS opening_cents
+  FROM cod_users u
+  LEFT JOIN wallet_ledger l USING (tenant_id,user_id)
+  LEFT JOIN reserved_wallet r USING (tenant_id,user_id)
+)
+INSERT INTO cod_ledger (
+  id,tenant_id,user_id,type,amount_cents,wallet_amount_cents,credit_amount_cents,
+  reference,idempotency_key,payment_direction
+)
+SELECT md5(tenant_id || ':' || user_id || ':opening-balance-v1')::uuid,
+  tenant_id,user_id,'opening_balance',opening_cents,opening_cents,0,
+  '历史钱包期初余额迁移','opening-balance-v1','历史期初余额 → COD 钱包'
+FROM opening_balances
+WHERE opening_cents<>0
+ON CONFLICT (tenant_id,user_id,idempotency_key) DO NOTHING;
+`;
+
+export const chatRequestSchemaMigration = `
+CREATE TABLE IF NOT EXISTS cod_chat_requests (
+  tenant_id text NOT NULL, user_id text NOT NULL, request_key text NOT NULL,
+  request_fingerprint text NOT NULL, status text NOT NULL CHECK (status IN ('pending','complete','failed')),
+  response_payload jsonb, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz NOT NULL DEFAULT (now()+interval '1 hour'),
+  PRIMARY KEY (tenant_id,user_id,request_key),
+  CHECK (char_length(request_key) BETWEEN 1 AND 240),
+  CHECK (request_fingerprint ~ '^[a-f0-9]{64}$'),
+  CHECK ((status='complete')=(response_payload IS NOT NULL))
+);
+ALTER TABLE cod_chat_requests ADD COLUMN IF NOT EXISTS expires_at timestamptz;
+UPDATE cod_chat_requests SET expires_at=CASE WHEN status='complete' THEN updated_at+interval '24 hours' ELSE updated_at+interval '1 hour' END WHERE expires_at IS NULL;
+ALTER TABLE cod_chat_requests ALTER COLUMN expires_at SET DEFAULT (now()+interval '1 hour');
+ALTER TABLE cod_chat_requests ALTER COLUMN expires_at SET NOT NULL;
+CREATE INDEX IF NOT EXISTS cod_chat_requests_owner_expiry_idx ON cod_chat_requests(tenant_id,user_id,expires_at);
+CREATE INDEX IF NOT EXISTS cod_chat_requests_expiry_idx ON cod_chat_requests(expires_at);
+`;
+
 const schema = `
 CREATE TABLE IF NOT EXISTS cod_users (
   tenant_id text NOT NULL, user_id text NOT NULL, email text NOT NULL, display_name text NOT NULL,
@@ -215,6 +340,7 @@ ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS referred_by_user_id text;
 ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS referral_code_used text;
 ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS referral_commission_rate_bps integer NOT NULL DEFAULT 0 CHECK (referral_commission_rate_bps >= 0 AND referral_commission_rate_bps <= 10000);
 ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'member' CHECK (role IN ('member','admin'));
+${legacyInviteCodeBackfillMigration}
 CREATE UNIQUE INDEX IF NOT EXISTS cod_users_email_global_unique ON cod_users (lower(email));
 CREATE UNIQUE INDEX IF NOT EXISTS cod_users_invite_code_unique ON cod_users (upper(invite_code)) WHERE invite_code IS NOT NULL;
 CREATE TABLE IF NOT EXISTS cod_ledger (
@@ -222,8 +348,7 @@ CREATE TABLE IF NOT EXISTS cod_ledger (
   amount_cents bigint NOT NULL, reference text NOT NULL, idempotency_key text NOT NULL, source_id text, model_id text, payment_direction text, created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (tenant_id, user_id, idempotency_key)
 );
-ALTER TABLE cod_ledger DROP CONSTRAINT IF EXISTS cod_ledger_type_check;
-ALTER TABLE cod_ledger ADD CONSTRAINT cod_ledger_type_check CHECK (type IN ('topup','usage','pack_purchase','credit_grant','trial_credit'));
+${ledgerTypeConstraintMigration}
 ALTER TABLE cod_ledger ADD COLUMN IF NOT EXISTS source_id text;
 ALTER TABLE cod_ledger ADD COLUMN IF NOT EXISTS upstream_source_id text;
 ALTER TABLE cod_ledger ADD COLUMN IF NOT EXISTS model_id text;
@@ -232,6 +357,7 @@ ALTER TABLE cod_ledger ADD COLUMN IF NOT EXISTS commission_rate_bps integer NOT 
 ALTER TABLE cod_ledger ADD COLUMN IF NOT EXISTS commission_cents bigint NOT NULL DEFAULT 0;
 ALTER TABLE cod_ledger ADD COLUMN IF NOT EXISTS wallet_amount_cents bigint NOT NULL DEFAULT 0;
 ALTER TABLE cod_ledger ADD COLUMN IF NOT EXISTS credit_amount_cents bigint NOT NULL DEFAULT 0;
+${ledgerAllocationBackfillMigration}
 CREATE TABLE IF NOT EXISTS cod_credit_grants (
   id uuid PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL, pack_id text NOT NULL, name text NOT NULL,
   purchase_price_cents bigint NOT NULL CHECK (purchase_price_cents >= 0), original_cents bigint NOT NULL CHECK (original_cents > 0),
@@ -250,6 +376,8 @@ UPDATE cod_usage_reservations SET wallet_cents=amount_cents WHERE wallet_cents I
 ALTER TABLE cod_usage_reservations ALTER COLUMN wallet_cents SET DEFAULT 0;
 ALTER TABLE cod_usage_reservations ALTER COLUMN wallet_cents SET NOT NULL;
 ALTER TABLE cod_usage_reservations ADD COLUMN IF NOT EXISTS grant_allocations jsonb NOT NULL DEFAULT '[]';
+${chatRequestSchemaMigration}
+${walletOpeningBalanceMigration}
 CREATE TABLE IF NOT EXISTS cod_payment_orders (
   id uuid PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL,
   amount_cents bigint NOT NULL CHECK (amount_cents >= 100), currency text NOT NULL CHECK (currency = 'CNY'),
@@ -322,6 +450,10 @@ const paymentOrderFromRow = (row: Record<string, unknown>): PaymentOrder => ({ i
 const computeRequestFromRow = (row: Record<string, unknown>): ComputeRequest => {
   const payload = row.payload && typeof row.payload === 'object' ? row.payload as ComputeRequestInput : {} as ComputeRequestInput;
   return { ...payload, id: String(row.id), email: String(row.email), kind: row.kind as ComputeRequest['kind'], offerId: row.offer_id ? String(row.offer_id) : null, durationHours: payload.durationHours ?? null, termMonths: payload.termMonths ?? null, status: row.status as ComputeRequest['status'], createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString() };
+};
+const validateChatRequestIdentity = (requestKey: string, fingerprint: string): void => {
+  if (!requestKey || requestKey.length > 240) throw new HttpError('Chat request key is invalid', 400, 'invalid_idempotency_key');
+  if (!/^[a-f0-9]{64}$/.test(fingerprint)) throw new HttpError('Chat request fingerprint is invalid', 400, 'invalid_request_fingerprint');
 };
 const deviceFromRow = (row: Record<string, unknown>): DeviceRecord => {
   const lastSeenAt = new Date(String(row.last_seen_at)).toISOString();
@@ -478,10 +610,58 @@ export class PostgresDatabase implements CodDatabase {
     return this.transaction(async (client) => {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`${p.tenantId}:${p.userId}:${event.idempotencyKey}`]);
       const existing=await client.query('SELECT * FROM cod_ledger WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3',[p.tenantId,p.userId,event.idempotencyKey]); if(existing.rows[0]) return ledgerFromRow(existing.rows[0]);
-      const billedEvent=p.role==='admin'?{...event,costCents:0,paymentDirection:'管理员测试免计费'}:event;
+      const billedEvent=p.role==='admin'?{...event,costCents:0,paymentDirection:'管理员测试免计费',commissionRateBps:0,commissionCents:0}:event;
       const allocation=await this.allocateFunds(client,p,billedEvent.costCents);
       const creditCents=allocation.grantAllocations.reduce((total,item)=>total+item.amountCents,0);
       return this.insertUsageLedger(client,p,billedEvent,allocation.walletCents,creditCents);
+    });
+  }
+  async claimChatRequest(p: Principal, requestKey: string, fingerprint: string): Promise<ChatRequestClaim> {
+    validateChatRequestIdentity(requestKey, fingerprint);
+    return this.transaction(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`chat-request:${p.tenantId}:${p.userId}:${requestKey}`]);
+      await client.query(`WITH expired AS (
+        SELECT ctid FROM cod_chat_requests WHERE expires_at<=now() ORDER BY expires_at LIMIT 1000
+      ) DELETE FROM cod_chat_requests WHERE ctid IN (SELECT ctid FROM expired)`);
+      const existing = await client.query(
+        'SELECT request_fingerprint,status,response_payload FROM cod_chat_requests WHERE tenant_id=$1 AND user_id=$2 AND request_key=$3 FOR UPDATE',
+        [p.tenantId,p.userId,requestKey],
+      );
+      const row = existing.rows[0] as Record<string, unknown> | undefined;
+      if (!row) {
+        await client.query(
+          `INSERT INTO cod_chat_requests (tenant_id,user_id,request_key,request_fingerprint,status,expires_at) VALUES ($1,$2,$3,$4,'pending',now()+interval '1 hour')`,
+          [p.tenantId,p.userId,requestKey,fingerprint],
+        );
+        return { state: 'claimed' };
+      }
+      if (String(row.request_fingerprint) !== fingerprint) throw new HttpError('Request ID was already used for a different chat request',409,'idempotency_conflict');
+      if (row.status === 'complete') {
+        const payload = row.response_payload;
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new HttpError('Cached chat response is invalid',500,'chat_cache_invalid');
+        return { state: 'complete', responsePayload: payload as Record<string, unknown> };
+      }
+      if (row.status === 'pending') return { state: 'pending' };
+      await client.query(
+        `UPDATE cod_chat_requests SET status='pending',response_payload=NULL,updated_at=now(),expires_at=now()+interval '1 hour' WHERE tenant_id=$1 AND user_id=$2 AND request_key=$3`,
+        [p.tenantId,p.userId,requestKey],
+      );
+      return { state: 'claimed' };
+    });
+  }
+  async failChatRequest(p: Principal, requestKey: string, fingerprint: string): Promise<void> {
+    validateChatRequestIdentity(requestKey, fingerprint);
+    await this.transaction(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`chat-request:${p.tenantId}:${p.userId}:${requestKey}`]);
+      await client.query(
+        `UPDATE cod_chat_requests r SET status='failed',response_payload=NULL,updated_at=now(),expires_at=now()+interval '1 hour'
+         WHERE r.tenant_id=$1 AND r.user_id=$2 AND r.request_key=$3 AND r.request_fingerprint=$4 AND r.status='pending'
+           AND NOT EXISTS (
+             SELECT 1 FROM cod_ledger l
+             WHERE l.tenant_id=r.tenant_id AND l.user_id=r.user_id AND l.idempotency_key=$5
+           )`,
+        [p.tenantId,p.userId,requestKey,fingerprint,`chat:${requestKey}:${fingerprint}`],
+      );
     });
   }
   async reserveUsage(p: Principal,reservationId:string,amountCents:number) {
@@ -489,13 +669,37 @@ export class PostgresDatabase implements CodDatabase {
     const reservableAmount=p.role==='admin'?0:amountCents;
     await this.transaction(async(client)=>{const existing=await client.query('SELECT status FROM cod_usage_reservations WHERE id=$1 AND tenant_id=$2 AND user_id=$3',[reservationId,p.tenantId,p.userId]);if(existing.rows[0])return;const allocation=await this.allocateFunds(client,p,reservableAmount);await client.query(`INSERT INTO cod_usage_reservations (id,tenant_id,user_id,amount_cents,wallet_cents,grant_allocations,status) VALUES ($1,$2,$3,$4,$5,$6,'reserved')`,[reservationId,p.tenantId,p.userId,reservableAmount,allocation.walletCents,JSON.stringify(allocation.grantAllocations)]);});
   }
-  async settleUsage(p:Principal,reservationId:string,event:UsageEvent) {
+  async settleUsage(p:Principal,reservationId:string,event:UsageEvent,completion?:ChatRequestCompletion) {
     if(!Number.isInteger(event.costCents)||event.costCents<0)throw new HttpError('Usage cost is invalid',400,'invalid_usage');
+    if(completion){
+      validateChatRequestIdentity(completion.requestKey,completion.fingerprint);
+      if(event.idempotencyKey!==`chat:${completion.requestKey}:${completion.fingerprint}`)throw new HttpError('Chat settlement key is invalid',400,'invalid_idempotency_key');
+      if(!completion.responsePayload||typeof completion.responsePayload!=='object'||Array.isArray(completion.responsePayload))throw new HttpError('Chat response payload is invalid',400,'invalid_chat_response');
+      if(Buffer.byteLength(JSON.stringify(completion.responsePayload),'utf8')>CHAT_RESPONSE_CACHE_MAX_BYTES)throw new HttpError('Model response is too large to cache safely',502,'chat_response_cache_too_large');
+    }
     return this.transaction(async(client)=>{
+      if(completion)await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`chat-request:${p.tenantId}:${p.userId}:${completion.requestKey}`]);
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`${p.tenantId}:${p.userId}:${event.idempotencyKey}`]);
+      const chatRequest=completion?await client.query(
+        'SELECT request_fingerprint,status FROM cod_chat_requests WHERE tenant_id=$1 AND user_id=$2 AND request_key=$3 FOR UPDATE',
+        [p.tenantId,p.userId,completion.requestKey],
+      ):null;
+      if(completion){
+        const row=chatRequest?.rows[0] as Record<string,unknown>|undefined;
+        if(!row||String(row.request_fingerprint)!==completion.fingerprint)throw new HttpError('Chat request claim was not found',409,'chat_request_not_claimed');
+        if(row.status==='failed')throw new HttpError('Chat request is no longer pending',409,'chat_request_not_pending');
+      }
       const reservation=await client.query(`SELECT * FROM cod_usage_reservations WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE`,[reservationId,p.tenantId,p.userId]);
       const existing=await client.query('SELECT * FROM cod_ledger WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3',[p.tenantId,p.userId,event.idempotencyKey]);
-      if(existing.rows[0]){if(reservation.rows[0]?.status==='reserved')await this.releaseReservation(client,p,reservation.rows[0],reservationId);return ledgerFromRow(existing.rows[0]);}
+      if(existing.rows[0]){
+        if(reservation.rows[0]?.status==='reserved')await this.releaseReservation(client,p,reservation.rows[0],reservationId);
+        if(completion&&chatRequest?.rows[0]?.status==='pending')await client.query(
+          `UPDATE cod_chat_requests SET status='complete',response_payload=$4,updated_at=now(),expires_at=now()+interval '24 hours' WHERE tenant_id=$1 AND user_id=$2 AND request_key=$3`,
+          [p.tenantId,p.userId,completion.requestKey,JSON.stringify(completion.responsePayload)],
+        );
+        return ledgerFromRow(existing.rows[0]);
+      }
+      if(completion&&chatRequest?.rows[0]?.status==='complete')throw new HttpError('Completed chat request is missing its billing record',500,'chat_billing_inconsistent');
       if(!reservation.rows[0]||reservation.rows[0].status!=='reserved')throw new HttpError('Usage reservation not found',409,'reservation_not_found');
       if(event.taskId!=='chat'){
         const task=await client.query('SELECT status FROM cod_tasks WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE',[event.taskId,p.tenantId,p.userId]);
@@ -503,13 +707,27 @@ export class PostgresDatabase implements CodDatabase {
         if(task.rows[0].status==='cancelled')throw new HttpError('Task was cancelled before settlement',409,'task_cancelled');
         if(task.rows[0].status!=='running'&&task.rows[0].status!=='waiting')throw new HttpError('Task is not running',409,'task_not_running');
       }
-      const billedEvent=p.role==='admin'?{...event,costCents:0,paymentDirection:'管理员测试免计费'}:event;
+      const billedEvent=p.role==='admin'?{...event,costCents:0,paymentDirection:'管理员测试免计费',commissionRateBps:0,commissionCents:0}:event;
       const reservedGrants=parseGrantAllocations(reservation.rows[0].grant_allocations);const reservedWallet=Number(reservation.rows[0].wallet_cents);let remaining=billedEvent.costCents;let creditConsumed=0;
       for(const allocation of reservedGrants){const consumed=Math.min(allocation.amountCents,remaining);creditConsumed+=consumed;remaining-=consumed;const refund=allocation.amountCents-consumed;if(refund>0)await this.restoreGrants(client,[{grantId:allocation.grantId,amountCents:refund}]);}
       const walletConsumed=Math.min(reservedWallet,remaining);remaining-=walletConsumed;const walletRefund=reservedWallet-walletConsumed;if(walletRefund>0)await client.query('UPDATE cod_users SET balance_cents=balance_cents+$3,updated_at=now() WHERE tenant_id=$1 AND user_id=$2',[p.tenantId,p.userId,walletRefund]);
       let totalWalletConsumed=walletConsumed;
       if(remaining>0){const extra=await this.allocateFunds(client,p,remaining);totalWalletConsumed+=extra.walletCents;creditConsumed+=extra.grantAllocations.reduce((total,item)=>total+item.amountCents,0);}
-      const inserted=await this.insertUsageLedger(client,p,billedEvent,totalWalletConsumed,creditConsumed);await client.query(`UPDATE cod_usage_reservations SET status='settled',updated_at=now() WHERE id=$1`,[reservationId]);return inserted;
+      const inserted=await this.insertUsageLedger(client,p,billedEvent,totalWalletConsumed,creditConsumed);
+      await client.query(`UPDATE cod_usage_reservations SET status='settled',updated_at=now() WHERE id=$1`,[reservationId]);
+      if(completion){
+        const cached=await client.query(
+          `UPDATE cod_chat_requests SET status='complete',response_payload=$4,updated_at=now(),expires_at=now()+interval '24 hours'
+           WHERE tenant_id=$1 AND user_id=$2 AND request_key=$3 AND request_fingerprint=$5 AND status='pending'`,
+          [p.tenantId,p.userId,completion.requestKey,JSON.stringify(completion.responsePayload),completion.fingerprint],
+        );
+        if(cached.rowCount!==1)throw new HttpError('Chat response could not be committed atomically',409,'chat_request_not_pending');
+        await client.query(
+          'INSERT INTO cod_audit (id,tenant_id,user_id,action,entity_type,entity_id,data) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+          [randomUUID(),p.tenantId,p.userId,'chat.complete','model',completion.audit.entityId,JSON.stringify(completion.audit.data)],
+        );
+      }
+      return inserted;
     });
   }
   async releaseUsage(p:Principal,reservationId:string) { await this.transaction(async(client)=>{const reservation=await client.query(`SELECT * FROM cod_usage_reservations WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE`,[reservationId,p.tenantId,p.userId]);if(!reservation.rows[0]||reservation.rows[0].status!=='reserved')return;await this.releaseReservation(client,p,reservation.rows[0],reservationId);}); }

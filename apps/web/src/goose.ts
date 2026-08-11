@@ -26,19 +26,19 @@ export interface GooseRunResult {
 
 interface TrackedToolCall { kind: ToolKind; status: ToolCallStatus }
 
-// Goose reports its Developer shell tool as `execute`. Shell commands are a
-// supported way to create files, so they must count as a real project action.
-const mutationKinds = new Set<ToolKind>(['edit', 'delete', 'move', 'execute']);
-const mutationRequestPattern = /(?:创建|新建|生成|实现|开发|编写|修改|修复|优化|重构|添加|删除|替换|改成|做一个|搭建|安装|升级|create|build|implement|develop|write|modify|edit|fix|optimi[sz]e|refactor|add|delete|remove|replace|install|upgrade)/i;
+// `execute` is intentionally not treated as proof of a file mutation. Read-only
+// shell commands such as `ls` and test runners are also reported as execute.
+const mutationKinds = new Set<ToolKind>(['edit', 'delete', 'move']);
+const mutationRequestPattern = /(?:创建|新建|生成|实现|开发|编写|修改|修复|优化|调整|完善|补全|重构|添加|删除|替换|改成|做一个|搭建|配置|部署|接入|上线|安装|升级|create|build|implement|develop|write|modify|edit|fix|optimi[sz]e|adjust|complete|refactor|add|delete|remove|replace|configure|deploy|integrate|install|upgrade)/i;
 
 export function buildCodeExecutionPrompt(prompt: string): string {
   return `You are COD's coding agent operating inside the selected local project. Execute the user's request now with the Developer tools available to you. Inspect the project before changing it, then use Developer write/edit/shell tools to make the requested file changes. For a creation or modification request, perform a real file-changing tool call before marking any TODO item complete or writing a completion message. Verify the result with an appropriate command when possible. Do not merely promise to start, describe hypothetical work, or claim completion without using tools. If execution is blocked, report the concrete blocker instead of claiming success.\n\nUser request:\n${prompt}`;
 }
 
-export function validateCodeRun(prompt: string, result: GooseRunResult): void {
+export function validateCodeRun(prompt: string, result: GooseRunResult, projectChanged = false): void {
   if (result.toolCalls === 0) throw new Error('COD 没有执行任何项目工具，因此未将本次任务标记为完成。请重试；若仍出现此提示，请检查桌面端 Developer Tools。');
   if (result.failedTools > 0 && result.completedTools === 0) throw new Error('COD 调用的项目工具全部失败，因此未将本次任务标记为完成。请查看工具状态后重试。');
-  if (mutationRequestPattern.test(prompt) && result.mutationTools === 0) throw new Error('COD 完成了项目检查，但没有执行文件修改，因此未将本次创建或修改任务标记为完成。');
+  if (mutationRequestPattern.test(prompt) && result.mutationTools === 0 && !projectChanged) throw new Error('COD 完成了项目检查，但没有检测到真实文件改动，因此未将本次创建或修改任务标记为完成。');
 }
 
 function createWebSocketStream(wsUrl: string) {

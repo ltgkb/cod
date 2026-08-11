@@ -1,10 +1,10 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
-import { createServer } from 'node:http';
+import { createServer, type ServerResponse } from 'node:http';
 import type { TaskStatus, UsageEvent } from '@cod/contracts';
-import { createSessionToken, hashPassword, validatePassword, verifyPassword, verifySessionToken } from './auth.js';
+import { AGENT_SESSION_TTL_MS, createAgentSessionToken, createSessionToken, hashPassword, validatePassword, verifyAgentSessionToken, verifyPassword, verifySessionToken } from './auth.js';
 import { BotService, parseBotCommand, parseFeishuWebhook, replyFeishuMessage, verifyWebhookSignature, type BotPlatform } from './bots.js';
 import { loadConfig, type ControlPlaneConfig } from './config.js';
-import { creditPackCatalog, type CodDatabase, type Principal, PostgresDatabase, type TopupRequest } from './database.js';
+import { CHAT_RESPONSE_CACHE_MAX_BYTES, creditPackCatalog, type CodDatabase, type Principal, PostgresDatabase, type TopupRequest } from './database.js';
 import { errorResponse, HttpError } from './errors.js';
 import { AiGateway } from './gateway.js';
 import { bearerToken, readJson, readText, sendJson, sendText } from './http.js';
@@ -24,7 +24,7 @@ export interface ControlPlaneOptions {
 const validStatuses = new Set<TaskStatus>(['draft', 'running', 'waiting', 'complete', 'failed', 'cancelled']);
 const userIdFor = (email: string) => `usr_${createHash('sha256').update(email).digest('hex').slice(0, 20)}`;
 const tenantIdFor = (email: string) => `tenant_${email.split('@')[1]?.replace(/[^a-z0-9]+/g, '_') ?? 'unknown'}`;
-const principalFromSession = (session: NonNullable<ReturnType<typeof verifySessionToken>>): Principal => ({ userId: session.sub, tenantId: session.tenantId, email: session.email, role: session.role });
+const principalFromSession = (session: { sub: string; tenantId: string; email: string; role: Principal['role'] }): Principal => ({ userId: session.sub, tenantId: session.tenantId, email: session.email, role: session.role });
 
 const dummyPasswordHash='scrypt$16384$8$1$MDEyMzQ1Njc4OWFiY2RlZg$vNLqtxxHxO9XlDJYZk-T6OzryI7HSubiscMSJDaWZtd0bu3h2vmmdlKsAZpCn3V20q-R_KOLJgJl9mHX32LDiA';
 
@@ -121,6 +121,36 @@ function estimatedInputTokens(body: unknown): number {
 
 const estimatedTextTokens = (text: string): number => Math.max(1, Math.ceil(Buffer.byteLength(text, 'utf8') / 4));
 
+function canonicalJson(value: unknown): string {
+  const normalize = (item: unknown): unknown => {
+    if (Array.isArray(item)) return item.map((child) => child === undefined ? null : normalize(child));
+    if (!item || typeof item !== 'object') return item;
+    return Object.fromEntries(Object.keys(item as Record<string,unknown>).sort().flatMap((key) => {
+      const child=(item as Record<string,unknown>)[key];
+      return child === undefined ? [] : [[key,normalize(child)]];
+    }));
+  };
+  return JSON.stringify(normalize(value));
+}
+
+function sendChatResult(response: ServerResponse, result: Record<string,unknown>, stream: boolean, requestId: string): void {
+  if (!stream) {
+    const output=Buffer.from(JSON.stringify(result));
+    response.writeHead(200,{'content-type':'application/json; charset=utf-8','content-length':output.length});response.end(output);return;
+  }
+  const choices=Array.isArray(result.choices)?result.choices:[];
+  const firstChoice=choices[0]&&typeof choices[0]==='object'?choices[0] as Record<string,unknown>:{};
+  const model=typeof result.model==='string'?result.model:'unknown';
+  const streamBase={id:typeof result.id==='string'?result.id:`chatcmpl-${requestId}`,object:'chat.completion.chunk',created:typeof result.created==='number'?result.created:Math.floor(Date.now()/1000),model};
+  const streamMetadata=Object.fromEntries(Object.entries(result).filter(([key])=>key.startsWith('cod_')));
+  const content=assistantContentFromResponse(result);const toolCalls=assistantToolCallsFromResponse(result);
+  const delta={role:'assistant',...(content?{content}:{}),...(toolCalls.length?{tool_calls:toolCalls.map((call,index)=>({...call,index}))}:{})};
+  const contentChunk={...streamBase,choices:[{index:0,delta,finish_reason:null}],...streamMetadata};
+  const finishChunk={...streamBase,choices:[{index:0,delta:{},finish_reason:typeof firstChoice.finish_reason==='string'?firstChoice.finish_reason:'stop'}],usage:result.usage,...streamMetadata};
+  response.writeHead(200,{'content-type':'text/event-stream; charset=utf-8','cache-control':'no-cache, no-transform','connection':'keep-alive','x-accel-buffering':'no'});
+  response.write(`data: ${JSON.stringify(contentChunk)}\n\n`);response.write(`data: ${JSON.stringify(finishChunk)}\n\n`);response.end('data: [DONE]\n\n');
+}
+
 async function readResponseBuffer(response: Response, maximumBytes = 5 * 1024 * 1024): Promise<Buffer> {
   const advertisedLength = Number(response.headers.get('content-length') ?? 0);
   if (Number.isFinite(advertisedLength) && advertisedLength > maximumBytes) throw new HttpError('Model response is too large', 502, 'model_response_too_large');
@@ -156,7 +186,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
   const products = new ProductRegistry(config);
   const officialPayments = new OfficialPaymentService(config);
   const seenFeishuMessages = new Set<string>();
-  interface ActiveChatRequest { controller: AbortController; reservationId: string; reservationReady: Promise<void> }
+  interface ActiveChatRequest { controller: AbortController; reservationId: string; reservationReady: Promise<void>; state: 'active' | 'settling' | 'settled' }
   const activeChats = new Map<string, Set<ActiveChatRequest>>();
   const activeChatKey = (principal: Principal, taskId: string) => `${principal.tenantId}\0${principal.userId}\0${taskId}`;
   const registerActiveChat = (principal: Principal, taskId: string, active: ActiveChatRequest) => {
@@ -166,7 +196,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
     return () => { entries.delete(active); if (!entries.size) activeChats.delete(key); };
   };
   const cancelActiveChats = async (principal: Principal, taskId: string): Promise<number> => {
-    const entries = [...(activeChats.get(activeChatKey(principal, taskId)) ?? [])];
+    const entries = [...(activeChats.get(activeChatKey(principal, taskId)) ?? [])].filter((entry)=>entry.state==='active');
     for (const entry of entries) entry.controller.abort(new HttpError('Task was cancelled', 409, 'task_cancelled'));
     await Promise.all(entries.map(async(entry)=>{await entry.reservationReady;await database.releaseUsage(principal,entry.reservationId);}));
     return entries.length;
@@ -308,9 +338,31 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         if (event) await database.completePaymentOrder(event);
         return sendText(response, 200, 'success');
       }
-      const session = verifySessionToken(bearerToken(request) ?? '', config.sessionSecret);
-      if (!session) return sendJson(response, 401, { error: 'unauthorized' });
-      const principal = principalFromSession(session);
+      const bearer=bearerToken(request)??'';
+      const session=verifySessionToken(bearer,config.sessionSecret);
+      const agentSession=session?null:verifyAgentSessionToken(bearer,config.sessionSecret);
+      if(!session&&!agentSession)return sendJson(response,401,{error:'unauthorized'});
+      if(agentSession){
+        const scopedPath=`/v1/tasks/${agentSession.taskId}/sources/${agentSession.sourceId}/chat/completions`;
+        if(request.method!=='POST'||url.pathname!==scopedPath)return sendJson(response,403,{error:'agent_scope_forbidden'});
+      }
+      const principal=principalFromSession(session??agentSession!);
+      if(request.method==='POST'&&url.pathname==='/api/agent-sessions'){
+        if(!session)throw new HttpError('A full account session is required',403,'agent_scope_forbidden');
+        const body=await readJson<{taskId?:unknown;sourceId?:unknown;model?:unknown}>(request);
+        const taskId=typeof body.taskId==='string'?body.taskId.trim():'';
+        const sourceId=typeof body.sourceId==='string'?body.sourceId.trim():'';
+        const model=typeof body.model==='string'?body.model.trim():'';
+        if(!/^[a-f0-9-]{36}$/i.test(taskId))throw new HttpError('Task ID is invalid',400,'invalid_task_id');
+        if(!/^[a-z0-9-]{2,40}$/.test(sourceId))throw new HttpError('Model source is invalid',400,'invalid_source');
+        if(!model||model.length>200)throw new HttpError('Model is invalid',400,'invalid_model');
+        const task=await database.getTask(principal,taskId);
+        if(task.status!=='running'&&task.status!=='waiting')throw new HttpError('Task is not running',409,task.status==='cancelled'?'task_cancelled':'task_not_running');
+        await gateway.getModel(sourceId,model);
+        const issuedAt=Date.now();const scope={taskId,sourceId,model};const token=createAgentSessionToken(session,scope,config.sessionSecret,issuedAt);
+        await database.audit(principal,'agent_session.issue','task',taskId,{sourceId,model,expiresAt:new Date(issuedAt+AGENT_SESSION_TTL_MS).toISOString()});
+        return sendJson(response,201,{token,expiresAt:new Date(issuedAt+AGENT_SESSION_TTL_MS).toISOString(),scope});
+      }
       if(request.method==='GET'&&url.pathname==='/api/referrals')return sendJson(response,200,await database.getReferralSummary(principal));
       if (request.method === 'GET' && url.pathname === '/api/account') return sendJson(response, 200, await database.getAccount(principal));
       if (request.method === 'GET' && url.pathname === '/api/ledger') return sendJson(response, 200, await database.getLedger(principal));
@@ -395,33 +447,37 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         const sourceId=routeSource??body.source??(config.modelSources.some((source)=>source.apiKey)?config.modelSources.find((source)=>source.apiKey)!.id:'demo');
         const model=typeof body.model==='string'?body.model.trim():'';
         if(!model)throw new HttpError('Model is required',400,'model_required');
+        if(agentSession&&(taskId!==agentSession.taskId||sourceId!==agentSession.sourceId||model!==agentSession.model))throw new HttpError('Agent session does not permit this chat request',403,'agent_scope_forbidden');
         const selection=await gateway.getModel(sourceId,model);const fallbackCandidate=sourceId==='demo'?null:await gateway.getFallbackModel(sourceId,model);
         const maxOutput=Number(body.max_completion_tokens??body.max_tokens??4096);if(!Number.isInteger(maxOutput)||maxOutput<1||maxOutput>20_000)throw new HttpError('Invalid max output tokens; COD allows at most 20000',400,'invalid_max_tokens');
-        const {source: _source,task_id: _taskId, ...rawProviderBody}=body;const providerMaxOutput=Math.max(512,maxOutput);const providerBody={...rawProviderBody,stream:false,...(body.max_completion_tokens!==undefined?{max_completion_tokens:providerMaxOutput}:{max_tokens:providerMaxOutput})};const reservationId=randomUUID();const estimatedInput=estimatedInputTokens(providerBody);const reservedCost=Math.max(gateway.costCents(selection.model,estimatedInput,providerMaxOutput),fallbackCandidate?gateway.costCents(fallbackCandidate,estimatedInput,providerMaxOutput):0);
-        const controller=new AbortController();let markReservationReady:()=>void=()=>undefined;const reservationReady=new Promise<void>((resolve)=>{markReservationReady=resolve;});const activeChat:ActiveChatRequest={controller,reservationId,reservationReady};const unregisterActiveChat=taskId?registerActiveChat(principal,taskId,activeChat):()=>undefined;
+        const {source: _source,task_id: _taskId, ...rawProviderBody}=body;const providerMaxOutput=Math.max(512,maxOutput);const providerBody={...rawProviderBody,stream:false,...(body.max_completion_tokens!==undefined?{max_completion_tokens:providerMaxOutput}:{max_tokens:providerMaxOutput})};
+        const requestFingerprint=createHash('sha256').update(canonicalJson({taskId:taskId??null,sourceId,providerBody})).digest('hex');
+        const requestKey=agentSession?`agent:${agentSession.jti}:${requestFingerprint}`:requestId;
+        const upstreamRequestKey=`cod-${createHash('sha256').update(canonicalJson({tenantId:principal.tenantId,userId:principal.userId,requestKey,requestFingerprint})).digest('hex').slice(0,48)}`;
+        const claim=await database.claimChatRequest(principal,requestKey,requestFingerprint);
+        if(claim.state==='pending')throw new HttpError('An identical chat request is still in progress',409,'chat_request_in_progress');
+        if(claim.state==='complete'){sendChatResult(response,claim.responsePayload,clientRequestedStream,requestId);return;}
+        const reservationId=randomUUID();const estimatedInput=estimatedInputTokens(providerBody);const reservedCost=Math.max(gateway.costCents(selection.model,estimatedInput,providerMaxOutput),fallbackCandidate?gateway.costCents(fallbackCandidate,estimatedInput,providerMaxOutput):0);
+        const controller=new AbortController();let markReservationReady:()=>void=()=>undefined;const reservationReady=new Promise<void>((resolve)=>{markReservationReady=resolve;});const activeChat:ActiveChatRequest={controller,reservationId,reservationReady,state:'active'};const unregisterActiveChat=taskId?registerActiveChat(principal,taskId,activeChat):()=>undefined;
         const cancelOnDisconnect=()=>{if(!response.writableEnded&&!controller.signal.aborted)controller.abort(new HttpError('Client disconnected',409,'client_disconnected'));};response.once('close',cancelOnDisconnect);
+        let chatSettled=false;
+        const failChatClaim=async()=>{try{await database.failChatRequest(principal,requestKey,requestFingerprint);}catch(failure){console.error(JSON.stringify({level:'error',event:'chat.claim.fail_failed',requestId,taskId:taskId??null,sourceId,error:failure instanceof Error?failure.message:String(failure)}));}};
         try {
           await database.reserveUsage(principal,reservationId,reservedCost);markReservationReady();if(controller.signal.aborted)throw controller.signal.reason;
-          let actualModel=model;let actualSelection=selection;let actualProviderBody=providerBody;let fallbackReason:'empty'|'length'|null=null;let upstream=await gateway.proxyChat(sourceId,actualProviderBody,requestId,controller.signal);let raw=await readResponseBuffer(upstream);if(controller.signal.aborted)throw controller.signal.reason;
-          if(!upstream.ok){await database.releaseUsage(principal,reservationId);response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}
+          let actualModel=model;let actualSelection=selection;let actualProviderBody=providerBody;let fallbackReason:'empty'|'length'|null=null;let upstream=await gateway.proxyChat(sourceId,actualProviderBody,upstreamRequestKey,controller.signal);let raw=await readResponseBuffer(upstream);if(controller.signal.aborted)throw controller.signal.reason;
+          if(!upstream.ok){await database.releaseUsage(principal,reservationId);await failChatClaim();response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}
           let parsed:unknown;try{parsed=JSON.parse(raw.toString('utf8')) as unknown;}catch{throw new HttpError('Model returned an invalid response',502,'invalid_model_response');}let content=assistantContentFromResponse(parsed);let toolCalls=assistantToolCallsFromResponse(parsed);
           const primaryHasAction=assistantHasAction(parsed);const primaryIncomplete=assistantResponseIsIncomplete(parsed);
-          if((!primaryHasAction||primaryIncomplete)&&fallbackCandidate){fallbackReason=primaryIncomplete?'length':'empty';actualModel=fallbackCandidate.id;actualSelection={source:selection.source,model:fallbackCandidate};actualProviderBody={...providerBody,model:actualModel};upstream=await gateway.proxyChat(sourceId,actualProviderBody,`${requestId}.fallback`,controller.signal);raw=await readResponseBuffer(upstream);if(controller.signal.aborted)throw controller.signal.reason;if(!upstream.ok){await database.releaseUsage(principal,reservationId);response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}try{parsed=JSON.parse(raw.toString('utf8')) as unknown;}catch{throw new HttpError('Fallback model returned an invalid response',502,'invalid_model_response');}content=assistantContentFromResponse(parsed);toolCalls=assistantToolCallsFromResponse(parsed);}
-          if(!assistantHasAction(parsed))throw new HttpError('Model returned an empty response after retry and fallback',502,'empty_model_response');if(assistantResponseIsIncomplete(parsed))throw new HttpError('Model output reached its token limit after fallback',502,'incomplete_model_response');const usage=usageFromResponse(parsed,actualProviderBody,content??JSON.stringify(toolCalls));const requestFingerprint=createHash('sha256').update(JSON.stringify(actualProviderBody)).digest('hex').slice(0,24);
-          const costCents=gateway.costCents(actualSelection.model,usage.inputTokens,usage.outputTokens);const commissionRateBps=actualSelection.source.commissionRateBps;const commissionCents=Math.round(costCents*commissionRateBps/10_000);if(controller.signal.aborted)throw controller.signal.reason;await database.settleUsage(principal,reservationId,{idempotencyKey:`chat:${requestId}:${requestFingerprint}`,taskId:taskId??'chat',sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection:actualSelection.source.paymentDirection,model:actualModel,inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,costCents,commissionRateBps,commissionCents});await database.audit(principal,'chat.complete','model',actualModel,{taskId:taskId??null,requestedModel:model,fallbackUsed:actualModel!==model,fallbackReason,sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection:actualSelection.source.paymentDirection,...usage,costCents,commissionRateBps,commissionCents});
-          const result={...(parsed as Record<string,unknown>),model:actualModel,usage:{...((parsed as {usage?:Record<string,unknown>}).usage??{}),prompt_tokens:usage.inputTokens,completion_tokens:usage.outputTokens,total_tokens:usage.inputTokens+usage.outputTokens},cod_source:sourceId,cod_upstream_source:actualSelection.source.upstreamSourceId,cod_payment_direction:actualSelection.source.paymentDirection,cod_charge_cents:costCents,cod_commission_rate_bps:commissionRateBps,cod_usage_estimated:usage.estimated,cod_requested_model:model,cod_fallback_used:actualModel!==model,cod_fallback_reason:fallbackReason};
-          if(clientRequestedStream){
-            const parsedRecord=parsed as Record<string,unknown>;const parsedChoices=Array.isArray(parsedRecord.choices)?parsedRecord.choices:[];const firstChoice=parsedChoices[0]&&typeof parsedChoices[0]==='object'?parsedChoices[0] as Record<string,unknown>:{};
-            const streamBase={id:typeof parsedRecord.id==='string'?parsedRecord.id:`chatcmpl-${requestId}`,object:'chat.completion.chunk',created:typeof parsedRecord.created==='number'?parsedRecord.created:Math.floor(Date.now()/1000),model:actualModel};
-            const streamMetadata={cod_source:sourceId,cod_upstream_source:actualSelection.source.upstreamSourceId,cod_payment_direction:actualSelection.source.paymentDirection,cod_charge_cents:costCents,cod_commission_rate_bps:commissionRateBps,cod_usage_estimated:usage.estimated,cod_requested_model:model,cod_fallback_used:actualModel!==model,cod_fallback_reason:fallbackReason};
-            const delta={role:'assistant',...(content?{content}:{}),...(toolCalls.length?{tool_calls:toolCalls.map((call,index)=>({...call,index}))}:{})};
-            const contentChunk={...streamBase,choices:[{index:0,delta,finish_reason:null}],...streamMetadata};
-            const finishChunk={...streamBase,choices:[{index:0,delta:{},finish_reason:typeof firstChoice.finish_reason==='string'?firstChoice.finish_reason:'stop'}],usage:result.usage,...streamMetadata};
-            response.writeHead(200,{'content-type':'text/event-stream; charset=utf-8','cache-control':'no-cache, no-transform','connection':'keep-alive','x-accel-buffering':'no'});
-            response.write(`data: ${JSON.stringify(contentChunk)}\n\n`);response.write(`data: ${JSON.stringify(finishChunk)}\n\n`);response.end('data: [DONE]\n\n');return;
-          }
-          const output=Buffer.from(JSON.stringify(result));response.writeHead(upstream.status,{'content-type':'application/json; charset=utf-8','content-length':output.length});response.end(output);return;
-        } catch(error) { markReservationReady();await database.releaseUsage(principal,reservationId);if(controller.signal.aborted)throw controller.signal.reason instanceof HttpError?controller.signal.reason:new HttpError('Task was cancelled',409,'task_cancelled');throw error; }
+          if((!primaryHasAction||primaryIncomplete)&&fallbackCandidate){fallbackReason=primaryIncomplete?'length':'empty';actualModel=fallbackCandidate.id;actualSelection={source:selection.source,model:fallbackCandidate};actualProviderBody={...providerBody,model:actualModel};upstream=await gateway.proxyChat(sourceId,actualProviderBody,`${upstreamRequestKey}-fallback`,controller.signal);raw=await readResponseBuffer(upstream);if(controller.signal.aborted)throw controller.signal.reason;if(!upstream.ok){await database.releaseUsage(principal,reservationId);await failChatClaim();response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}try{parsed=JSON.parse(raw.toString('utf8')) as unknown;}catch{throw new HttpError('Fallback model returned an invalid response',502,'invalid_model_response');}content=assistantContentFromResponse(parsed);toolCalls=assistantToolCallsFromResponse(parsed);}
+          if(!assistantHasAction(parsed))throw new HttpError('Model returned an empty response after retry and fallback',502,'empty_model_response');if(assistantResponseIsIncomplete(parsed))throw new HttpError('Model output reached its token limit after fallback',502,'incomplete_model_response');const usage=usageFromResponse(parsed,actualProviderBody,content??JSON.stringify(toolCalls));
+          const calculatedCostCents=gateway.costCents(actualSelection.model,usage.inputTokens,usage.outputTokens);const billingExempt=principal.role==='admin';const costCents=billingExempt?0:calculatedCostCents;const commissionRateBps=billingExempt?0:actualSelection.source.commissionRateBps;const commissionCents=billingExempt?0:Math.round(costCents*commissionRateBps/10_000);const paymentDirection=billingExempt?'管理员测试免计费':actualSelection.source.paymentDirection;
+          const result={...(parsed as Record<string,unknown>),model:actualModel,usage:{...((parsed as {usage?:Record<string,unknown>}).usage??{}),prompt_tokens:usage.inputTokens,completion_tokens:usage.outputTokens,total_tokens:usage.inputTokens+usage.outputTokens},cod_source:sourceId,cod_upstream_source:actualSelection.source.upstreamSourceId,cod_payment_direction:paymentDirection,cod_charge_cents:costCents,cod_commission_rate_bps:commissionRateBps,cod_usage_estimated:usage.estimated,cod_requested_model:model,cod_fallback_used:actualModel!==model,cod_fallback_reason:fallbackReason};
+          if(Buffer.byteLength(JSON.stringify(result),'utf8')>CHAT_RESPONSE_CACHE_MAX_BYTES)throw new HttpError('Model response is too large to cache safely',502,'chat_response_cache_too_large');
+          if(controller.signal.aborted)throw controller.signal.reason;
+          activeChat.state='settling';
+          await database.settleUsage(principal,reservationId,{idempotencyKey:`chat:${requestKey}:${requestFingerprint}`,taskId:taskId??'chat',sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection,model:actualModel,inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,costCents,commissionRateBps,commissionCents},{requestKey,fingerprint:requestFingerprint,responsePayload:result,audit:{entityId:actualModel,data:{taskId:taskId??null,requestedModel:model,fallbackUsed:actualModel!==model,fallbackReason,sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection,...usage,costCents,commissionRateBps,commissionCents}}});activeChat.state='settled';chatSettled=true;
+          sendChatResult(response,result,clientRequestedStream,requestId);return;
+        } catch(error) { markReservationReady();if(!chatSettled)await failChatClaim();await database.releaseUsage(principal,reservationId);if(controller.signal.aborted)throw controller.signal.reason instanceof HttpError?controller.signal.reason:new HttpError('Task was cancelled',409,'task_cancelled');throw error; }
         finally { response.removeListener('close',cancelOnDisconnect);unregisterActiveChat(); }
       }
       return sendJson(response, 404, { error: 'not_found' });

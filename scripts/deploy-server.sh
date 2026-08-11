@@ -4,12 +4,61 @@ set -euo pipefail
 project_root="${COD_PROJECT_ROOT:-/home/ubuntu/cod-project/cod}"
 release_root="${COD_RELEASE_ROOT:-/opt/cod/releases}"
 current_link="${COD_CURRENT_LINK:-/opt/cod/current}"
+if [[ -n "$(git -C "${project_root}" status --porcelain --untracked-files=normal)" ]]; then
+  echo "Refusing to deploy a dirty worktree; commit or remove all changes first" >&2
+  exit 1
+fi
 revision="$(git -C "${project_root}" rev-parse --short=12 HEAD)"
 release="${release_root}/${revision}"
 release_staging="${release}.staging"
 previous="$(readlink -f "${current_link}" 2>/dev/null || true)"
 previous_revision="$(basename "${previous}" 2>/dev/null || true)"
 activated=false
+configuration_backup=""
+configuration_targets=(
+  /etc/systemd/system/cod-control-plane.service
+  /etc/systemd/system/cod-backup.service
+  /etc/systemd/system/cod-backup.timer
+  /etc/systemd/system/cod-healthcheck.service
+  /etc/systemd/system/cod-healthcheck.timer
+  /etc/cod/runtime.env
+  /etc/nginx/sites-available/cod
+  /etc/nginx/conf.d/cod-limits.conf
+)
+
+backup_configuration() {
+  configuration_backup="$(mktemp -d)"
+  local index target
+  for index in "${!configuration_targets[@]}"; do
+    target="${configuration_targets[$index]}"
+    if sudo test -e "${target}"; then
+      sudo cp -a -- "${target}" "${configuration_backup}/${index}"
+    else
+      touch "${configuration_backup}/${index}.missing"
+    fi
+  done
+}
+
+restore_configuration() {
+  [[ -n "${configuration_backup}" && -d "${configuration_backup}" ]] || return 0
+  local index target
+  for index in "${!configuration_targets[@]}"; do
+    target="${configuration_targets[$index]}"
+    if [[ -f "${configuration_backup}/${index}.missing" ]]; then
+      sudo rm -f -- "${target}"
+    else
+      sudo cp -a -- "${configuration_backup}/${index}" "${target}"
+    fi
+  done
+}
+
+cleanup_configuration_backup() {
+  if [[ -n "${configuration_backup}" && -d "${configuration_backup}" ]]; then
+    sudo rm -rf --one-file-system -- "${configuration_backup}"
+  fi
+}
+
+trap cleanup_configuration_backup EXIT
 
 write_revision() {
   local value="$1"
@@ -24,14 +73,16 @@ rollback() {
   local exit_code=$?
   trap - ERR
   set +e
+  restore_configuration
+  sudo systemctl daemon-reload
   if [[ "${activated}" == true && -n "${previous}" && -d "${previous}" ]]; then
     echo "Release activation failed; rolling back to ${previous}" >&2
     sudo ln -sfn "${previous}" "${current_link}"
     write_revision "${previous_revision}"
-    sudo systemctl daemon-reload
     sudo systemctl restart cod-control-plane
-    sudo systemctl reload nginx
   fi
+  sudo nginx -t
+  sudo systemctl reload nginx
   sudo journalctl -u cod-control-plane -n 100 --no-pager >&2
   exit "${exit_code}"
 }
@@ -73,6 +124,7 @@ if [[ ! -f "${release}/start.mjs" || ! -f "${release}/web/index.html" ]]; then
   sudo rsync -a --delete apps/web/dist/ "${release_staging}/web/"
   sudo mv "${release_staging}" "${release}"
 fi
+backup_configuration
 sudo install -o root -g root -m 644 deploy/cod-control-plane.service /etc/systemd/system/cod-control-plane.service
 sudo install -o root -g root -m 644 deploy/cod-backup.service /etc/systemd/system/cod-backup.service
 sudo install -o root -g root -m 644 deploy/cod-backup.timer /etc/systemd/system/cod-backup.timer
@@ -85,8 +137,8 @@ sudo install -d -o postgres -g postgres -m 700 /var/lib/cod/backups
 sudo systemctl daemon-reload
 sudo nginx -t
 sudo ln -sfn "${release}" "${current_link}"
-write_revision "${revision}"
 activated=true
+write_revision "${revision}"
 sudo systemctl restart cod-control-plane
 sudo systemctl reload nginx
 

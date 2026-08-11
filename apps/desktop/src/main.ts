@@ -7,16 +7,22 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import type { AgentGatewayConfig, TerminalResult, WorkspaceFile } from '@cod/contracts';
+import type { AgentGatewayConfig, TerminalResult } from '@cod/contracts';
+import { mintAgentSession } from './agent-session.js';
+import { commandPathCandidates, commandPolicyViolation, isWithinRoot, parseCommand, validateCommandPath } from './command-policy.js';
+import { collectUntrackedDiff } from './git-diff.js';
+import { minimalGooseEnvironment } from './goose-environment.js';
+import { loadApprovedProjectRoots, maximumApprovedProjectRoots, saveApprovedProjectRoots } from './project-roots.js';
+import { collectWorkspaceFiles } from './workspace-files.js';
 
 const execFileAsync = promisify(execFile);
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const developmentUrl = process.env.COD_DEV_SERVER_URL || 'http://127.0.0.1:5173';
-const allowedCommands = new Set(['npm', 'pnpm', 'cargo', 'git', 'node', 'just']);
 const approvedProjectRoots = new Set<string>();
 let gooseSidecar: ChildProcess | null = null;
 let gooseAcpUrl: string | null = null;
 let gooseConfigurationKey: string | null = null;
+let gooseAgentTokenExpiresAt = 0;
 
 function isTrustedExternalUrl(rawUrl: string): boolean {
   try {
@@ -71,6 +77,7 @@ async function stopGooseSidecar(): Promise<void> {
   gooseSidecar = null;
   gooseAcpUrl = null;
   gooseConfigurationKey = null;
+  gooseAgentTokenExpiresAt = 0;
   if (!processToStop || processToStop.exitCode !== null) return;
   await new Promise<void>((resolve) => {
     const timeout = setTimeout(() => { processToStop.kill('SIGKILL'); resolve(); }, 2_000);
@@ -79,11 +86,25 @@ async function stopGooseSidecar(): Promise<void> {
   });
 }
 
+async function prepareGooseStateHome(): Promise<string | null> {
+  if (process.platform === 'win32') return null;
+  const configuredStateHome = process.env.XDG_STATE_HOME;
+  const stateHome = configuredStateHome && path.isAbsolute(configuredStateHome)
+    ? configuredStateHome
+    : path.join(app.getPath('home'), '.local', 'state');
+  const logsDirectory = path.join(stateHome, 'goose', 'logs');
+  await fs.mkdir(logsDirectory, { recursive: true, mode: 0o700 });
+  await fs.chmod(logsDirectory, 0o700);
+  return stateHome;
+}
+
 function validateAgentGatewayConfig(config: AgentGatewayConfig): void {
-  if (!config?.token || config.token.length > 8_192) throw new Error('A valid COD session is required');
-  if (!/^[a-z0-9-]{2,40}$/.test(config.sourceId)) throw new Error('Invalid model source');
-  if (!config.modelId || config.modelId.length > 200 || /[\r\n]/.test(config.modelId)) throw new Error('Invalid model');
-  if (!/^[a-f0-9-]{36}$/i.test(config.taskId)) throw new Error('Invalid task');
+  if (typeof config?.token !== 'string' || !config.token || config.token.length > 8_192 || /[\0\r\n]/.test(config.token)) {
+    throw new Error('A valid COD session is required');
+  }
+  if (typeof config.sourceId !== 'string' || !/^[a-z0-9-]{2,40}$/.test(config.sourceId)) throw new Error('Invalid model source');
+  if (typeof config.modelId !== 'string' || !config.modelId || config.modelId.length > 200 || /[\0\r\n]/.test(config.modelId)) throw new Error('Invalid model');
+  if (typeof config.taskId !== 'string' || !/^[a-f0-9-]{36}$/i.test(config.taskId)) throw new Error('Invalid task');
 }
 
 async function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | null> {
@@ -98,7 +119,7 @@ async function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | 
   }
 
   const configurationKey = createHash('sha256').update(`${config.token}\0${config.sourceId}\0${config.modelId}\0${config.taskId}`).digest('hex');
-  if (gooseAcpUrl && gooseConfigurationKey === configurationKey) return gooseAcpUrl;
+  if (gooseAcpUrl && gooseConfigurationKey === configurationKey && gooseAgentTokenExpiresAt > Date.now() + 60_000) return gooseAcpUrl;
   if (gooseSidecar) await stopGooseSidecar();
 
   const packagedBinary = path.join(process.resourcesPath, 'bin', process.platform === 'win32' ? 'goose.exe' : 'goose');
@@ -108,26 +129,29 @@ async function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | 
   } catch {
     return null;
   }
-  const port = await availablePort();
-  const secret = randomBytes(24).toString('hex');
   const controlPlane = new URL(process.env.COD_CONTROL_PLANE_URL ?? 'https://cod.kai.com');
   if (controlPlane.protocol !== 'https:' && process.env.NODE_ENV === 'production') {
     throw new Error('COD_CONTROL_PLANE_URL must use HTTPS in production');
   }
+  const agentSession = await mintAgentSession(controlPlane, config);
+  const gooseStateHome = await prepareGooseStateHome();
+  const port = await availablePort();
+  const secret = randomBytes(24).toString('hex');
   controlPlane.pathname = `${controlPlane.pathname.replace(/\/$/, '')}/v1/tasks/${encodeURIComponent(config.taskId)}/sources/${encodeURIComponent(config.sourceId)}`;
   controlPlane.search = '';
   controlPlane.hash = '';
   const spawnedSidecar = spawn(binary, ['serve', '--host', '127.0.0.1', '--port', String(port), '--with-builtin', 'developer'], {
     stdio: 'ignore',
     env: {
-      ...process.env,
+      ...minimalGooseEnvironment(process.env),
       GOOSE_SERVER__SECRET_KEY: secret,
       GOOSE_PROVIDER: process.env.GOOSE_PROVIDER ?? 'openai',
       GOOSE_MODEL: config.modelId,
       GOOSE_MODE: process.env.GOOSE_MODE ?? 'smart_approve',
       OPENAI_MODEL: config.modelId,
       OPENAI_BASE_URL: controlPlane.toString().replace(/\/$/, ''),
-      OPENAI_API_KEY: config.token,
+      OPENAI_API_KEY: agentSession.token,
+      ...(gooseStateHome ? { XDG_STATE_HOME: gooseStateHome } : {}),
     },
   });
   gooseSidecar = spawnedSidecar;
@@ -136,6 +160,7 @@ async function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | 
     gooseSidecar = null;
     gooseAcpUrl = null;
     gooseConfigurationKey = null;
+    gooseAgentTokenExpiresAt = 0;
   };
   spawnedSidecar.once('exit', clearSpawnedSidecar);
   spawnedSidecar.once('error', clearSpawnedSidecar);
@@ -148,12 +173,8 @@ async function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | 
   }
   gooseAcpUrl = `ws://127.0.0.1:${port}/acp?token=${secret}`;
   gooseConfigurationKey = configurationKey;
+  gooseAgentTokenExpiresAt = agentSession.expiresAt;
   return gooseAcpUrl;
-}
-
-function isWithinRoot(root: string, target: string): boolean {
-  const relative = path.relative(path.resolve(root), path.resolve(target));
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
 async function resolveProjectRoot(root: string): Promise<string> {
@@ -169,46 +190,37 @@ async function approvedProjectRoot(root: string): Promise<string> {
   return resolved;
 }
 
-function parseCommand(rawCommand: string): string[] {
-  const parts: string[] = [];
-  let current = '';
-  let quote: '"' | "'" | null = null;
-  let escaped = false;
-  for (const character of rawCommand.trim()) {
-    if (escaped) { current += character; escaped = false; continue; }
-    if (character === '\\' && quote !== "'") { escaped = true; continue; }
-    if (quote) { if (character === quote) quote = null; else current += character; continue; }
-    if (character === '"' || character === "'") { quote = character; continue; }
-    if (/\s/.test(character)) { if (current) { parts.push(current); current = ''; } continue; }
-    current += character;
-  }
-  if (quote || escaped) throw new Error('Command contains an unfinished quote or escape');
-  if (current) parts.push(current);
-  return parts;
+function approvedProjectRootsFile(): string {
+  return path.join(app.getPath('userData'), 'approved-project-roots.json');
 }
 
-function isDestructiveGitCommand(parts: string[]): boolean {
-  if (parts[0] !== 'git') return false;
-  const subcommand = parts[1];
-  return subcommand === 'clean'
-    || (subcommand === 'reset' && parts.includes('--hard'))
-    || (subcommand === 'checkout' && parts.includes('--'))
-    || subcommand === 'restore'
-    || (subcommand === 'push' && parts.some((part) => part === '--force' || part === '-f'));
+async function restoreApprovedProjectRoots(): Promise<void> {
+  const restored = await loadApprovedProjectRoots(approvedProjectRootsFile());
+  approvedProjectRoots.clear();
+  for (const root of restored) approvedProjectRoots.add(root);
+  await saveApprovedProjectRoots(approvedProjectRootsFile(), approvedProjectRoots).catch(() => undefined);
 }
 
-async function collectFiles(root: string, directory = root, depth = 0): Promise<WorkspaceFile[]> {
-  if (depth > 4) return [];
-  const entries = await fs.readdir(directory, { withFileTypes: true });
-  const visible = entries.filter((entry) => !entry.name.startsWith('.') && entry.name !== 'node_modules' && entry.name !== 'dist' && entry.name !== 'target');
-  const files: WorkspaceFile[] = [];
-  for (const entry of visible.slice(0, 200)) {
-    const absolute = path.join(directory, entry.name);
-    const relativePath = path.relative(root, absolute);
-    files.push({ name: entry.name, path: relativePath, kind: entry.isDirectory() ? 'directory' : 'file', depth });
-    if (entry.isDirectory()) files.push(...await collectFiles(root, absolute, depth + 1));
+async function rememberApprovedProjectRoot(root: string): Promise<void> {
+  const previousRoots = [...approvedProjectRoots];
+  approvedProjectRoots.delete(root);
+  approvedProjectRoots.add(root);
+  while (approvedProjectRoots.size > maximumApprovedProjectRoots) {
+    const oldest = approvedProjectRoots.values().next().value as string | undefined;
+    if (!oldest) break;
+    approvedProjectRoots.delete(oldest);
   }
-  return files;
+  try {
+    await saveApprovedProjectRoots(approvedProjectRootsFile(), approvedProjectRoots);
+  } catch (error) {
+    approvedProjectRoots.clear();
+    for (const previousRoot of previousRoots) approvedProjectRoots.add(previousRoot);
+    throw error;
+  }
+}
+
+async function validateCommandPaths(root: string, candidates: string[]): Promise<void> {
+  for (const candidate of candidates) await validateCommandPath(root, candidate);
 }
 
 async function createWindow() {
@@ -255,13 +267,13 @@ ipcMain.handle('cod:select-project', async () => {
   const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] });
   if (result.canceled) return null;
   const root = await resolveProjectRoot(result.filePaths[0]);
-  approvedProjectRoots.add(root);
+  await rememberApprovedProjectRoot(root);
   return root;
 });
 
 ipcMain.handle('cod:list-files', async (_event, root: string) => {
   const resolvedRoot = await approvedProjectRoot(root);
-  return collectFiles(resolvedRoot);
+  return collectWorkspaceFiles(resolvedRoot);
 });
 
 ipcMain.handle('cod:read-text-file', async (_event, root: string, relativePath: string) => {
@@ -282,11 +294,16 @@ ipcMain.handle('cod:git-diff', async (_event, root: string) => {
     } catch {
       return '当前目录不是 Git 仓库，暂无可显示的改动。初始化 Git 后即可在这里查看变更。';
     }
-    const [{ stdout: unstaged }, { stdout: staged }] = await Promise.all([
+    const [{ stdout: unstaged }, { stdout: staged }, untracked] = await Promise.all([
       execFileAsync('git', ['diff', '--no-ext-diff', '--'], { cwd: resolvedRoot, maxBuffer: 2 * 1024 * 1024 }),
       execFileAsync('git', ['diff', '--cached', '--no-ext-diff', '--'], { cwd: resolvedRoot, maxBuffer: 2 * 1024 * 1024 }),
+      collectUntrackedDiff(resolvedRoot),
     ]);
-    return [unstaged && '# Unstaged changes\n' + unstaged, staged && '# Staged changes\n' + staged].filter(Boolean).join('\n');
+    return [
+      unstaged && '# Unstaged changes\n' + unstaged,
+      staged && '# Staged changes\n' + staged,
+      untracked && '# Untracked files\n' + untracked,
+    ].filter(Boolean).join('\n');
   } catch (error) {
     return error instanceof Error ? error.message : 'Unable to read git diff';
   }
@@ -296,16 +313,19 @@ ipcMain.handle('cod:get-goose-acp-url', (_event, config: AgentGatewayConfig) => 
 ipcMain.handle('cod:stop-goose', () => stopGooseSidecar());
 
 ipcMain.handle('cod:run-command', async (_event, root: string, rawCommand: string): Promise<TerminalResult> => {
+  if (typeof rawCommand !== 'string' || rawCommand.length > 32 * 1024) {
+    return { command: typeof rawCommand === 'string' ? rawCommand.slice(0, 200) : '', output: 'Command is invalid or too long.', exitCode: 126 };
+  }
   let parts: string[];
   try { parts = parseCommand(rawCommand); }
   catch (error) { return { command: rawCommand, output: error instanceof Error ? error.message : 'Invalid command', exitCode: 126 }; }
   const executable = parts.shift();
-  if (!executable || !allowedCommands.has(executable)) {
-    return { command: rawCommand, output: 'Command is not in the COD allowlist.', exitCode: 126 };
-  }
-  if (isDestructiveGitCommand([executable, ...parts])) return { command: rawCommand, output: 'Destructive Git commands are blocked in the embedded terminal.', exitCode: 126 };
+  if (!executable) return { command: rawCommand, output: 'Command is empty.', exitCode: 126 };
+  const policyViolation = commandPolicyViolation(executable, parts);
+  if (policyViolation) return { command: rawCommand, output: policyViolation, exitCode: 126 };
   try {
     const resolvedRoot = await approvedProjectRoot(root);
+    await validateCommandPaths(resolvedRoot, commandPathCandidates(executable, parts));
     const { stdout, stderr } = await execFileAsync(executable, parts, { cwd: resolvedRoot, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
     return { command: rawCommand, output: `${stdout}${stderr}`.trim(), exitCode: 0 };
   } catch (error) {
@@ -317,6 +337,7 @@ ipcMain.handle('cod:run-command', async (_event, root: string, rawCommand: strin
 app.whenReady().then(async () => {
   session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
   session.defaultSession.setPermissionCheckHandler(() => false);
+  await restoreApprovedProjectRoots();
   await createWindow();
   app.on('activate', async () => {
     if (BrowserWindow.getAllWindows().length === 0) await createWindow();

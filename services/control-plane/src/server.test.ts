@@ -166,6 +166,126 @@ describe('control-plane production rules', () => {
     expect((await database.listAudit(principal, 10)).some((entry) => entry.action === 'chat.complete')).toBe(true);
   });
 
+  it('commits the completion audit during settlement exactly once across a replay', async () => {
+    const { base, database } = await start();
+    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com', password: 'Password123' }) });
+    const { token, user } = await login.json() as { token: string; user: { id: string; email: string } };
+    const auditMethod = vi.spyOn(database, 'audit');
+    const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-request-id': 'atomic-audit-test' };
+    const body = JSON.stringify({ model: 'coder-pro', messages: [{ role: 'user', content: 'hi' }], stream: false });
+    const first = await fetch(`${base}/v1/chat/completions`, { method: 'POST', headers, body });
+    const replay = await fetch(`${base}/v1/chat/completions`, { method: 'POST', headers, body });
+    expect(first.status).toBe(200);expect(replay.status).toBe(200);
+    expect(await replay.clone().json()).toEqual(await first.clone().json());
+    const principal = { userId: user.id, tenantId: 'tenant_kai_com', email: user.email, role: 'member' as const };
+    expect(await database.getLedger(principal)).toHaveLength(2);
+    expect((await database.getCreditSummary(principal)).availableCents).toBe(999);
+    const completions=(await database.listAudit(principal,20)).filter((entry)=>entry.action==='chat.complete');
+    expect(completions).toHaveLength(1);
+    expect(completions[0]).toMatchObject({entityType:'model',entityId:'coder-pro',data:expect.objectContaining({taskId:null,requestedModel:'coder-pro',sourceId:'demo'})});
+    expect(auditMethod.mock.calls.some(([,action])=>action==='chat.complete')).toBe(false);
+  });
+
+  it('replays a completed request without a second provider charge and rejects request-ID conflicts', async () => {
+    const { base, database } = await start();
+    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com', password: 'Password123' }) });
+    const { token, user } = await login.json() as { token: string; user: { id: string; email: string } };
+    const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-request-id': 'client-replay-id' };
+    const body = JSON.stringify({ model: 'coder-pro', messages: [{ role: 'user', content: 'same request' }], stream: false });
+    const first = await fetch(`${base}/v1/chat/completions`, { method: 'POST', headers, body });
+    const second = await fetch(`${base}/v1/chat/completions`, { method: 'POST', headers, body });
+    expect(first.status).toBe(200);expect(second.status).toBe(200);
+    expect(await second.clone().json()).toEqual(await first.clone().json());
+    expect(first.headers.get('x-request-id')).toBe('client-replay-id');
+    expect(second.headers.get('x-request-id')).toBe('client-replay-id');
+    const conflict=await fetch(`${base}/v1/chat/completions`,{method:'POST',headers,body:JSON.stringify({model:'coder-pro',messages:[{role:'user',content:'different request'}],stream:false})});
+    expect(conflict.status).toBe(409);expect(await conflict.json()).toMatchObject({error:'idempotency_conflict'});
+    const principal = { userId: user.id, tenantId: 'tenant_kai_com', email: user.email, role: 'member' as const };
+    expect(await database.getLedger(principal)).toHaveLength(2);
+    expect((await database.getCreditSummary(principal)).availableCents).toBe(999);
+  });
+
+  it('isolates upstream idempotency keys when two accounts reuse the same client request ID',async()=>{
+    const upstreamKeys:string[]=[];
+    const fetcher=vi.fn(async(input:RequestInfo|URL,init?:RequestInit):Promise<Response>=>{
+      const url=String(input);
+      if(url.endsWith('/api/pricing'))return Response.json({data:[{model_name:'shared-model',quota_type:0,model_ratio:1,completion_ratio:1,supported_endpoint_types:['openai']}]});
+      if(url.endsWith('/api/status'))return Response.json({data:{quota_per_unit:500000,price:7}});
+      if(url.endsWith('/models'))return Response.json({data:[{id:'shared-model'}]});
+      if(url.endsWith('/chat/completions')){upstreamKeys.push(new Headers(init?.headers).get('idempotency-key')??'');return Response.json({choices:[{message:{role:'assistant',content:'isolated'},finish_reason:'stop'}],usage:{prompt_tokens:2,completion_tokens:1}});}
+      throw new Error(`Unexpected provider request: ${url}`);
+    });
+    const {base}=await start({KAI_API_KEY:'test-key',KAI_AI_BASE_URL:'https://shared.example/v1',KAI_AI_CATALOG_URL:'https://shared.example/api/pricing',KAI_AI_STATUS_URL:'https://shared.example/api/status'},fetcher as typeof fetch);
+    const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com',password:'Password123'})});const firstToken=(await login.json() as {token:string}).token;
+    const registration=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'second@example.com',password:'Password123'})});expect(registration.status).toBe(201);const secondToken=(await registration.json() as {token:string}).token;
+    const body=JSON.stringify({source:'ai-kai',model:'shared-model',messages:[{role:'user',content:'same'}]});const request=(token:string)=>fetch(`${base}/v1/chat/completions`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','x-request-id':'cross-account-replay'},body});
+    expect((await request(firstToken)).status).toBe(200);expect((await request(secondToken)).status).toBe(200);expect((await request(firstToken)).status).toBe(200);
+    expect(upstreamKeys).toHaveLength(2);expect(upstreamKeys.every((key)=>/^cod-[a-f0-9]{48}$/.test(key))).toBe(true);expect(new Set(upstreamKeys).size).toBe(2);
+  });
+
+  it('rejects a concurrent duplicate before a second upstream call and lets failed requests retry',async()=>{
+    let providerStartedResolve:()=>void=()=>undefined;const providerStarted=new Promise<void>((resolve)=>{providerStartedResolve=resolve;});
+    let providerResolve:(response:Response)=>void=()=>undefined;let chatCalls=0;
+    const fetcher=vi.fn(async(input:RequestInfo|URL):Promise<Response>=>{
+      const url=String(input);
+      if(url.endsWith('/api/pricing'))return Response.json({data:[{model_name:'slow-model',quota_type:0,model_ratio:1,completion_ratio:1,supported_endpoint_types:['openai']}]});
+      if(url.endsWith('/api/status'))return Response.json({data:{quota_per_unit:500000,price:7}});
+      if(url.endsWith('/models'))return Response.json({data:[{id:'slow-model'}]});
+      if(url.endsWith('/chat/completions')){chatCalls+=1;providerStartedResolve();return new Promise<Response>((resolve)=>{providerResolve=resolve;});}
+      throw new Error(`Unexpected provider request: ${url}`);
+    });
+    const {base,database}=await start({KAI_API_KEY:'test-key',KAI_AI_BASE_URL:'https://provider.example/v1',KAI_AI_CATALOG_URL:'https://provider.example/api/pricing',KAI_AI_STATUS_URL:'https://provider.example/api/status'},fetcher as typeof fetch);
+    const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com',password:'Password123'})});const {token,user}=await login.json() as {token:string;user:{id:string;email:string}};
+    const headers={authorization:`Bearer ${token}`,'content-type':'application/json','x-request-id':'concurrent-chat'};const body=JSON.stringify({source:'ai-kai',model:'slow-model',messages:[{role:'user',content:'one at a time'}],stream:false});
+    const firstPromise=fetch(`${base}/v1/chat/completions`,{method:'POST',headers,body});await providerStarted;
+    const duplicate=await fetch(`${base}/v1/chat/completions`,{method:'POST',headers,body});expect(duplicate.status).toBe(409);expect(await duplicate.json()).toMatchObject({error:'chat_request_in_progress'});expect(chatCalls).toBe(1);
+    providerResolve(Response.json({id:'chat-1',choices:[{message:{role:'assistant',content:'done'},finish_reason:'stop'}],usage:{prompt_tokens:4,completion_tokens:2}}));
+    const first=await firstPromise;expect(first.status).toBe(200);expect(chatCalls).toBe(1);
+    const principal={userId:user.id,tenantId:'tenant_kai_com',email:user.email,role:'member' as const};expect(await database.getLedger(principal)).toHaveLength(2);
+
+    let retryCalls=0;const upstreamKeys:string[]=[];
+    const retryFetcher=vi.fn(async(input:RequestInfo|URL,init?:RequestInit):Promise<Response>=>{
+      const url=String(input);
+      if(url.endsWith('/api/pricing'))return Response.json({data:[{model_name:'retry-model',quota_type:0,model_ratio:1,completion_ratio:1,supported_endpoint_types:['openai']}]});
+      if(url.endsWith('/api/status'))return Response.json({data:{quota_per_unit:500000,price:7}});
+      if(url.endsWith('/models'))return Response.json({data:[{id:'retry-model'}]});
+      if(url.endsWith('/chat/completions')){retryCalls+=1;upstreamKeys.push(new Headers(init?.headers).get('idempotency-key')??'');return retryCalls<=2?Response.json({error:'temporary'},{status:503}):Response.json({id:'chat-retry',choices:[{message:{role:'assistant',content:'recovered'},finish_reason:'stop'}],usage:{prompt_tokens:4,completion_tokens:2}});}
+      throw new Error(`Unexpected provider request: ${url}`);
+    });
+    const retryServer=await start({KAI_API_KEY:'test-key',KAI_AI_BASE_URL:'https://retry.example/v1',KAI_AI_CATALOG_URL:'https://retry.example/api/pricing',KAI_AI_STATUS_URL:'https://retry.example/api/status'},retryFetcher as typeof fetch);
+    const retryLogin=await fetch(`${retryServer.base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com',password:'Password123'})});const retryToken=(await retryLogin.json() as {token:string}).token;
+    const retryHeaders={authorization:`Bearer ${retryToken}`,'content-type':'application/json','x-request-id':'failed-then-retry'};const retryBody=JSON.stringify({source:'ai-kai',model:'retry-model',messages:[{role:'user',content:'retry'}]});
+    expect((await fetch(`${retryServer.base}/v1/chat/completions`,{method:'POST',headers:retryHeaders,body:retryBody})).status).toBe(503);
+    expect((await fetch(`${retryServer.base}/v1/chat/completions`,{method:'POST',headers:retryHeaders,body:retryBody})).status).toBe(200);expect(retryCalls).toBe(3);expect(upstreamKeys[0]).toMatch(/^cod-[a-f0-9]{48}$/);expect(new Set(upstreamKeys).size).toBe(1);
+  });
+
+  it('mints a 60-minute task-scoped Agent token and blocks every out-of-scope use',async()=>{
+    const {base,database}=await start();const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com',password:'Password123'})});const {token,user}=await login.json() as {token:string;user:{id:string;email:string}};const full={authorization:`Bearer ${token}`,'content-type':'application/json'};
+    const device=await (await fetch(`${base}/api/devices`,{method:'POST',headers:full,body:JSON.stringify({name:'Scoped Agent',platform:'macos'})})).json() as {id:string};
+    const created=await (await fetch(`${base}/api/tasks`,{method:'POST',headers:full,body:JSON.stringify({title:'Scoped task',deviceId:device.id})})).json() as {id:string;version:number};
+    const running=await (await fetch(`${base}/api/tasks/${created.id}/status`,{method:'POST',headers:full,body:JSON.stringify({status:'running',expectedVersion:created.version})})).json() as {version:number};
+    const before=Date.now();const issuedResponse=await fetch(`${base}/api/agent-sessions`,{method:'POST',headers:full,body:JSON.stringify({taskId:created.id,sourceId:'demo',model:'coder-pro'})});expect(issuedResponse.status).toBe(201);
+    const issued=await issuedResponse.json() as {token:string;expiresAt:string;scope:{taskId:string;sourceId:string;model:string}};expect(issued.scope).toEqual({taskId:created.id,sourceId:'demo',model:'coder-pro'});expect(new Date(issued.expiresAt).getTime()-before).toBeGreaterThan(59*60*1000);expect(new Date(issued.expiresAt).getTime()-before).toBeLessThanOrEqual(60*60*1000+1000);
+    const agent={authorization:`Bearer ${issued.token}`,'content-type':'application/json'};
+    expect((await fetch(`${base}/api/account`,{headers:agent})).status).toBe(403);
+    expect((await fetch(`${base}/v1/tasks/${created.id}/sources/other/chat/completions`,{method:'POST',headers:agent,body:JSON.stringify({model:'coder-pro',messages:[{role:'user',content:'x'}]})})).status).toBe(403);
+    const wrongModel=await fetch(`${base}/v1/tasks/${created.id}/sources/demo/chat/completions`,{method:'POST',headers:agent,body:JSON.stringify({model:'writer-pro',messages:[{role:'user',content:'x'}]})});expect(wrongModel.status).toBe(403);expect(await wrongModel.json()).toMatchObject({error:'agent_scope_forbidden'});
+    const chatBody=JSON.stringify({model:'coder-pro',messages:[{role:'user',content:'scoped'}]});expect((await fetch(`${base}/v1/tasks/${created.id}/sources/demo/chat/completions`,{method:'POST',headers:agent,body:chatBody})).status).toBe(200);expect((await fetch(`${base}/v1/tasks/${created.id}/sources/demo/chat/completions`,{method:'POST',headers:agent,body:chatBody})).status).toBe(200);
+    expect((await fetch(`${base}/api/account`,{headers:full})).status).toBe(200);
+    const completed=await fetch(`${base}/api/tasks/${created.id}/status`,{method:'POST',headers:full,body:JSON.stringify({status:'complete',expectedVersion:running.version,result:'done'})});expect(completed.status).toBe(200);
+    const terminal=await fetch(`${base}/v1/tasks/${created.id}/sources/demo/chat/completions`,{method:'POST',headers:agent,body:chatBody});expect(terminal.status).toBe(409);expect(await terminal.json()).toMatchObject({error:'task_not_running'});
+    const principal={userId:user.id,tenantId:'tenant_kai_com',email:user.email,role:'member' as const};expect((await database.listAudit(principal,20)).some((entry)=>entry.action==='agent_session.issue')).toBe(true);expect(await database.getLedger(principal)).toHaveLength(2);
+  });
+
+  it('refuses responses above the 512 KiB durable-cache ceiling without charging',async()=>{
+    let chatCalls=0;const huge='x'.repeat(512*1024);
+    const fetcher=vi.fn(async(input:RequestInfo|URL):Promise<Response>=>{const url=String(input);if(url.endsWith('/api/pricing'))return Response.json({data:[{model_name:'large-model',quota_type:0,model_ratio:1,completion_ratio:1,supported_endpoint_types:['openai']}]});if(url.endsWith('/api/status'))return Response.json({data:{quota_per_unit:500000,price:7}});if(url.endsWith('/models'))return Response.json({data:[{id:'large-model'}]});if(url.endsWith('/chat/completions')){chatCalls+=1;return Response.json({choices:[{message:{role:'assistant',content:huge},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1}});}throw new Error(`Unexpected provider request: ${url}`);});
+    const {base,database}=await start({KAI_API_KEY:'test-key',KAI_AI_BASE_URL:'https://large.example/v1',KAI_AI_CATALOG_URL:'https://large.example/api/pricing',KAI_AI_STATUS_URL:'https://large.example/api/status'},fetcher as typeof fetch);const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com',password:'Password123'})});const {token,user}=await login.json() as {token:string;user:{id:string;email:string}};const headers={authorization:`Bearer ${token}`,'content-type':'application/json','x-request-id':'large-response'};const body=JSON.stringify({source:'ai-kai',model:'large-model',messages:[{role:'user',content:'large'}]});
+    const first=await fetch(`${base}/v1/chat/completions`,{method:'POST',headers,body});expect(first.status).toBe(502);expect(await first.json()).toMatchObject({error:'chat_response_cache_too_large'});
+    const second=await fetch(`${base}/v1/chat/completions`,{method:'POST',headers,body});expect(second.status).toBe(502);expect(chatCalls).toBe(2);
+    const principal={userId:user.id,tenantId:'tenant_kai_com',email:user.email,role:'member' as const};expect(await database.getLedger(principal)).toHaveLength(1);expect((await database.getCreditSummary(principal)).availableCents).toBe(1000);
+  });
+
   it('serves billed desktop streaming requests as valid SSE and settles them once', async () => {
     const { base, database } = await start();
     const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com',password:'Password123' }) });
@@ -211,6 +331,29 @@ describe('control-plane production rules', () => {
     const principal={userId:user.id,tenantId:'tenant_kai_com',email:user.email,role:'member' as const};
     expect(await database.getLedger(principal)).toHaveLength(1);expect((await database.getCreditSummary(principal)).availableCents).toBe(1000);
     expect(await database.getTask(principal,created.id)).toMatchObject({status:'cancelled',result:null,error:null});expect((await database.listAudit(principal,20)).some((entry)=>entry.action==='task.cancel')).toBe(true);
+  });
+
+  it('does not abort or count a request whose settlement has already committed',async()=>{
+    const {base,database}=await start();
+    const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com',password:'Password123'})});
+    const {token,user}=await login.json() as {token:string;user:{id:string;email:string}};const headers={authorization:`Bearer ${token}`,'content-type':'application/json'};
+    const device=await (await fetch(`${base}/api/devices`,{method:'POST',headers,body:JSON.stringify({name:'Settlement race',platform:'web'})})).json() as {id:string};
+    const created=await (await fetch(`${base}/api/tasks`,{method:'POST',headers,body:JSON.stringify({title:'结算竞态测试',deviceId:device.id})})).json() as {id:string;version:number};
+    const running=await (await fetch(`${base}/api/tasks/${created.id}/status`,{method:'POST',headers,body:JSON.stringify({status:'running',expectedVersion:created.version})})).json() as {version:number};
+    let markSettlementCommitted:()=>void=()=>undefined;const settlementCommitted=new Promise<void>((resolve)=>{markSettlementCommitted=resolve;});
+    let releaseSettlementReturn:()=>void=()=>undefined;const settlementMayReturn=new Promise<void>((resolve)=>{releaseSettlementReturn=resolve;});
+    const originalSettle=database.settleUsage.bind(database);
+    vi.spyOn(database,'settleUsage').mockImplementation(async(...args)=>{const entry=await originalSettle(...args);markSettlementCommitted();await settlementMayReturn;return entry;});
+    const chatPromise=fetch(`${base}/v1/tasks/${created.id}/sources/demo/chat/completions`,{method:'POST',headers,body:JSON.stringify({model:'coder-pro',messages:[{role:'user',content:'完成后立刻终止'}]})});
+    await settlementCommitted;
+    const cancelledResponse=await fetch(`${base}/api/tasks/${created.id}/cancel`,{method:'POST',headers,body:JSON.stringify({expectedVersion:running.version})});
+    const cancelled=await cancelledResponse.json() as {task:{status:string};cancelledRequests:number};
+    releaseSettlementReturn();
+    const chat=await chatPromise;
+    expect(cancelledResponse.status).toBe(200);expect(cancelled).toMatchObject({task:{status:'cancelled'},cancelledRequests:0});expect(chat.status).toBe(200);
+    const principal={userId:user.id,tenantId:'tenant_kai_com',email:user.email,role:'member' as const};
+    expect(await database.getLedger(principal)).toHaveLength(2);expect((await database.getCreditSummary(principal)).availableCents).toBe(999);
+    expect((await database.listAudit(principal,20)).filter((entry)=>entry.action==='chat.complete')).toHaveLength(1);
   });
 
   it('enforces the 20000-token product limit at the billed gateway', async () => {
@@ -268,6 +411,8 @@ describe('control-plane production rules', () => {
     expect(listed).toHaveLength(1); expect(listed[0]?.id).toBe(created.id);
     const invalid = await fetch(`${base}/api/compute/requests`, { method: 'POST', headers: { ...headers, 'idempotency-key': 'compute-invalid' }, body: JSON.stringify({ ...JSON.parse(body), contactPhone: 'x' }) });
     expect(invalid.status).toBe(400);
+    const wechat = await fetch(`${base}/api/compute/requests`, { method: 'POST', headers: { ...headers, 'idempotency-key': 'compute-wechat' }, body: JSON.stringify({ ...JSON.parse(body), contactPhone: 'kai_compute_2026' }) });
+    expect(wechat.status).toBe(201);
     const principal = { userId: user.id, tenantId: 'tenant_kai_com', email: user.email, role: 'member' as const };
     expect((await database.listAudit(principal, 10)).some((entry) => entry.action === 'compute.request.created')).toBe(true);
   });

@@ -67,6 +67,7 @@ export const computeOfferCatalog: readonly ComputeOffer[] = [
 ] as const;
 
 const clean = (value: unknown, max: number) => String(value ?? '').trim().slice(0, max);
+const contactPattern = /^(?:[0-9+()\-\s]{6,40}|[A-Za-z][A-Za-z0-9_-]{5,39})$/;
 
 export function validateComputeRequest(raw: unknown): ComputeRequestInput {
   if (!raw || typeof raw !== 'object') throw new HttpError('Compute request is invalid', 400, 'invalid_compute_request');
@@ -84,7 +85,7 @@ export function validateComputeRequest(raw: unknown): ComputeRequestInput {
   const quantity = Number(value.quantity);
   const durationHours = value.durationHours === null || value.durationHours === undefined || value.durationHours === '' ? null : Number(value.durationHours);
   const termMonths = value.termMonths === null || value.termMonths === undefined || value.termMonths === '' ? null : Number(value.termMonths);
-  if (company.length < 2 || !contactName || !/^[0-9+()\-\s]{6,40}$/.test(contactPhone) || !city || !gpuModel) throw new HttpError('Company and contact details are incomplete', 400, 'invalid_compute_contact');
+  if (company.length < 2 || !contactName || !contactPattern.test(contactPhone) || !city || !gpuModel) throw new HttpError('Company and contact details are incomplete', 400, 'invalid_compute_contact');
   if (!Number.isInteger(quantity) || quantity < 1 || quantity > 4096) throw new HttpError('GPU quantity is invalid', 400, 'invalid_compute_quantity');
   if (kind === 'rental' && (!Number.isInteger(durationHours) || Number(durationHours) < 1 || Number(durationHours) > 1_000_000)) throw new HttpError('Rental duration is invalid', 400, 'invalid_compute_duration');
   if (kind === 'installment' && ![12, 24, 36].includes(Number(termMonths))) throw new HttpError('Installment term is invalid', 400, 'invalid_compute_term');

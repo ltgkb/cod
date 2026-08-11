@@ -27,6 +27,7 @@ describe('official merchant payment adapters', () => {
     const fetcher = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
       const authorization = String((init?.headers as Record<string, string>).authorization);
       expect(authorization).toContain('WECHATPAY2-SHA256-RSA2048');
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
       expect(JSON.parse(String(init?.body))).toMatchObject({ out_trade_no: order('wechat').id, amount: { total: 1200, currency: 'CNY' } });
       const body = JSON.stringify({ code_url: 'weixin://wxpay/bizpayurl?pr=test' }); const timestamp = String(Math.floor(Date.now() / 1000)); const nonce = 'response-nonce';
       return new Response(body, { headers: { 'content-type': 'application/json', 'wechatpay-timestamp': timestamp, 'wechatpay-nonce': nonce, 'wechatpay-signature': sign(`${timestamp}\n${nonce}\n${body}\n`, platform.privateKey), 'wechatpay-serial': 'PLATFORMSERIAL' } });
