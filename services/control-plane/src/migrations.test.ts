@@ -144,9 +144,11 @@ describe('production-safe migrations and rate limits', () => {
   it('keeps production registration closed until email ownership is verified', () => {
     const runtime = readFileSync(new URL('../../../deploy/runtime.env', import.meta.url), 'utf8');
     const example = readFileSync(new URL('../../../deploy/control-plane.env.example', import.meta.url), 'utf8');
+    const service = readFileSync(new URL('../../../deploy/cod-control-plane.service', import.meta.url), 'utf8');
 
     expect(runtime).toMatch(/^COD_REGISTRATION_ENABLED=false$/m);
-    expect(example).toMatch(/^COD_REGISTRATION_ENABLED=false$/m);
-    expect(example).toContain('verifies email ownership');
+    expect(example).not.toMatch(/^COD_REGISTRATION_ENABLED=/m);
+    expect(example).toContain('secret-file drift cannot reopen features');
+    expect(service.indexOf('EnvironmentFile=-/etc/cod/control-plane.env')).toBeLessThan(service.indexOf('EnvironmentFile=/etc/cod/runtime.env'));
   });
 });

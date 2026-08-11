@@ -12,8 +12,8 @@ Group=cod
 WorkingDirectory=/opt/cod/current
 Environment=NODE_ENV=production
 Environment=COD_CONTROL_PORT=8787
-EnvironmentFile=/etc/cod/runtime.env
 EnvironmentFile=-/etc/cod/control-plane.env
+EnvironmentFile=/etc/cod/runtime.env
 EnvironmentFile=-/etc/cod/revision.env
 ExecStart=/opt/cod/current/bin/node /opt/cod/current/start.mjs
 Restart=always
