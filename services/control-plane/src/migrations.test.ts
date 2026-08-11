@@ -74,11 +74,13 @@ describe('production-safe migrations and rate limits', () => {
 
   it('compresses large JSON catalogs and static text assets at the Nginx boundary', () => {
     const httpConfig = readFileSync(new URL('../../../deploy/nginx-http.conf', import.meta.url), 'utf8');
+    const siteConfig = readFileSync(new URL('../../../deploy/cod.nginx.conf', import.meta.url), 'utf8');
 
-    expect(httpConfig).toContain('gzip on;');
-    expect(httpConfig).toContain('gzip_vary on;');
-    expect(httpConfig).toContain('gzip_min_length 1024;');
-    expect(httpConfig).toContain('gzip_proxied any;');
-    expect(httpConfig).toMatch(/gzip_types[\s\S]*?application\/json[\s\S]*?application\/javascript[\s\S]*?text\/javascript[\s\S]*?text\/css[\s\S]*?image\/svg\+xml;/);
+    expect(httpConfig).not.toContain('gzip on;');
+    expect(siteConfig).toContain('gzip on;');
+    expect(siteConfig).toContain('gzip_vary on;');
+    expect(siteConfig).toContain('gzip_min_length 1024;');
+    expect(siteConfig).toContain('gzip_proxied any;');
+    expect(siteConfig).toMatch(/gzip_types[\s\S]*?application\/json[\s\S]*?application\/javascript[\s\S]*?text\/javascript[\s\S]*?text\/css[\s\S]*?image\/svg\+xml;/);
   });
 });
