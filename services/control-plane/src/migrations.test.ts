@@ -82,5 +82,6 @@ describe('production-safe migrations and rate limits', () => {
     expect(siteConfig).toContain('gzip_min_length 1024;');
     expect(siteConfig).toContain('gzip_proxied any;');
     expect(siteConfig).toMatch(/gzip_types[\s\S]*?application\/json[\s\S]*?application\/javascript[\s\S]*?text\/javascript[\s\S]*?text\/css[\s\S]*?image\/svg\+xml;/);
+    expect(siteConfig).toContain('proxy_hide_header X-Content-Type-Options;');
   });
 });
