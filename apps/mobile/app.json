@@ -1,0 +1,38 @@
+{
+  "expo": {
+    "name": "COD",
+    "slug": "cod",
+    "version": "0.2.0",
+    "scheme": "cod",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "plugins": [
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/icon.png",
+          "imageWidth": 160,
+          "resizeMode": "contain",
+          "backgroundColor": "#fbfdfd",
+          "dark": {
+            "image": "./assets/icon.png",
+            "backgroundColor": "#0b1416"
+          }
+        }
+      ]
+    ],
+    "ios": {
+      "bundleIdentifier": "com.kai.cod",
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.kai.cod",
+      "adaptiveIcon": {
+        "backgroundColor": "#1b7f7f",
+        "foregroundImage": "./assets/android-icon-foreground.png"
+      },
+      "predictiveBackGestureEnabled": false
+    }
+  }
+}

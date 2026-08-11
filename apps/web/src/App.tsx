@@ -1,42 +1,40 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import QRCode from 'qrcode';
-import {
-  ArrowClockwise,
-  ArrowSquareOut,
-  Buildings,
-  CaretDown,
-  ChatCircleDots,
-  Check,
-  CircleNotch,
-  Code,
-  Command,
-  CreditCard,
-  File,
-  Folder,
-  GitDiff,
-  Handshake,
-  HardDrives,
-  Key,
-  Lightning,
-  ListChecks,
-  MagnifyingGlass,
-  Moon,
-  PaperPlaneTilt,
-  Play,
-  Plus,
-  ShieldCheck,
-  SidebarSimple,
-  SignOut,
-  Stack,
-  Stop,
-  Storefront,
-  Sun,
-  TerminalWindow,
-  UserCircle,
-  Warning,
-  X,
-} from '@phosphor-icons/react';
+import { ArrowClockwise } from '@phosphor-icons/react/ArrowClockwise';
+import { ArrowSquareOut } from '@phosphor-icons/react/ArrowSquareOut';
+import { Buildings } from '@phosphor-icons/react/Buildings';
+import { CaretDown } from '@phosphor-icons/react/CaretDown';
+import { ChatCircleDots } from '@phosphor-icons/react/ChatCircleDots';
+import { Check } from '@phosphor-icons/react/Check';
+import { CircleNotch } from '@phosphor-icons/react/CircleNotch';
+import { Code } from '@phosphor-icons/react/Code';
+import { Command } from '@phosphor-icons/react/Command';
+import { CreditCard } from '@phosphor-icons/react/CreditCard';
+import { File } from '@phosphor-icons/react/File';
+import { Folder } from '@phosphor-icons/react/Folder';
+import { GitDiff } from '@phosphor-icons/react/GitDiff';
+import { Handshake } from '@phosphor-icons/react/Handshake';
+import { HardDrives } from '@phosphor-icons/react/HardDrives';
+import { Key } from '@phosphor-icons/react/Key';
+import { Lightning } from '@phosphor-icons/react/Lightning';
+import { ListChecks } from '@phosphor-icons/react/ListChecks';
+import { MagnifyingGlass } from '@phosphor-icons/react/MagnifyingGlass';
+import { Moon } from '@phosphor-icons/react/Moon';
+import { PaperPlaneTilt } from '@phosphor-icons/react/PaperPlaneTilt';
+import { Play } from '@phosphor-icons/react/Play';
+import { Plus } from '@phosphor-icons/react/Plus';
+import { ShieldCheck } from '@phosphor-icons/react/ShieldCheck';
+import { SidebarSimple } from '@phosphor-icons/react/SidebarSimple';
+import { SignOut } from '@phosphor-icons/react/SignOut';
+import { Stack } from '@phosphor-icons/react/Stack';
+import { Stop } from '@phosphor-icons/react/Stop';
+import { Storefront } from '@phosphor-icons/react/Storefront';
+import { Sun } from '@phosphor-icons/react/Sun';
+import { TerminalWindow } from '@phosphor-icons/react/TerminalWindow';
+import { UserCircle } from '@phosphor-icons/react/UserCircle';
+import { Warning } from '@phosphor-icons/react/Warning';
+import { X } from '@phosphor-icons/react/X';
 import type { DeviceRecord, KnowledgeHit, ProductManifest, TaskStatus, WorkspaceFile } from '@cod/contracts';
 import {
   cancelRemoteTask,
@@ -96,6 +94,7 @@ import {
   type PermissionToolSummary,
 } from './permissions';
 import { MarkdownContent } from './presentation';
+import { copyCodText, getCodRuntime, openCodExternalUrl } from './runtime';
 import type { InspectorTab, ProjectSnapshot, WorkspaceMode } from './types';
 
 const statusLabels: Record<TaskStatus, string> = {
@@ -150,6 +149,7 @@ function isTaskCancellation(error:unknown):boolean{
   return error instanceof ApiError&&error.code==='task_cancelled'||error instanceof DOMException&&error.name==='AbortError'||error instanceof Error&&error.name==='AbortError';
 }
 function devicePlatform(): DeviceRecord['platform'] {
+  if (getCodRuntime().hostPlatform) return 'mobile';
   if (!hasDesktopBridge()) return window.matchMedia?.('(max-width: 560px)').matches ? 'mobile' : 'web';
   if (window.codDesktop?.platform === 'darwin') return 'macos';
   if (window.codDesktop?.platform === 'win32') return 'windows';
@@ -331,6 +331,7 @@ export function App() {
   const [selectedModel, setSelectedModel] = useState('coder-pro');
   const [knowledgeHits, setKnowledgeHits] = useState<KnowledgeHit[]>([]);
   const [knowledgeLoading, setKnowledgeLoading] = useState(false);
+  const [mobileContextExpanded, setMobileContextExpanded] = useState(false);
   const [notice, setNotice] = useState('');
   const [messagesByTask, setMessagesByTask] = useState<Record<string, ChatMessage[]>>({});
   const [pendingSend, setPendingSend] = useState<{ prompt: string; mode: WorkspaceMode } | null>(null);
@@ -354,6 +355,7 @@ export function App() {
     document.documentElement.style.colorScheme = colorMode;
     document.querySelector('meta[name="theme-color"]')?.setAttribute('content', colorMode === 'dark' ? '#0b1416' : '#fbfdfd');
     storageSet('kai.color-mode.v1', colorMode);
+    void getCodRuntime().setNativeColorMode?.(colorMode);
   }, [colorMode]);
 
   useEffect(() => { listComputeOffers().then(setComputeOffers).catch(() => setComputeOffers([])); }, []);
@@ -581,8 +583,7 @@ export function App() {
   };
   const handleCopyInviteCode=async()=>{
     if(!referralSummary?.inviteCode)return;
-    if(!navigator.clipboard){setNotice('当前环境不能自动复制，请手动选择邀请码。');return;}
-    try{await navigator.clipboard.writeText(referralSummary.inviteCode);setNotice('邀请码已复制。');}
+    try{const copied=await copyCodText(referralSummary.inviteCode);setNotice(copied?'邀请码已复制。':'当前环境不能自动复制，请手动选择邀请码。');}
     catch{setNotice('复制失败，请手动选择邀请码。');}
   };
   const handlePurchaseCreditPack = async (packId:string) => {
@@ -654,7 +655,7 @@ export function App() {
     try {
       const launch = await launchProduct(token, product.id);
       if(sessionTokenRef.current!==token)return;
-      window.open(launch.url, '_blank', 'noopener,noreferrer');
+      await openCodExternalUrl(launch.url);
     } catch (error) { setNotice(error instanceof Error ? error.message : '产品打开失败'); }
   };
   const handleSend = async (requestedPrompt = prompt, requestedTask: RemoteTask | null = activeTask, requestedMode: WorkspaceMode = mode) => {
@@ -823,6 +824,7 @@ export function App() {
     storageSet('cod.inspector.open', String(next));
     return next;
   });
+  const hiddenMobileContextCount = 3 + Number(Boolean(selectedSource)) + Number(Boolean(selectedModelInfo));
 
   return <div className={`app-shell${inspectorOpen ? '' : ' inspector-hidden'}`}>
     <aside className="rail"><Brand /><div className="rail-actions"><button className={`icon-button ${mode === 'code' ? 'active' : ''}`} title="任务" onClick={() => { selectWorkspaceMode('code'); setSidebarOpen(true); }}><ListChecks weight="fill" /></button><button className={`icon-button ${mode === 'chat' ? 'active' : ''}`} title="普通对话" onClick={() => selectWorkspaceMode('chat')}><ChatCircleDots /></button><button className="icon-button compute-entry" title="算力市场" onClick={() => setOverlay('compute')}><Storefront weight="fill" /></button><button className="icon-button" title="模型库" onClick={() => setOverlay('models')}><Stack /></button><button className="icon-button" title="命令面板" onClick={() => setOverlay('commands')}><Command /></button>{products.map((product) => <button className="icon-button" title={product.name} key={product.id} onClick={() => void handleProductLaunch(product)}><ArrowSquareOut /></button>)}</div><div className="rail-footer"><ThemeToggle colorMode={colorMode} onChange={setColorMode} /><button className="icon-button" title={session ? '账户' : '登录'} onClick={() => setOverlay(session ? 'account' : 'login')}><UserCircle /></button></div></aside>
@@ -833,9 +835,18 @@ export function App() {
         <div className="composer-wrap">
           {activeTask && <div className="task-actions">{(activeTask.status === 'draft' || activeTask.status === 'failed' || activeTask.status === 'complete' || activeTask.status==='cancelled') && <button onClick={() => executeSynchronizedTask(activeTask)} disabled={isSending}><Play /> {activeTask.status === 'failed' ? '重试任务' : activeTask.status === 'complete' ? '继续任务' : activeTask.status==='cancelled'?'重新执行':'执行任务'}</button>}{(activeTask.status === 'running' || activeTask.status === 'waiting') && <><button onClick={() => completeSynchronizedTask(activeTask)} disabled={isSending || cancellingTaskId===activeTask.id}><Check /> 标记完成</button><button className="cancel-task" onClick={() => void cancelSynchronizedTask(activeTask)} disabled={Boolean(cancellingTaskId)}>{cancellingTaskId===activeTask.id?<CircleNotch className="spin"/>:<Stop weight="fill"/>}{cancellingTaskId===activeTask.id?'正在终止':'终止任务'}</button></>}</div>}
           {mode === 'chat' && <div className={`compare-bar${compareEnabled ? ' open' : ''}`}><button className="compare-toggle" aria-pressed={compareEnabled} onClick={() => setCompareEnabled((current) => !current)}><Stack weight={compareEnabled ? 'fill' : 'regular'} /><span><strong>多模型对比</strong><small>{compareEnabled ? `已选 ${compareTargets.length} 个模型` : '同一问题并行比较 2-4 个模型'}</small></span><i>{compareEnabled ? '已开启' : '开启'}</i></button>{compareEnabled && <div className="compare-picker"><header><span>选择模型</span><small>本次发送将产生 {compareTargets.length} 次独立计费请求</small></header><div>{callableModels.map((target) => { const checked=compareModelKeys.includes(target.key); return <label className={checked ? 'selected' : ''} key={target.key}><input type="checkbox" checked={checked} disabled={!checked&&compareModelKeys.length>=4} onChange={() => toggleCompareModel(target.key)} /><span><strong>{target.model.label}</strong><small>{target.sourceLabel} · 输入 ¥{(target.model.inputPricePerMillionCents/100).toFixed(2)} / 输出 ¥{(target.model.outputPricePerMillionCents/100).toFixed(2)} 每百万</small></span><Check weight="bold" /></label>;})}</div>{callableModels.length<2&&<p>当前可调用模型不足 2 个，暂时无法开始对比。</p>}</div>}</div>}
-          <div className="context-strip"><span><Folder weight="fill" /> {projectName}</span><span><GitDiff /> {changeCount} 个改动</span><span><ShieldCheck /> 本机操作需确认</span>{selectedSource && <span><Lightning weight="fill" /> {selectedSource.paymentDirection}</span>}{selectedModelInfo && <span>输入 ¥{(selectedModelInfo.inputPricePerMillionCents / 100).toFixed(2)} / 输出 ¥{(selectedModelInfo.outputPricePerMillionCents / 100).toFixed(2)} 每百万 Token</span>}<button onClick={handleKnowledge} disabled={knowledgeLoading}>{knowledgeLoading ? <CircleNotch className="spin" /> : <MagnifyingGlass />} 期算知识库</button><button onClick={handleRemoteTask}><PaperPlaneTilt /> 发送到设备</button></div>
+          <div className={`context-strip${mobileContextExpanded ? ' mobile-expanded' : ''}`}>
+            <span className="mobile-context-secondary"><Folder weight="fill" /> {projectName}</span>
+            <span className="mobile-context-secondary"><GitDiff /> {changeCount} 个改动</span>
+            <span className="mobile-context-secondary"><ShieldCheck /> 本机操作需确认</span>
+            {selectedSource && <span className="mobile-context-primary" aria-label={selectedSource.paymentDirection} title={selectedSource.paymentDirection}><Lightning weight="fill" /><b className="context-source-desktop" aria-hidden="true">{selectedSource.paymentDirection}</b><b className="context-source-mobile" aria-hidden="true">{selectedSource.label}</b></span>}
+            {selectedModelInfo && <span className="mobile-context-primary context-price" aria-label={`输入 ¥${(selectedModelInfo.inputPricePerMillionCents / 100).toFixed(2)} / 输出 ¥${(selectedModelInfo.outputPricePerMillionCents / 100).toFixed(2)} 每百万 Token`} title={`输入 ¥${(selectedModelInfo.inputPricePerMillionCents / 100).toFixed(2)} / 输出 ¥${(selectedModelInfo.outputPricePerMillionCents / 100).toFixed(2)} 每百万 Token`}><b className="context-price-desktop" aria-hidden="true">输入 ¥{(selectedModelInfo.inputPricePerMillionCents / 100).toFixed(2)} / 输出 ¥{(selectedModelInfo.outputPricePerMillionCents / 100).toFixed(2)} 每百万 Token</b><b className="context-price-mobile" aria-hidden="true">入 ¥{(selectedModelInfo.inputPricePerMillionCents / 100).toFixed(2)} / 出 ¥{(selectedModelInfo.outputPricePerMillionCents / 100).toFixed(2)}</b></span>}
+            <button className={selectedSource ? 'mobile-context-secondary' : 'mobile-context-primary'} onClick={handleKnowledge} disabled={knowledgeLoading}>{knowledgeLoading ? <CircleNotch className="spin" /> : <MagnifyingGlass />} 期算知识库</button>
+            <button className={selectedModelInfo ? 'mobile-context-secondary' : 'mobile-context-primary'} onClick={handleRemoteTask}><PaperPlaneTilt /> 发送到设备</button>
+            <button className="context-more-toggle" type="button" aria-expanded={mobileContextExpanded} aria-label={mobileContextExpanded ? '收起上下文信息' : `展开更多上下文信息，共 ${hiddenMobileContextCount} 项`} onClick={() => setMobileContextExpanded((current) => !current)}><CaretDown /> {mobileContextExpanded ? '收起' : '更多'}</button>
+          </div>
           {notice && <div className="remote-notice"><span>{notice}</span><button title="关闭提示" onClick={() => setNotice('')}><X /></button></div>}
-          {knowledgeHits.length > 0 && <div className="knowledge-strip">{knowledgeHits.map((hit) => <a href={hit.url} target="_blank" rel="noreferrer" key={hit.id}><strong>{hit.title}</strong><span>{hit.excerpt}</span></a>)}</div>}
+          {knowledgeHits.length > 0 && <div className="knowledge-strip">{knowledgeHits.map((hit) => <a href={hit.url} target="_blank" rel="noreferrer" key={hit.id} onClick={(event)=>{event.preventDefault();void openCodExternalUrl(hit.url);}}><strong>{hit.title}</strong><span>{hit.excerpt}</span></a>)}</div>}
           <div className="composer"><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void handleSend(); }} placeholder={mode === 'code' ? '让 COD 修改、检查或解释这个项目...' : compareEnabled ? `输入一个问题，同时询问 ${compareTargets.length} 个模型...` : '问 COD 任何问题...'} /><div className="composer-footer"><button className="composer-tool" title="查看项目文件" onClick={() => { if (hasDesktopBridge()) setInspectorTab('files'); else setNotice('项目文件仅在 COD Desktop 中可用。'); }}><Plus /></button><span>{compareEnabled&&mode==='chat'?`${compareTargets.length} 个模型 · 独立计费`:'⌘ ↵ 发送'}</span><button className="send" title="发送" disabled={!prompt.trim() || isSending || Boolean(session && (compareEnabled&&mode==='chat' ? compareTargets.length<2 : !selectedSource?.callable && !(mode === 'code' && hasDesktopBridge() && project.root)))} onClick={() => void handleSend()}>{isSending ? <CircleNotch className="spin" /> : <PaperPlaneTilt weight="fill" />}</button></div></div>
         </div></section>
     </main>
@@ -853,7 +864,7 @@ export function App() {
       {(capabilities?.payments.channels?.length ?? 0) > 0 && <section className="official-payment">
         <header><div><strong>官方商户充值</strong><small>订单金额与回调金额一致后才会入账；未支付订单不会增加余额。</small></div><label>充值金额<select aria-label="充值金额" value={paymentAmountCents} onChange={(event) => setPaymentAmountCents(Number(event.target.value))} disabled={paymentBusy}><option value={1000}>¥10</option><option value={5000}>¥50</option><option value={10000}>¥100</option><option value={20000}>¥200</option><option value={50000}>¥500</option></select></label></header>
         <div className="official-payment-actions">{capabilities?.payments.channels?.includes('wechat') && <button className="wechat" disabled={paymentBusy} onClick={() => void handleOfficialPayment('wechat')}>{paymentBusy ? <CircleNotch className="spin" /> : <CreditCard />} 微信支付</button>}{capabilities?.payments.channels?.includes('alipay') && <button className="alipay" disabled={paymentBusy} onClick={() => void handleOfficialPayment('alipay')}>{paymentBusy ? <CircleNotch className="spin" /> : <CreditCard />} 支付宝</button>}</div>
-        {paymentCheckout && paymentOrder && <div className={`payment-checkout ${paymentOrder.status}`}><div>{paymentCheckout.kind === 'qr' && paymentCheckout.qrDataUrl ? <img src={paymentCheckout.qrDataUrl} alt="微信支付二维码" /> : <CreditCard weight="duotone" />}</div><span><strong>{paymentOrder.status === 'paid' ? '充值已到账' : paymentCheckout.kind === 'qr' ? '请使用微信扫码支付' : '支付宝订单已创建'}</strong><small>订单 {paymentOrder.id} · ¥{(paymentOrder.amountCents / 100).toFixed(2)}</small>{paymentOrder.status === 'pending' && paymentCheckout.kind === 'redirect' && <a href={paymentCheckout.url} target="_blank" rel="noreferrer">前往支付宝付款 <ArrowSquareOut /></a>}{paymentOrder.status === 'pending' && <i>正在等待官方支付结果…</i>}</span></div>}
+        {paymentCheckout && paymentOrder && <div className={`payment-checkout ${paymentOrder.status}`}><div>{paymentCheckout.kind === 'qr' && paymentCheckout.qrDataUrl ? <img src={paymentCheckout.qrDataUrl} alt="微信支付二维码" /> : <CreditCard weight="duotone" />}</div><span><strong>{paymentOrder.status === 'paid' ? '充值已到账' : paymentCheckout.kind === 'qr' ? '请使用微信扫码支付' : '支付宝订单已创建'}</strong><small>订单 {paymentOrder.id} · ¥{(paymentOrder.amountCents / 100).toFixed(2)}</small>{paymentOrder.status === 'pending' && paymentCheckout.kind === 'redirect' && <a href={paymentCheckout.url} target="_blank" rel="noreferrer" onClick={(event)=>{event.preventDefault();void openCodExternalUrl(paymentCheckout.url);}}>前往支付宝付款 <ArrowSquareOut /></a>}{paymentOrder.status === 'pending' && <i>正在等待官方支付结果…</i>}</span></div>}
       </section>}
       {capabilities?.payments.mode === 'unavailable' && <div className="payment-status unavailable"><strong>充值渠道尚未开通</strong><small>当前只能使用已有钱包余额和试用额度；COD 不会创建无法支付的订单。</small></div>}
       {capabilities?.payments.topupEnabled && <div className="topup-panel"><div><strong>预存试点钱包</strong><small>仅用于本轮产品与计费闭环测试，不代表真实支付已到账。</small></div><div><button onClick={() => handleTopup(1000)}>+ ¥10</button><button onClick={() => handleTopup(5000)}>+ ¥50</button><button onClick={() => handleTopup(10000)}>+ ¥100</button></div></div>}

@@ -1,7 +1,10 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
+import { configureCodRuntime } from './runtime';
 import './styles.css';
+
+configureCodRuntime({ controlPlaneUrl: import.meta.env.VITE_COD_CONTROL_PLANE_URL });
 
 try {
   const storedMode = localStorage.getItem('kai.color-mode.v1');
