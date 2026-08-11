@@ -90,7 +90,7 @@ describe('production-safe migrations and rate limits', () => {
     expect(httpConfig).not.toMatch(/geo\s+\$remote_addr\s+\$cod_trusted_origin_peer/);
     expect(siteConfig.match(/if \(\$cod_trusted_origin_peer = 0\)/g)).toHaveLength(3);
     expect(siteConfig).toContain('return 308 https://cod.kai.com$request_uri;');
-    expect(siteConfig.match(/return 404;/g)).toHaveLength(2);
+    expect(siteConfig.match(/if \(\$cod_trusted_origin_peer = 0\) \{ return 404; \}/g)).toHaveLength(2);
     expect(httpConfig).toContain('limit_req_zone $binary_remote_addr zone=cod_heartbeat_ip:10m rate=50r/s');
     expect(httpConfig).toContain('limit_req_zone $binary_remote_addr$uri zone=cod_heartbeat_device:10m rate=2r/s');
     expect(siteConfig).toContain('limit_req zone=cod_heartbeat_ip burst=100 nodelay;');
@@ -117,6 +117,34 @@ describe('production-safe migrations and rate limits', () => {
     expect(siteConfig).toContain('gzip_proxied any;');
     expect(siteConfig).toMatch(/gzip_types[\s\S]*?application\/json[\s\S]*?application\/javascript[\s\S]*?text\/javascript[\s\S]*?text\/css[\s\S]*?image\/svg\+xml;/);
     expect(siteConfig).toContain('proxy_hide_header X-Content-Type-Options;');
+  });
+
+  it('serves static shell resources with explicit cache, MIME, and security boundaries', () => {
+    const siteConfig = readFileSync(new URL('../../../deploy/cod.nginx.conf', import.meta.url), 'utf8');
+
+    expect(siteConfig).toContain('location = /health { return 404; }');
+    expect(siteConfig).toContain('location = /ready { return 404; }');
+    expect(siteConfig).toContain('location = /_cod/expo-dom-bootstrap { return 404; }');
+    expect(siteConfig).toContain('location ^~ /health/ { return 404; }');
+    expect(siteConfig).toContain('location ^~ /ready/ { return 404; }');
+    expect(siteConfig).toContain('location ^~ /_cod/expo-dom-bootstrap/ { return 404; }');
+    expect(siteConfig).toMatch(/location = \/manifest\.webmanifest \{[\s\S]*?types \{ application\/manifest\+json webmanifest; \}[\s\S]*?expires -1;[\s\S]*?\}/);
+    expect(siteConfig).toMatch(/location = \/index\.html \{[\s\S]*?try_files \$uri =404;[\s\S]*?expires -1;[\s\S]*?\}/);
+    const assetLocation = siteConfig.match(/location \/assets\/ \{([\s\S]*?)\n    \}/)?.[1] ?? '';
+    const rateLimitLocation = siteConfig.match(/location @cod_rate_limited \{([\s\S]*?)\n    \}/)?.[1] ?? '';
+    for (const location of [assetLocation, rateLimitLocation]) {
+      expect(location).toContain('add_header X-Content-Type-Options nosniff always;');
+      expect(location).toContain('add_header Strict-Transport-Security');
+      expect(location).toContain('add_header Referrer-Policy');
+      expect(location).toContain('add_header X-Frame-Options');
+      expect(location).toContain('add_header Permissions-Policy');
+      expect(location).toContain('add_header Content-Security-Policy');
+    }
+    expect(assetLocation).toContain('add_header Cache-Control "public, immutable";');
+    expect(rateLimitLocation).toContain('add_header Retry-After 1 always;');
+    const defaultServer = siteConfig.slice(0, siteConfig.indexOf('\nserver {', 1));
+    expect(defaultServer).toContain('proxy_hide_header X-Content-Type-Options;');
+    expect(defaultServer).toContain('add_header X-Content-Type-Options nosniff always;');
   });
 
   it('runs the control plane without Linux capabilities or namespace creation', () => {
