@@ -114,7 +114,9 @@ describe('production-safe migrations and rate limits', () => {
   it('runs the control plane without Linux capabilities or namespace creation', () => {
     const service = readFileSync(new URL('../../../deploy/cod-control-plane.service', import.meta.url), 'utf8');
 
-    expect(service).toMatch(/^User=ubuntu$/m);
+    expect(service).toMatch(/^User=cod$/m);
+    expect(service).toMatch(/^Group=cod$/m);
+    expect(service).toMatch(/^ExecStart=\/opt\/cod\/current\/bin\/node \/opt\/cod\/current\/start\.mjs$/m);
     expect(service).toMatch(/^NoNewPrivileges=true$/m);
     expect(service).toMatch(/^CapabilityBoundingSet=$/m);
     expect(service).toMatch(/^AmbientCapabilities=$/m);
@@ -124,5 +126,10 @@ describe('production-safe migrations and rate limits', () => {
     expect(service).toMatch(/^ProtectKernelLogs=true$/m);
     expect(service).toMatch(/^ProtectProc=invisible$/m);
     expect(service).toMatch(/^RestrictNamespaces=true$/m);
+    expect(service).toMatch(/^ProtectHome=true$/m);
+
+    const deployScript = readFileSync(new URL('../../../scripts/deploy-server.sh', import.meta.url), 'utf8');
+    expect(deployScript).toContain('sudo install -o root -g root -m 755 "${node_binary}" "${release_staging}/bin/node"');
+    expect(deployScript).toContain('sudo useradd --system --gid cod --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin cod');
   });
 });

@@ -89,6 +89,8 @@ rollback() {
 
 source /home/ubuntu/cod-project/upstream/goose/bin/activate-hermit
 cd "${project_root}"
+node_binary="$(command -v node)"
+[[ -x "${node_binary}" ]] || { echo "Node runtime is unavailable" >&2; exit 1; }
 npm ci
 node --test scripts/check-npm-audit.test.mjs
 node scripts/check-npm-audit.mjs
@@ -98,7 +100,7 @@ npm run lint
 npm run build
 
 sudo install -d -m 755 "${release_root}"
-if [[ "${release}" == "${previous}" && -f "${release}/start.mjs" && -f "${release}/web/index.html" ]]; then
+if [[ "${release}" == "${previous}" && -x "${release}/bin/node" && -f "${release}/start.mjs" && -f "${release}/web/index.html" ]]; then
   curl -fsS http://127.0.0.1:8787/ready >/dev/null
   curl -fsS http://127.0.0.1:8787/version
   printf '\nrelease=%s (already active)\n' "${release}"
@@ -106,22 +108,29 @@ if [[ "${release}" == "${previous}" && -f "${release}/start.mjs" && -f "${releas
   exit 0
 fi
 
-if [[ ! -f "${release}/start.mjs" || ! -f "${release}/web/index.html" ]]; then
+if [[ ! -x "${release}/bin/node" || ! -f "${release}/start.mjs" || ! -f "${release}/web/index.html" ]]; then
   if [[ "${release}" == "${previous}" ]]; then
     echo "Current release is incomplete; refusing to overwrite it in place" >&2
     exit 1
   fi
   sudo rm -rf --one-file-system "${release}" "${release_staging}"
-  sudo install -d -m 755 "${release_staging}" "${release_staging}/scripts" "${release_staging}/web"
+  sudo install -d -m 755 "${release_staging}" "${release_staging}/bin" "${release_staging}/scripts" "${release_staging}/web"
   ./node_modules/.bin/esbuild services/control-plane/dist/server.js --bundle --platform=node --format=esm --target=node22 \
     --banner:js='import { createRequire as __codCreateRequire } from "node:module"; const require = __codCreateRequire(import.meta.url);' \
     --outfile="/tmp/cod-server-${revision}.mjs"
   sudo install -m 644 "/tmp/cod-server-${revision}.mjs" "${release_staging}/start.mjs"
+  sudo install -o root -g root -m 755 "${node_binary}" "${release_staging}/bin/node"
   rm -f "/tmp/cod-server-${revision}.mjs"
   sudo rsync -a --delete scripts/ "${release_staging}/scripts/"
   sudo chmod 755 "${release_staging}/scripts/"*.sh
   sudo rsync -a --delete apps/web/dist/ "${release_staging}/web/"
   sudo mv "${release_staging}" "${release}"
+fi
+if ! getent group cod >/dev/null; then
+  sudo groupadd --system cod
+fi
+if ! getent passwd cod >/dev/null; then
+  sudo useradd --system --gid cod --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin cod
 fi
 backup_configuration
 trap rollback ERR
