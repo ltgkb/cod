@@ -77,6 +77,12 @@ describe('production-safe migrations and rate limits', () => {
     expect(httpConfig).toContain('real_ip_header X-Forwarded-For;');
     expect(httpConfig).toContain('real_ip_recursive on;');
     expect(httpConfig).not.toMatch(/set_real_ip_from\s+(?:0\.0\.0\.0\/0|10\.0\.0\.0\/8|172\.16\.0\.0\/12)/);
+    expect(httpConfig).toContain('geo $realip_remote_addr $cod_trusted_origin_peer');
+    expect(httpConfig).toContain('172.31.0.0/20 1;');
+    expect(httpConfig).not.toMatch(/geo\s+\$remote_addr\s+\$cod_trusted_origin_peer/);
+    expect(siteConfig.match(/if \(\$cod_trusted_origin_peer = 0\)/g)).toHaveLength(3);
+    expect(siteConfig).toContain('return 308 https://cod.kai.com$request_uri;');
+    expect(siteConfig.match(/return 404;/g)).toHaveLength(2);
     expect(httpConfig).toContain('limit_req_zone $binary_remote_addr zone=cod_heartbeat_ip:10m rate=50r/s');
     expect(httpConfig).toContain('limit_req_zone $binary_remote_addr$uri zone=cod_heartbeat_device:10m rate=2r/s');
     expect(siteConfig).toContain('limit_req zone=cod_heartbeat_ip burst=100 nodelay;');

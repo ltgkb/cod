@@ -26,3 +26,4 @@ Start from `deploy/control-plane.env.example` and populate it only on the server
 - `scripts/restore-database.sh` restores only into an explicitly named `cod_restore_*` database so recovery drills cannot overwrite production accidentally.
 - `cod-healthcheck.timer` checks the control plane, PostgreSQL readiness, and Nginx every minute.
 - `/metrics` and `/version` are available only through localhost at Nginx; public callers receive 403.
+- The origin accepts application traffic only from the observed ALB subnet or localhost. Direct Internet requests for `cod.kai.com` are redirected to the HTTPS edge, and direct health probes receive 404.
