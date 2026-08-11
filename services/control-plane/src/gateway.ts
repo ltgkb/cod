@@ -59,6 +59,23 @@ const demoModels: ModelInfo[] = [
   { id: 'chat-fast', label: 'KAI Chat Fast', contextWindow: 128_000, inputPricePerMillionCents: 80, outputPricePerMillionCents: 320 },
 ];
 const preferredModelOrder = ['glm-5.2', 'glm-4.7', 'deepseek-v3.2', 'gpt-5.2'];
+const maximumCatalogModels = 200;
+const maximumModelIdLength = 200;
+
+function validModelId(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const id = value.trim();
+  return id && id.length <= maximumModelIdLength && !/[\u0000-\u001f\u007f]/u.test(id) ? id : null;
+}
+
+function advertisedModelIds(value: unknown): Set<string> {
+  if (!Array.isArray(value)) return new Set();
+  return new Set(value.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const id = validModelId((item as { id?: unknown }).id);
+    return id ? [id] : [];
+  }));
+}
 
 function responseData<T>(value: unknown): T {
   if (value && typeof value === 'object' && 'data' in value) return (value as { data: T }).data;
@@ -279,8 +296,8 @@ export class AiGateway {
     ]);
     const pricing = pricingResult.status === 'fulfilled' ? responseData<PricingRow[]>(pricingResult.value) : [];
     const status = statusResult.status === 'fulfilled' ? responseData<PricingStatus>(statusResult.value) : null;
-    const advertised = modelsResult.status === 'fulfilled' && modelsResult.value ? responseData<Array<{ id?: string }>>(modelsResult.value) : [];
-    const advertisedIds = new Set(advertised.map((item) => item.id).filter((id): id is string => Boolean(id)));
+    const advertised = modelsResult.status === 'fulfilled' && modelsResult.value ? responseData<unknown>(modelsResult.value) : [];
+    const advertisedIds = advertisedModelIds(advertised);
     const authenticated = Boolean(source.apiKey && advertisedIds.size);
     const quotaPerUnit = Number(status?.quota_per_unit);
     const yuanPerUnit = Number(status?.price);
@@ -297,18 +314,31 @@ export class AiGateway {
         note: `${source.label} 定价状态暂时无法验证，已停止调用和计费`,
       };
     }
-    const models = (Array.isArray(pricing) ? pricing : []).flatMap((row): ModelInfo[] => {
-      const id = row.model_name?.trim(); const ratio = Number(row.model_ratio); const completionRatio = Number(row.completion_ratio ?? 1);
+    const parsedModels = (Array.isArray(pricing) ? pricing : []).flatMap((rawRow): ModelInfo[] => {
+      if (!rawRow || typeof rawRow !== 'object') return [];
+      const row = rawRow as PricingRow;
+      const id = validModelId(row.model_name); const ratio = Number(row.model_ratio); const completionRatio = Number(row.completion_ratio ?? 1);
       if (!id || row.quota_type !== 0 || !Number.isFinite(ratio) || ratio <= 0 || !Number.isFinite(completionRatio) || completionRatio <= 0) return [];
-      if (row.supported_endpoint_types && !row.supported_endpoint_types.includes('openai')) return [];
+      if (row.supported_endpoint_types !== undefined && (!Array.isArray(row.supported_endpoint_types) || !row.supported_endpoint_types.includes('openai'))) return [];
       if (authenticated && !advertisedIds.has(id)) return [];
       const inputPrice = Math.max(1, Math.ceil((ratio * 1_000_000 / quotaPerUnit) * yuanPerUnit * 100));
-      return [{ id, label: id, contextWindow: 0, inputPricePerMillionCents: inputPrice, outputPricePerMillionCents: Math.max(1, Math.ceil(inputPrice * completionRatio)) }];
+      const outputPrice = Math.max(1, Math.ceil(inputPrice * completionRatio));
+      if (!Number.isSafeInteger(inputPrice) || !Number.isSafeInteger(outputPrice)) return [];
+      return [{ id, label: id, contextWindow: 0, inputPricePerMillionCents: inputPrice, outputPricePerMillionCents: outputPrice }];
     }).sort((left, right) => {
       const leftRank = preferredModelOrder.indexOf(left.id); const rightRank = preferredModelOrder.indexOf(right.id);
       if (leftRank >= 0 || rightRank >= 0) return (leftRank < 0 ? Number.MAX_SAFE_INTEGER : leftRank) - (rightRank < 0 ? Number.MAX_SAFE_INTEGER : rightRank);
       return left.label.localeCompare(right.label);
     });
+    const conflicts = new Set<string>();
+    const uniqueModels = new Map<string, ModelInfo>();
+    for (const model of parsedModels) {
+      const existing = uniqueModels.get(model.id);
+      if (!existing) uniqueModels.set(model.id, model);
+      else if (existing.inputPricePerMillionCents !== model.inputPricePerMillionCents || existing.outputPricePerMillionCents !== model.outputPricePerMillionCents) conflicts.add(model.id);
+    }
+    for (const id of conflicts) uniqueModels.delete(id);
+    const models = [...uniqueModels.values()].slice(0, maximumCatalogModels);
     const callable = authenticated && models.length > 0;
     const statusName = callable ? 'live' : models.length ? 'catalog' : 'unavailable';
     return { id: source.id, label: source.label, upstreamSourceId: source.upstreamSourceId, status: statusName, callable, paymentDirection: source.paymentDirection, commissionRateBps: source.commissionRateBps, models, note: sourceNote(source, callable) };

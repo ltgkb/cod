@@ -36,6 +36,14 @@ describe('official merchant payment adapters', () => {
     const service = new OfficialPaymentService(config, fetcher as typeof fetch);
     await expect(service.createCheckout(order('wechat'))).resolves.toMatchObject({ kind: 'qr', url: 'weixin://wxpay/bizpayurl?pr=test' });
 
+    fetcher.mockImplementationOnce(async () => {
+      const body = JSON.stringify({ code_url: 'weixin://wxpay/bizpayurl?pr=stale' }); const timestamp = String(Math.floor(Date.now() / 1000) - 301); const nonce = 'stale-response';
+      return new Response(body, { headers: { 'wechatpay-timestamp': timestamp, 'wechatpay-nonce': nonce, 'wechatpay-signature': sign(`${timestamp}\n${nonce}\n${body}\n`, platform.privateKey), 'wechatpay-serial': 'PLATFORMSERIAL' } });
+    });
+    await expect(service.createCheckout(order('wechat'))).rejects.toMatchObject({ code: 'invalid_wechat_response' });
+    fetcher.mockImplementationOnce(async () => new Response('too large', { headers: { 'content-length': String(128 * 1024 + 1) } }));
+    await expect(service.createCheckout(order('wechat'))).rejects.toMatchObject({ code: 'payment_response_too_large' });
+
     const transaction = JSON.stringify({ appid: 'wx-app', mchid: '1900000001', out_trade_no: order('wechat').id, transaction_id: 'wx-transaction-1', trade_state: 'SUCCESS', amount: { total: 1200, currency: 'CNY' } });
     const nonce = '123456789012'; const aad = 'transaction'; const cipher = createCipheriv('aes-256-gcm', Buffer.from(apiV3Key), Buffer.from(nonce)); cipher.setAAD(Buffer.from(aad));
     const ciphertext = Buffer.concat([cipher.update(transaction), cipher.final(), cipher.getAuthTag()]).toString('base64');
@@ -61,5 +69,12 @@ describe('official merchant payment adapters', () => {
     expect(service.verifyAlipayNotification(params.toString())).toEqual({ orderId: order('alipay').id, amountCents: 1200, currency: 'CNY', channel: 'alipay', providerPaymentId: 'ali-trade-1', providerEventId: 'ali-event-1' });
     params.set('total_amount', '12.01');
     expect(() => service.verifyAlipayNotification(params.toString())).toThrow('支付宝回调签名无效');
+  });
+
+  it('rejects payment callback origins with paths or credentials and non-official production Alipay gateways', () => {
+    expect(() => loadConfig({ NODE_ENV: 'test', COD_PAYMENT_PUBLIC_BASE_URL: 'https://cod.example/callback-root' })).toThrow('COD_PAYMENT_PUBLIC_BASE_URL');
+    expect(() => loadConfig({ NODE_ENV: 'test', COD_PAYMENT_PUBLIC_BASE_URL: 'https://user:pass@cod.example' })).toThrow('COD_PAYMENT_PUBLIC_BASE_URL');
+    const merchant = keys(); const alipay = keys();
+    expect(() => loadConfig({ NODE_ENV: 'production', COD_SESSION_SECRET: 's'.repeat(32), DATABASE_URL: 'postgresql://cod:test@127.0.0.1:5432/cod', COD_DEVELOPMENT_LOGIN_ENABLED: 'false', KAI_API_KEY: 'test-key', COD_PAYMENT_PUBLIC_BASE_URL: 'https://cod.example', COD_ALIPAY_APP_ID: '2026000000000001', COD_ALIPAY_SELLER_ID: '2088000000000001', COD_ALIPAY_PRIVATE_KEY_PATH: merchant.privatePath, COD_ALIPAY_PUBLIC_KEY_PATH: alipay.publicPath, COD_ALIPAY_GATEWAY_URL: 'https://payments.evil.example/gateway.do' })).toThrow('openapi.alipay.com');
   });
 });

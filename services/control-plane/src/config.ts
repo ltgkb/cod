@@ -186,7 +186,19 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     }
   }
   if ((wechatPay || alipay) && !paymentPublicBaseUrl) throw new Error('Official payments require COD_PAYMENT_PUBLIC_BASE_URL');
-  if (paymentPublicBaseUrl && !/^https:\/\//.test(paymentPublicBaseUrl)) throw new Error('COD_PAYMENT_PUBLIC_BASE_URL must use HTTPS');
+  if (paymentPublicBaseUrl) {
+    let publicBase: URL;
+    try { publicBase = new URL(paymentPublicBaseUrl); }
+    catch { throw new Error('COD_PAYMENT_PUBLIC_BASE_URL must be a valid HTTPS origin'); }
+    if (publicBase.protocol !== 'https:' || publicBase.username || publicBase.password || (publicBase.pathname !== '/' && publicBase.pathname !== '') || publicBase.search || publicBase.hash) throw new Error('COD_PAYMENT_PUBLIC_BASE_URL must be a valid HTTPS origin');
+  }
+  if (alipay) {
+    let gateway: URL;
+    try { gateway = new URL(alipay.gatewayUrl); }
+    catch { throw new Error('COD_ALIPAY_GATEWAY_URL must be a valid HTTPS URL'); }
+    if (gateway.protocol !== 'https:' || gateway.username || gateway.password) throw new Error('COD_ALIPAY_GATEWAY_URL must be a valid HTTPS URL');
+    if (production && gateway.hostname.toLowerCase() !== 'openapi.alipay.com') throw new Error('Production COD_ALIPAY_GATEWAY_URL must use openapi.alipay.com');
+  }
   if (wechatPay && Buffer.byteLength(wechatPay.apiV3Key, 'utf8') !== 32) throw new Error('COD_WECHAT_PAY_API_V3_KEY must contain exactly 32 bytes');
   for (const [label, path] of [
     ['WeChat merchant private key', wechatPay?.merchantPrivateKeyPath],

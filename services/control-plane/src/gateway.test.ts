@@ -98,4 +98,49 @@ describe('model source gateway', () => {
     expect(sources[0]?.note).toContain('定价状态暂时无法验证');
     await expect(gateway.getModel('ai-kai', 'glm-5.2')).rejects.toMatchObject({ status: 503, code: 'source_unavailable' });
   });
+
+  it('ignores malformed, unsafe, conflicting, and excessive catalog entries without failing the directory', async () => {
+    const validRows = Array.from({ length: 205 }, (_, index) => ({
+      model_name: `safe-model-${String(index).padStart(3, '0')}`,
+      quota_type: 0,
+      model_ratio: 1,
+      completion_ratio: 2,
+      supported_endpoint_types: ['openai'],
+    }));
+    const advertised = validRows.map((row) => ({ id: row.model_name }));
+    advertised.push(null as unknown as { id: string }, { id: 'bad\nmodel' }, { id: 'x'.repeat(201) });
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/api/pricing')) return Response.json({ data: [
+        null,
+        {},
+        { model_name: 'bad-endpoints', quota_type: 0, model_ratio: 1, completion_ratio: 1, supported_endpoint_types: {} },
+        { model_name: 'overflow', quota_type: 0, model_ratio: Number.MAX_VALUE, completion_ratio: Number.MAX_VALUE, supported_endpoint_types: ['openai'] },
+        { ...validRows[0], model_ratio: 2 },
+        ...validRows,
+      ] });
+      if (url.endsWith('/api/status')) return Response.json({ data: { quota_per_unit: 500_000, price: 7 } });
+      if (url.endsWith('/models')) return Response.json({ data: advertised });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const gateway = new AiGateway(loadConfig({ NODE_ENV: 'production', COD_SESSION_SECRET: 's'.repeat(32), DATABASE_URL: 'postgresql://cod:test@127.0.0.1:5432/cod', COD_DEVELOPMENT_LOGIN_ENABLED: 'false', KAI_API_KEY: 'test-key' }), fetcher as typeof fetch);
+    const source = (await gateway.listSources())[0];
+    expect(source).toMatchObject({ status: 'live', callable: true });
+    expect(source?.models).toHaveLength(200);
+    expect(source?.models.some((model) => model.id === 'overflow' || model.id === validRows[0]?.model_name)).toBe(false);
+    expect(source?.models.every((model) => Number.isSafeInteger(model.inputPricePerMillionCents) && Number.isSafeInteger(model.outputPricePerMillionCents))).toBe(true);
+  });
+
+  it('treats a malformed authenticated model list as non-callable catalog data', async () => {
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/api/pricing')) return Response.json({ data: [{ model_name: 'glm-5.2', quota_type: 0, model_ratio: 1, completion_ratio: 2, supported_endpoint_types: ['openai'] }] });
+      if (url.endsWith('/api/status')) return Response.json({ data: { quota_per_unit: 500_000, price: 7 } });
+      if (url.endsWith('/models')) return Response.json({ data: [null, {}, { id: 42 }] });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const gateway = new AiGateway(loadConfig({ NODE_ENV: 'production', COD_SESSION_SECRET: 's'.repeat(32), DATABASE_URL: 'postgresql://cod:test@127.0.0.1:5432/cod', COD_DEVELOPMENT_LOGIN_ENABLED: 'false', KAI_API_KEY: 'test-key' }), fetcher as typeof fetch);
+    const source = (await gateway.listSources())[0];
+    expect(source).toMatchObject({ status: 'catalog', callable: false, models: [{ id: 'glm-5.2' }] });
+  });
 });
