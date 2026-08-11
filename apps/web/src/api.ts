@@ -1,6 +1,6 @@
 import type { AccountSummary, DeviceRecord, KnowledgeHit, ProductManifest, TaskStatus } from '@cod/contracts';
+import { getCodRuntime } from './runtime';
 
-const configuredControlPlaneUrl = import.meta.env.VITE_COD_CONTROL_PLANE_URL;
 const sessionStorageKey = 'cod.session.token';
 
 export interface ModelInfo {
@@ -156,23 +156,58 @@ function storageSet(key: string, value: string | null): void {
 }
 
 export function getControlPlaneUrl(): string {
+  const configuredControlPlaneUrl = getCodRuntime().controlPlaneUrl;
   if (configuredControlPlaneUrl) return configuredControlPlaneUrl.replace(/\/$/, '');
-  const nativeRuntime = (window as Window & { Capacitor?: { isNativePlatform?: () => boolean } }).Capacitor;
-  if (nativeRuntime?.isNativePlatform?.() || window.location.protocol === 'capacitor:' || window.location.protocol === 'ionic:') {
-    return 'https://cod.kai.com';
-  }
-  if (window.location.protocol === 'file:') return window.codDesktop?.controlPlaneUrl?.replace(/\/$/, '') ?? '';
+  if (window.location.protocol === 'file:' && window.codDesktop) return window.codDesktop.controlPlaneUrl.replace(/\/$/, '');
   return '';
 }
 
 async function request<T>(path: string, token?: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${getControlPlaneUrl()}${path}`, {
+  const url = `${getControlPlaneUrl()}${path}`;
+  const headers = new Headers({
+    'content-type': 'application/json',
+    ...(token ? { authorization: `Bearer ${token}` } : {}),
+    ...Object.fromEntries(new Headers(init?.headers).entries()),
+  });
+  const runtime = getCodRuntime();
+  if (runtime.nativeRequest) {
+    if (init?.body !== undefined && typeof init.body !== 'string') throw new TypeError('Native API requests require a string body');
+    if (init?.signal?.aborted) throw init.signal.reason ?? new DOMException('Request cancelled', 'AbortError');
+    const id = createClientId();
+    const abort = () => { void runtime.cancelNativeRequest?.(id); };
+    init?.signal?.addEventListener('abort', abort, { once: true });
+    try {
+      const response = await runtime.nativeRequest({
+        id,
+        url,
+        method: init?.method ?? 'GET',
+        headers: Object.fromEntries(headers.entries()),
+        ...(typeof init?.body === 'string' ? { body: init.body } : {}),
+      });
+      if (init?.signal?.aborted) throw init.signal.reason ?? new DOMException('Request cancelled', 'AbortError');
+      let body: T | ApiErrorBody = {} as T;
+      if (response.body) {
+        try {
+          body = JSON.parse(response.body) as T | ApiErrorBody;
+        } catch {
+          if (response.status >= 200 && response.status < 300) throw new ApiError('Control plane returned invalid JSON', 502, 'invalid_response');
+        }
+      }
+      if (response.status < 200 || response.status >= 300) {
+        const errorBody = body as ApiErrorBody;
+        throw new ApiError(errorBody.message ?? `Control plane request failed: ${response.status}`, response.status, errorBody.error ?? 'request_failed');
+      }
+      return body as T;
+    } catch (error) {
+      if (init?.signal?.aborted) throw init.signal.reason ?? new DOMException('Request cancelled', 'AbortError');
+      throw error;
+    } finally {
+      init?.signal?.removeEventListener('abort', abort);
+    }
+  }
+  const response = await fetch(url, {
     ...init,
-    headers: {
-      'content-type': 'application/json',
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-      ...init?.headers,
-    },
+    headers,
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({})) as ApiErrorBody;

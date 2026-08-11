@@ -2,7 +2,8 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
-import { createClientId, sendChat } from './api';
+import { createClientId, getControlPlaneUrl, sendChat } from './api';
+import { configureCodRuntime } from './runtime';
 
 beforeEach(() => {
   const values = new Map<string, string>();
@@ -19,6 +20,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  configureCodRuntime({});
   try { window.localStorage?.clear(); } catch { /* Node can expose localStorage without a backing file. */ }
   vi.unstubAllGlobals();
 });
@@ -41,6 +43,22 @@ describe('COD workspace', () => {
   it('creates client IDs when randomUUID is unavailable on HTTP origins', () => {
     vi.stubGlobal('crypto', { getRandomValues: (bytes: Uint8Array) => { bytes.fill(7); return bytes; } });
     expect(createClientId()).toBe('07'.repeat(16));
+  });
+
+  it('uses the native transport and injected control plane inside Expo DOM', async () => {
+    let nativeRequest: import('./runtime').NativeHttpRequest | undefined;
+    configureCodRuntime({
+      controlPlaneUrl: 'https://mobile.cod.example/',
+      hostPlatform: 'android',
+      nativeRequest: async (request) => {
+        nativeRequest = request;
+        return { status: 200, body: JSON.stringify({ choices: [{ message: { content: '原生响应' } }], usage: { prompt_tokens: 2, completion_tokens: 3 } }) };
+      },
+    });
+    expect(getControlPlaneUrl()).toBe('https://mobile.cod.example');
+    expect(await sendChat('token', 'demo', 'demo-model', [{ role: 'user', content: '测试' }])).toMatchObject({ content: '原生响应', inputTokens: 2, outputTokens: 3 });
+    expect(nativeRequest).toMatchObject({ url: 'https://mobile.cod.example/v1/chat/completions', method: 'POST' });
+    expect(nativeRequest?.headers.authorization).toBe('Bearer token');
   });
 
   it('sends recent multi-turn context to the model gateway', async () => {
@@ -77,6 +95,21 @@ describe('COD workspace', () => {
     const dialog = await screen.findByRole('dialog', { name: '登录后继续' });
     expect(within(dialog).getByLabelText('密码')).toBeRequired();
     expect(composer).toHaveValue('这是我的第一条消息');
+  });
+
+  it('keeps only two primary mobile context items outside the more disclosure', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => json(capabilities)));
+    const { container } = render(<App />);
+    await screen.findByRole('heading', { name: '新对话' });
+    const strip = container.querySelector('.context-strip');
+    expect(strip).not.toBeNull();
+    expect(strip?.querySelectorAll('.mobile-context-primary')).toHaveLength(2);
+    expect(strip?.querySelectorAll('.mobile-context-secondary')).toHaveLength(3);
+    const toggle = screen.getByRole('button', { name: '展开更多上下文信息，共 3 项' });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(toggle);
+    expect(strip).toHaveClass('mobile-expanded');
+    expect(screen.getByRole('button', { name: '收起上下文信息' })).toHaveAttribute('aria-expanded', 'true');
   });
 
   it('shows public model prices before login', async () => {

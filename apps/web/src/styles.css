@@ -237,6 +237,9 @@ button:active { transform: translateY(1px); }
 .context-strip span, .context-strip button { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; padding: 5px 7px; color: var(--muted-foreground); background: var(--layer-01); border: 1px solid var(--border-subtle); border-radius: 0; font-size: 9px; }
 .context-strip button:hover { color: var(--ink); background: var(--layer-hover-01); }
 .context-strip svg { width: 11px; color: var(--accent); }
+.context-source-desktop, .context-source-mobile, .context-price-desktop, .context-price-mobile { min-width: 0; overflow: hidden; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+.context-source-mobile, .context-price-mobile { display: none; }
+.context-strip > .context-more-toggle { display: none; }
 .knowledge-strip { display: grid; gap: 6px; margin-bottom: 7px; }
 .knowledge-strip a { display: grid; gap: 3px; padding: 8px 10px; color: var(--ink); text-decoration: none; background: var(--layer-01); border-left: 2px solid var(--accent); }
 .knowledge-strip strong { font-size: 10px; }
@@ -634,6 +637,21 @@ button:active { transform: translateY(1px); }
   .conversation-scroll { padding: 22px 16px; }
   .composer-wrap { padding: 8px 12px 12px; }
   .context-strip { flex-wrap: wrap; overflow-x: visible; }
+  .context-strip:not(.mobile-expanded) { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.35fr) auto; gap: 0; background: var(--layer-01); border: 1px solid var(--border-subtle); }
+  .context-strip > .mobile-context-primary { order: 0; }
+  .context-strip > .context-more-toggle { display: flex; order: 1; }
+  .context-strip > .mobile-context-secondary { display: none; order: 2; }
+  .context-strip:not(.mobile-expanded) > .mobile-context-primary, .context-strip:not(.mobile-expanded) > .context-more-toggle { width: 100%; min-width: 0; min-height: 32px; overflow: hidden; padding: 0 9px; background: transparent; border: 0; }
+  .context-strip:not(.mobile-expanded) > .context-price, .context-strip:not(.mobile-expanded) > .context-more-toggle { border-left: 1px solid var(--border-subtle); }
+  .context-strip:not(.mobile-expanded) > .context-more-toggle { justify-content: center; width: auto; color: var(--accent); white-space: nowrap; }
+  .context-strip:not(.mobile-expanded) > .context-more-toggle:hover { background: var(--accent-soft); }
+  .context-strip:not(.mobile-expanded) > .context-more-toggle:focus-visible { outline: 0; box-shadow: inset 0 -2px var(--focus); }
+  .context-strip.mobile-expanded > .mobile-context-secondary { display: flex; }
+  .context-strip.mobile-expanded > .context-more-toggle svg { transform: rotate(180deg); }
+  .context-source-desktop { display: none; }
+  .context-source-mobile { display: block; }
+  .context-price-desktop { display: none; }
+  .context-price-mobile { display: block; font-family: var(--mono); }
   .workspace-header { align-items: stretch; flex-direction: column; height: auto; min-height: 106px; padding: 0 12px 10px; }
   .task-heading { flex: none; min-height: 58px; }
   .header-actions { display: grid; grid-template-columns: auto minmax(0, .9fr) minmax(0, 1.1fr); flex: none; width: 100%; gap: 6px; }
