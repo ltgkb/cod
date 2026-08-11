@@ -139,6 +139,9 @@ describe('production-safe migrations and rate limits', () => {
     const deployScript = readFileSync(new URL('../../../scripts/deploy-server.sh', import.meta.url), 'utf8');
     expect(deployScript).toContain('sudo install -o root -g root -m 755 "${node_binary}" "${release_staging}/bin/node"');
     expect(deployScript).toContain('sudo useradd --system --gid cod --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin cod');
+    expect(deployScript).toContain('sudo chown -R root:root "${release_staging}"');
+    expect(deployScript).toContain('sudo chmod -R go-w "${release_staging}"');
+    expect(deployScript).toContain('! -user root -o ! -group root -o -perm /022');
   });
 
   it('keeps production registration closed until email ownership is verified', () => {

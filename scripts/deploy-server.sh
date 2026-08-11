@@ -124,6 +124,12 @@ if [[ ! -x "${release}/bin/node" || ! -f "${release}/start.mjs" || ! -f "${relea
   sudo rsync -a --delete scripts/ "${release_staging}/scripts/"
   sudo chmod 755 "${release_staging}/scripts/"*.sh
   sudo rsync -a --delete apps/web/dist/ "${release_staging}/web/"
+  sudo chown -R root:root "${release_staging}"
+  sudo chmod -R go-w "${release_staging}"
+  if sudo find "${release_staging}" \( ! -user root -o ! -group root -o -perm /022 \) -print -quit | grep -q .; then
+    echo "Release staging contains mutable or non-root-owned files" >&2
+    exit 1
+  fi
   sudo mv "${release_staging}" "${release}"
 fi
 if ! getent group cod >/dev/null; then
