@@ -97,6 +97,17 @@ describe('COD workspace', () => {
     expect(composer).toHaveValue('这是我的第一条消息');
   });
 
+  it('keeps the registration invite code optional', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => json(capabilities)));
+    render(<App />);
+    await screen.findByRole('heading', { name: '新对话' });
+    fireEvent.click(screen.getByTitle('登录'));
+    const dialog = await screen.findByRole('dialog', { name: '登录 COD' });
+    fireEvent.click(within(dialog).getByRole('tab', { name: '注册账号' }));
+    expect(within(dialog).getByLabelText('邀请码')).not.toBeRequired();
+    expect(within(dialog).getByText(/邀请码选填，用于绑定邀请人与后续返佣/)).toBeInTheDocument();
+  });
+
   it('keeps only two primary mobile context items outside the more disclosure', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => json(capabilities)));
     const { container } = render(<App />);

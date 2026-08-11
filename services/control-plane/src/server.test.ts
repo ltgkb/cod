@@ -33,7 +33,7 @@ describe('control-plane production rules', () => {
     });
     expect(config.developmentTopupEnabled).toBe(false);
     expect(config.registrationEnabled).toBe(false);
-    expect(config.inviteCodeRequired).toBe(true);
+    expect(config.inviteCodeRequired).toBe(false);
   });
 
   it('rejects empty assistant content before it can be settled as a successful reply', () => {
@@ -70,6 +70,7 @@ describe('control-plane production rules', () => {
     const {base,database}=await start();const email='developer@kai.com';const principal={userId:`usr_${createHash('sha256').update(email).digest('hex').slice(0,20)}`,tenantId:'tenant_kai_com',email,role:'member' as const};
     const inviter=await database.getReferralSummary(principal);
     const weak=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'new@example.com',password:'short1'})});expect(weak.status).toBe(400);
+    const optional=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'unreferred@example.com',password:'Password123'})});expect(optional.status).toBe(201);expect(await optional.json()).toMatchObject({inviteCode:expect.stringMatching(/^KAI-/),referred:false});
     const invalidInvite=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'new@example.com',password:'Password123',inviteCode:'KAI-NOTFOUND'})});expect(invalidInvite.status).toBe(400);
     const registration=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'new@example.com',password:'Password123',inviteCode:inviter.inviteCode})});expect(registration.status).toBe(201);
     const registered=await registration.json() as {token:string;inviteCode:string;referred:boolean};expect(registered).toMatchObject({inviteCode:expect.stringMatching(/^KAI-/),referred:true});
@@ -83,8 +84,7 @@ describe('control-plane production rules', () => {
     const registration=await fetch(`${disabled.base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'new@example.com',password:'Password123'})});
     expect(registration.status).toBe(503);expect(await registration.json()).toMatchObject({error:'registration_unavailable'});
     const {base}=await start({COD_INVITE_CODE_REQUIRED:'true'});
-    const missingInvite=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'new@example.com',password:'Password123'})});
-    expect(missingInvite.status).toBe(400);expect(await missingInvite.json()).toMatchObject({error:'invite_code_required'});
+    const capabilities=await fetch(`${base}/api/capabilities`);expect(await capabilities.json()).toMatchObject({authentication:{inviteCodeOptional:true,inviteCodeRequired:false}});
     const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com',password:'Password123'})});
     const {token}=await login.json() as {token:string};
     const order=await fetch(`${base}/api/payment-orders`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':'unavailable-order'},body:JSON.stringify({amountCents:1200,channel:'wechat'})});
