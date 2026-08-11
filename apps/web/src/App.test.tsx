@@ -649,6 +649,25 @@ describe('COD workspace', () => {
     await waitFor(() => expect(setNativeTopmostUiVisible).toHaveBeenLastCalledWith(false));
   });
 
+  it('traps keyboard focus inside a modal, closes it with Escape, and restores the trigger focus', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => String(input).endsWith('/api/capabilities') ? json(capabilities) : json([])));
+    render(<App />);
+    await screen.findByRole('heading', { name: '新对话' });
+    const trigger = screen.getByTitle('模型库');
+    trigger.focus();
+    fireEvent.click(trigger);
+    const dialog = await screen.findByRole('dialog', { name: '模型库' });
+    const close = within(dialog).getByTitle('关闭');
+    await waitFor(() => expect(dialog).toContainElement(document.activeElement as HTMLElement));
+    const last = within(dialog).getByRole('button', { name: '登录后使用模型' });
+    last.focus();
+    fireEvent.keyDown(document, { key: 'Tab' });
+    expect(close).toHaveFocus();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: '模型库' })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
   it('keeps the registration invite code optional', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => json(capabilities)));
     render(<App />);
