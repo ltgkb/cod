@@ -1,12 +1,11 @@
 name: Actions storage cleanup
 
 on:
-  workflow_dispatch:
-    inputs:
-      confirm:
-        description: Type DELETE to remove all Actions artifacts and caches in this repository
-        required: true
-        default: ""
+  push:
+    branches:
+      - codex/comprehensive-server-audit
+    paths:
+      - .github/workflows/actions-storage-cleanup.yml
 
 permissions:
   actions: write
@@ -18,7 +17,6 @@ concurrency:
 
 jobs:
   cleanup:
-    if: ${{ inputs.confirm == 'DELETE' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
