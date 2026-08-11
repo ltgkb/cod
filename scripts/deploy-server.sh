@@ -87,16 +87,15 @@ rollback() {
   exit "${exit_code}"
 }
 
-trap rollback ERR
-
 source /home/ubuntu/cod-project/upstream/goose/bin/activate-hermit
 cd "${project_root}"
 npm ci
+node --test scripts/check-npm-audit.test.mjs
+node scripts/check-npm-audit.mjs
 npm run typecheck
 npm test
 npm run lint
 npm run build
-npm audit --audit-level=high
 
 sudo install -d -m 755 "${release_root}"
 if [[ "${release}" == "${previous}" && -f "${release}/start.mjs" && -f "${release}/web/index.html" ]]; then
@@ -125,6 +124,7 @@ if [[ ! -f "${release}/start.mjs" || ! -f "${release}/web/index.html" ]]; then
   sudo mv "${release_staging}" "${release}"
 fi
 backup_configuration
+trap rollback ERR
 sudo install -o root -g root -m 644 deploy/cod-control-plane.service /etc/systemd/system/cod-control-plane.service
 sudo install -o root -g root -m 644 deploy/cod-backup.service /etc/systemd/system/cod-backup.service
 sudo install -o root -g root -m 644 deploy/cod-backup.timer /etc/systemd/system/cod-backup.timer

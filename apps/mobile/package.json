@@ -14,6 +14,7 @@
     "export:ios": "expo export --platform ios --output-dir release/ios && node scripts/verify-dom-release.cjs release/ios",
     "doctor": "expo-doctor",
     "test": "node --test ./scripts/*.test.cjs",
+    "test:security": "node --test ./scripts/metro-security.test.cjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 
 const config = require('../metro.config.js');
-const imageSize = require('image-size');
+const { getAssetSize } = require('metro/private/Assets');
 
 const disabledSamples = {
   heif: Buffer.from([0, 0, 0, 12, ...Buffer.from('ftypheic')]),
@@ -16,9 +16,12 @@ const disabledSamples = {
   'jxl-stream': Buffer.from([0xff, 0x0a]),
 };
 
-test('Metro rejects the unused high-risk image parsers before calculation', () => {
+test('Metro asset sizing rejects the unused high-risk image parsers before calculation', () => {
   for (const [type, input] of Object.entries(disabledSamples)) {
-    assert.throws(() => imageSize(input), new RegExp(`disabled file type: ${type}`));
+    assert.throws(
+      () => getAssetSize('png', input, `malformed-${type}.png`),
+      new RegExp(`disabled file type: ${type}`),
+    );
   }
 });
 
@@ -29,7 +32,7 @@ test('Metro still calculates supported PNG assets', () => {
   png.writeUInt32BE(2, 16);
   png.writeUInt32BE(3, 20);
 
-  assert.deepEqual(imageSize(png), { width: 2, height: 3, type: 'png' });
+  assert.deepEqual(getAssetSize('png', png, 'valid.png'), { width: 2, height: 3 });
 });
 
 test('disabled parser names are not direct Metro asset extensions', () => {

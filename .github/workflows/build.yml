@@ -6,7 +6,20 @@ on:
   pull_request:
 
 jobs:
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node --test scripts/check-npm-audit.test.mjs
+      - run: node scripts/check-npm-audit.mjs
+
   web:
+    needs: security
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -20,6 +33,7 @@ jobs:
       - run: npm run build -w @cod/web
 
   desktop:
+    needs: security
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
@@ -53,6 +67,7 @@ jobs:
           if-no-files-found: error
 
   android:
+    needs: security
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -70,6 +85,7 @@ jobs:
           if-no-files-found: error
 
   ios:
+    needs: security
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
