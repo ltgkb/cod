@@ -6,10 +6,13 @@ on:
       - codex/comprehensive-server-audit
     paths:
       - .github/workflows/actions-storage-cleanup.yml
+  workflow_dispatch:
 
 permissions:
   actions: write
   contents: read
+  issues: write
+  pull-requests: write
 
 concurrency:
   group: actions-storage-cleanup
@@ -25,36 +28,60 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          PR_NUMBER: "2"
         run: |
-          set -euo pipefail
+          set -uo pipefail
 
           artifact_count=0
           artifact_bytes=0
+          artifact_failures=0
           while IFS=$'\t' read -r id size name; do
             [[ -z "${id}" ]] && continue
             echo "Deleting artifact ${name} (${size} bytes, id ${id})"
-            gh api -X DELETE "repos/${REPO}/actions/artifacts/${id}" >/dev/null
-            artifact_count=$((artifact_count + 1))
-            artifact_bytes=$((artifact_bytes + size))
+            if gh api -X DELETE "repos/${REPO}/actions/artifacts/${id}" >/dev/null 2>&1; then
+              artifact_count=$((artifact_count + 1))
+              artifact_bytes=$((artifact_bytes + size))
+            else
+              artifact_failures=$((artifact_failures + 1))
+            fi
           done < <(gh api --paginate "repos/${REPO}/actions/artifacts?per_page=100" --jq '.artifacts[] | [.id, .size_in_bytes, .name] | @tsv')
 
           cache_count=0
           cache_bytes=0
+          cache_failures=0
           while IFS=$'\t' read -r id size key; do
             [[ -z "${id}" ]] && continue
             echo "Deleting cache ${key} (${size} bytes, id ${id})"
-            gh api -X DELETE "repos/${REPO}/actions/caches/${id}" >/dev/null
-            cache_count=$((cache_count + 1))
-            cache_bytes=$((cache_bytes + size))
+            if gh api -X DELETE "repos/${REPO}/actions/caches/${id}" >/dev/null 2>&1; then
+              cache_count=$((cache_count + 1))
+              cache_bytes=$((cache_bytes + size))
+            else
+              cache_failures=$((cache_failures + 1))
+            fi
           done < <(gh api --paginate "repos/${REPO}/actions/caches?per_page=100" --jq '.actions_caches[] | [.id, .size_in_bytes, .key] | @tsv')
 
-          remaining_artifacts=$(gh api "repos/${REPO}/actions/artifacts?per_page=1" --jq '.total_count')
-          remaining_caches=$(gh api "repos/${REPO}/actions/caches?per_page=1" --jq '.total_count')
+          sleep 5
+          remaining_artifacts="$(gh api "repos/${REPO}/actions/artifacts?per_page=1" --jq '.total_count' 2>/dev/null || echo -1)"
+          remaining_caches="$(gh api "repos/${REPO}/actions/caches?per_page=1" --jq '.total_count' 2>/dev/null || echo -1)"
 
-          echo "Deleted ${artifact_count} artifacts totaling ${artifact_bytes} bytes"
-          echo "Deleted ${cache_count} caches totaling ${cache_bytes} bytes"
-          echo "Remaining artifacts: ${remaining_artifacts}"
-          echo "Remaining caches: ${remaining_caches}"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          report=$(cat <<EOF
+          ### Actions storage cleanup result
 
+          - Deleted artifacts: ${artifact_count} (${artifact_bytes} bytes)
+          - Artifact deletion failures: ${artifact_failures}
+          - Deleted caches: ${cache_count} (${cache_bytes} bytes)
+          - Cache deletion failures: ${cache_failures}
+          - Remaining artifacts: ${remaining_artifacts}
+          - Remaining caches: ${remaining_caches}
+          - Run: ${run_url}
+          EOF
+          )
+
+          gh api -X POST "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body="${report}" >/dev/null
+
+          echo "${report}"
+          test "${artifact_failures}" -eq 0
+          test "${cache_failures}" -eq 0
           test "${remaining_artifacts}" -eq 0
           test "${remaining_caches}" -eq 0
