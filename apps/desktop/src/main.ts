@@ -10,15 +10,18 @@ import { promisify } from 'node:util';
 import type { AgentGatewayConfig, TerminalResult } from '@cod/contracts';
 import { mintAgentSession } from './agent-session.js';
 import { commandPathCandidates, commandPolicyViolation, isWithinRoot, parseCommand, validateCommandPath } from './command-policy.js';
-import { collectUntrackedDiff } from './git-diff.js';
+import { collectGitDiff } from './git-diff.js';
 import { minimalGooseEnvironment } from './goose-environment.js';
-import { GooseLaunchCoordinator } from './goose-lifecycle.js';
+import { forceTerminateChildProcess, GooseLaunchCoordinator, terminateChildProcess } from './goose-lifecycle.js';
+import { cleanupAbandonedGooseSidecar, clearGooseOwnershipRecord, saveGooseOwnershipRecord } from './goose-ownership.js';
 import { loadApprovedProjectRoots, maximumApprovedProjectRoots, saveApprovedProjectRoots } from './project-roots.js';
 import { collectWorkspaceFiles } from './workspace-files.js';
 
 const execFileAsync = promisify(execFile);
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const developmentUrl = process.env.COD_DEV_SERVER_URL || 'http://127.0.0.1:5173';
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) app.quit();
 const approvedProjectRoots = new Set<string>();
 let gooseSidecar: ChildProcess | null = null;
 let gooseAcpUrl: string | null = null;
@@ -57,6 +60,9 @@ async function waitForGoose(port: number, processToWatch: ChildProcess, attempts
   processToWatch.once('exit', handleExit);
   try {
     for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (processToWatch.exitCode !== null || processToWatch.signalCode !== null) {
+        throw new Error(`Goose sidecar exited before becoming ready${processToWatch.exitCode !== null ? ` (exit ${processToWatch.exitCode})` : ` (${processToWatch.signalCode})`}`);
+      }
       if (startupError) throw startupError;
       try {
         const response = await fetch(`http://127.0.0.1:${port}/status`);
@@ -76,16 +82,17 @@ async function waitForGoose(port: number, processToWatch: ChildProcess, attempts
 
 async function stopGooseSidecar(): Promise<void> {
   const processToStop = gooseSidecar;
+  const processId = processToStop?.pid;
   gooseSidecar = null;
   gooseAcpUrl = null;
   gooseConfigurationKey = null;
   gooseAgentTokenExpiresAt = 0;
-  if (!processToStop || processToStop.exitCode !== null) return;
-  await new Promise<void>((resolve) => {
-    const timeout = setTimeout(() => { processToStop.kill('SIGKILL'); resolve(); }, 2_000);
-    processToStop.once('exit', () => { clearTimeout(timeout); resolve(); });
-    processToStop.kill();
-  });
+  await terminateChildProcess(processToStop);
+  if (processId) await clearGooseOwnershipRecord(gooseOwnershipFile(), processId).catch(() => undefined);
+}
+
+function gooseOwnershipFile(): string {
+  return path.join(app.getPath('userData'), 'goose-sidecar-owner.json');
 }
 
 async function prepareGooseStateHome(): Promise<string | null> {
@@ -135,6 +142,7 @@ async function ensureGooseSidecarSerialized(config: AgentGatewayConfig,assertCur
     assertCurrent();
     return null;
   }
+  const resolvedBinary = await fs.realpath(binary);
   assertCurrent();
   const controlPlane = new URL(process.env.COD_CONTROL_PLANE_URL ?? 'https://cod.kai.com');
   if (controlPlane.protocol !== 'https:' && process.env.NODE_ENV === 'production') {
@@ -150,7 +158,7 @@ async function ensureGooseSidecarSerialized(config: AgentGatewayConfig,assertCur
   controlPlane.pathname = `${controlPlane.pathname.replace(/\/$/, '')}/v1/tasks/${encodeURIComponent(config.taskId)}/sources/${encodeURIComponent(config.sourceId)}`;
   controlPlane.search = '';
   controlPlane.hash = '';
-  const spawnedSidecar = spawn(binary, ['serve', '--host', '127.0.0.1', '--port', String(port), '--with-builtin', 'developer'], {
+  const spawnedSidecar = spawn(resolvedBinary, ['serve', '--host', '127.0.0.1', '--port', String(port), '--with-builtin', 'developer'], {
     stdio: 'ignore',
     env: {
       ...minimalGooseEnvironment(process.env),
@@ -164,8 +172,22 @@ async function ensureGooseSidecarSerialized(config: AgentGatewayConfig,assertCur
       ...(gooseStateHome ? { XDG_STATE_HOME: gooseStateHome } : {}),
     },
   });
+  const sidecarPid = spawnedSidecar.pid;
+  if (!sidecarPid) {
+    await terminateChildProcess(spawnedSidecar);
+    throw new Error('Goose sidecar failed to expose a process ID');
+  }
   gooseSidecar = spawnedSidecar;
+  const ownershipReady = saveGooseOwnershipRecord(gooseOwnershipFile(), {
+    version: 1,
+    ownerPid: process.pid,
+    sidecarPid,
+    executablePath: resolvedBinary,
+    port,
+    createdAt: new Date().toISOString(),
+  });
   const clearSpawnedSidecar = () => {
+    void ownershipReady.then(() => clearGooseOwnershipRecord(gooseOwnershipFile(), sidecarPid)).catch(() => undefined);
     if (gooseSidecar !== spawnedSidecar) return;
     gooseSidecar = null;
     gooseAcpUrl = null;
@@ -175,10 +197,11 @@ async function ensureGooseSidecarSerialized(config: AgentGatewayConfig,assertCur
   spawnedSidecar.once('exit', clearSpawnedSidecar);
   spawnedSidecar.once('error', clearSpawnedSidecar);
   try {
+    await ownershipReady;
     await waitForGoose(port, spawnedSidecar);
     assertCurrent();
   } catch (error) {
-    if (spawnedSidecar.exitCode === null && !spawnedSidecar.killed) spawnedSidecar.kill();
+    await terminateChildProcess(spawnedSidecar);
     clearSpawnedSidecar();
     throw error;
   }
@@ -311,22 +334,7 @@ ipcMain.handle('cod:read-text-file', async (_event, root: string, relativePath: 
 ipcMain.handle('cod:git-diff', async (_event, root: string) => {
   try {
     const resolvedRoot = await approvedProjectRoot(root);
-    try {
-      const { stdout } = await execFileAsync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: resolvedRoot, maxBuffer: 64 * 1024 });
-      if (stdout.trim() !== 'true') return '当前目录不是 Git 工作区，暂无可显示的改动。';
-    } catch {
-      return '当前目录不是 Git 仓库，暂无可显示的改动。初始化 Git 后即可在这里查看变更。';
-    }
-    const [{ stdout: unstaged }, { stdout: staged }, untracked] = await Promise.all([
-      execFileAsync('git', ['diff', '--no-ext-diff', '--'], { cwd: resolvedRoot, maxBuffer: 2 * 1024 * 1024 }),
-      execFileAsync('git', ['diff', '--cached', '--no-ext-diff', '--'], { cwd: resolvedRoot, maxBuffer: 2 * 1024 * 1024 }),
-      collectUntrackedDiff(resolvedRoot),
-    ]);
-    return [
-      unstaged && '# Unstaged changes\n' + unstaged,
-      staged && '# Staged changes\n' + staged,
-      untracked && '# Untracked files\n' + untracked,
-    ].filter(Boolean).join('\n');
+    return collectGitDiff(resolvedRoot);
   } catch (error) {
     return error instanceof Error ? error.message : 'Unable to read git diff';
   }
@@ -357,17 +365,43 @@ ipcMain.handle('cod:run-command', async (_event, root: string, rawCommand: strin
   }
 });
 
-app.whenReady().then(async () => {
-  session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
-  session.defaultSession.setPermissionCheckHandler(() => false);
-  await restoreApprovedProjectRoots();
-  await createWindow();
-  app.on('activate', async () => {
-    if (BrowserWindow.getAllWindows().length === 0) await createWindow();
+if (hasSingleInstanceLock) {
+  app.whenReady().then(async () => {
+    session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+    session.defaultSession.setPermissionCheckHandler(() => false);
+    await cleanupAbandonedGooseSidecar(gooseOwnershipFile()).catch(() => undefined);
+    await restoreApprovedProjectRoots();
+    await createWindow();
+    app.on('activate', async () => {
+      if (BrowserWindow.getAllWindows().length === 0) await createWindow();
+    });
   });
-});
 
-app.on('window-all-closed', () => {
-  void invalidateAndStopGooseSidecar();
-  if (process.platform !== 'darwin') app.quit();
-});
+  app.on('second-instance', () => {
+    const window = BrowserWindow.getAllWindows()[0];
+    if (!window) return;
+    if (window.isMinimized()) window.restore();
+    window.show();
+    window.focus();
+  });
+
+  app.on('window-all-closed', () => {
+    void invalidateAndStopGooseSidecar();
+    if (process.platform !== 'darwin') app.quit();
+  });
+
+  app.on('before-quit', () => { void invalidateAndStopGooseSidecar(); });
+  process.once('exit', () => { forceTerminateChildProcess(gooseSidecar); });
+
+  let stoppingForSignal = false;
+  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
+    process.once(signal, () => {
+      if (stoppingForSignal) {
+        forceTerminateChildProcess(gooseSidecar);
+        process.exit(1);
+      }
+      stoppingForSignal = true;
+      void invalidateAndStopGooseSidecar().finally(() => { process.kill(process.pid, signal); });
+    });
+  }
+}

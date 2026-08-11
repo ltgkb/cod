@@ -1,8 +1,42 @@
+import type { ChildProcess } from 'node:child_process';
+
+function childHasExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
 export class GooseLaunchInterruptedError extends Error {
   constructor() {
     super('Goose launch was interrupted by a renderer lifecycle change');
     this.name='GooseLaunchInterruptedError';
   }
+}
+
+export async function terminateChildProcess(processToStop: ChildProcess | null, timeoutMilliseconds = 2_000): Promise<void> {
+  if (!processToStop || childHasExited(processToStop)) return;
+  await new Promise<void>((resolve) => {
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      processToStop.removeListener('exit', finish);
+      resolve();
+    };
+    const timeout = setTimeout(() => {
+      try { processToStop.kill('SIGKILL'); }
+      finally { finish(); }
+    }, Math.max(0, timeoutMilliseconds));
+    processToStop.once('exit', finish);
+    if (childHasExited(processToStop)) { finish(); return; }
+    try { processToStop.kill(); }
+    catch { finish(); }
+  });
+}
+
+export function forceTerminateChildProcess(processToStop: ChildProcess | null): void {
+  if (!processToStop || childHasExited(processToStop)) return;
+  try { processToStop.kill('SIGKILL'); }
+  catch { /* The process already exited between the check and the signal. */ }
 }
 
 export class GooseLaunchCoordinator {
