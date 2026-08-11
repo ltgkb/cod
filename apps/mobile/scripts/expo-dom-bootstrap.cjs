@@ -1,5 +1,7 @@
 'use strict';
 
+const crypto = require('node:crypto');
+
 const EXPO_BOOTSTRAP_START = `        <script>
           var injectedObject = {};
           try {
@@ -12,6 +14,7 @@ const EXPO_BOOTSTRAP_START = `        <script>
         </script>`;
 
 const COD_BOOTSTRAP_MARKER = 'cod:expo-dom-bootstrap-v1';
+const COD_CSP_MARKER = 'data-cod-generated="strict-dom-v1"';
 const NATIVE_ACTION_NAMES = Object.freeze([
   'nativeRequest',
   'cancelNativeRequest',
@@ -19,6 +22,10 @@ const NATIVE_ACTION_NAMES = Object.freeze([
   'copyText',
   'setNativeColorMode',
   'setNativeTopmostUiVisible',
+  'loadSessionCleanupPending',
+  'loadSessionToken',
+  'saveSessionToken',
+  'clearSessionToken',
 ]);
 
 function assertControlPlaneUrl(value) {
@@ -89,13 +96,44 @@ function createBootstrapScript(controlPlaneUrl) {
         </script>`;
 }
 
+function createDomContentSecurityPolicy(html, development = false) {
+  const hashes = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)]
+    .map((match) => match[1])
+    .filter((source) => source.length > 0)
+    .map((source) => `'sha256-${crypto.createHash('sha256').update(source).digest('base64')}'`);
+  return [
+    "default-src 'none'",
+    `script-src 'self' ${hashes.join(' ')}${development ? " 'unsafe-eval'" : ''}`,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data:",
+    development ? 'connect-src http: https: ws: wss:' : "connect-src 'none'",
+    "frame-src 'none'",
+    "child-src 'none'",
+    "worker-src 'none'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+  ].join('; ');
+}
+
+function refreshDomContentSecurityPolicy(html, development = false) {
+  const policy = createDomContentSecurityPolicy(html, development);
+  const meta = `<meta http-equiv="Content-Security-Policy" ${COD_CSP_MARKER} content="${policy}" />`;
+  const existing = /<meta http-equiv="Content-Security-Policy" data-cod-generated="strict-dom-v1" content="[^"]*" \/>/;
+  if (existing.test(html)) return html.replace(existing, meta);
+  const charset = '<meta charset="utf-8" />';
+  if (!html.includes(charset)) throw new Error('Expo DOM HTML is missing the charset marker required for early CSP');
+  return html.replace(charset, `${charset}\n        ${meta}`);
+}
+
 function transformExpoDomHtml(html, controlPlaneUrl) {
-  if (html.includes(COD_BOOTSTRAP_MARKER)) return html;
+  if (html.includes(COD_BOOTSTRAP_MARKER)) return refreshDomContentSecurityPolicy(html, true);
   const occurrences = html.split(EXPO_BOOTSTRAP_START).length - 1;
   if (occurrences !== 1) {
     throw new Error(`Expected one Expo DOM bootstrap block, found ${occurrences}`);
   }
-  return html.replace(EXPO_BOOTSTRAP_START, () => createBootstrapScript(controlPlaneUrl));
+  return refreshDomContentSecurityPolicy(html.replace(EXPO_BOOTSTRAP_START, () => createBootstrapScript(controlPlaneUrl)), true);
 }
 
 function assertExpoDevelopmentDomHtml(html) {
@@ -122,10 +160,13 @@ function assertExpoDevelopmentDomHtml(html) {
 
 module.exports = {
   COD_BOOTSTRAP_MARKER,
+  COD_CSP_MARKER,
   NATIVE_ACTION_NAMES,
   createBootstrapScript,
+  createDomContentSecurityPolicy,
   createFallbackPayload,
   getMetroServerPort,
+  refreshDomContentSecurityPolicy,
   assertExpoDevelopmentDomHtml,
   transformExpoDomHtml,
 };

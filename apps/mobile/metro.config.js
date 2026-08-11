@@ -5,6 +5,15 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 
 const { disableTypes: disableImageTypes } = require('image-size');
+const { patchExpoDomTemplate } = require('./scripts/patch-expo-dom-template.cjs');
+const { patchReactNativeWebView } = require('./scripts/patch-react-native-webview.cjs');
+
+// Expo does not currently expose a DOM HTML-template hook. Patch its pinned
+// generator before Metro/Expo CLI loads it so both local and EAS embeds receive
+// the same strict CSP. The postinstall hook applies the same idempotent patch.
+patchExpoDomTemplate();
+patchReactNativeWebView();
+
 const { getDefaultConfig } = require('expo/metro-config');
 
 const disabledImageTypes = Object.freeze(['heif', 'icns', 'jxl', 'jxl-stream']);
@@ -56,8 +65,11 @@ function serveBootstrapHtml(req, res, metroPort) {
         }
         assertExpoDevelopmentDomHtml(source);
         const output = transformExpoDomHtml(source, controlPlaneUrl);
+        const contentSecurityPolicy = output.match(/<meta http-equiv="Content-Security-Policy" data-cod-generated="strict-dom-v1" content="([^"]+)" \/>/)?.[1];
+        if (!contentSecurityPolicy) throw new Error('COD DOM Content Security Policy is missing');
         res.statusCode = 200;
         res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.setHeader('Content-Security-Policy', contentSecurityPolicy);
         res.setHeader('Cache-Control', 'no-store');
         res.setHeader('Content-Length', Buffer.byteLength(output));
         res.end(output);

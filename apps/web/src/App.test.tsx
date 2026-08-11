@@ -2,12 +2,17 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
-import { createClientId, getControlPlaneUrl, getTaskExecutionLease, heartbeatDevice, logoutCod, sendChat, updateRemoteTask } from './api';
-import { configureCodRuntime, requestCodTopmostUiClose } from './runtime';
+import { createClientId, getControlPlaneUrl, getTaskExecutionLease, heartbeatDevice, loginCod, logoutCod, observeCodSessionInvalidated, persistCodSession, refreshAccount, resumeCodSession, sendChat, updateRemoteTask } from './api';
+import { configureCodRuntime as configureCodRuntimeBase, requestCodTopmostUiClose } from './runtime';
+import type { CodRuntimeConfig } from './runtime';
 
-beforeEach(() => {
+function configureCodRuntime(next: CodRuntimeConfig): void {
+  configureCodRuntimeBase({ loadSessionCleanupPending: async () => false, ...next });
+}
+
+function createMemoryStorage(): Storage {
   const values = new Map<string, string>();
-  const storage: Storage = {
+  return {
     get length() { return values.size; },
     clear: () => values.clear(),
     getItem: (key) => values.get(key) ?? null,
@@ -15,14 +20,18 @@ beforeEach(() => {
     removeItem: (key) => { values.delete(key); },
     setItem: (key, value) => { values.set(key, String(value)); },
   };
-  Object.defineProperty(window, 'localStorage', { configurable: true, value: storage });
+}
+
+beforeEach(() => {
+  Object.defineProperty(window, 'localStorage', { configurable: true, value: createMemoryStorage() });
 });
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
-  logoutCod();
-  vi.useRealTimers();
   configureCodRuntime({});
+  Object.defineProperty(window, 'localStorage', { configurable: true, value: createMemoryStorage() });
+  await logoutCod();
+  vi.useRealTimers();
   try { window.localStorage?.clear(); } catch { /* Node can expose localStorage without a backing file. */ }
   vi.unstubAllGlobals();
 });
@@ -61,6 +70,487 @@ describe('COD workspace', () => {
     expect(await sendChat('token', 'demo', 'demo-model', [{ role: 'user', content: '测试' }])).toMatchObject({ content: '原生响应', inputTokens: 2, outputTokens: 3 });
     expect(nativeRequest).toMatchObject({ url: 'https://mobile.cod.example/v1/chat/completions', method: 'POST' });
     expect(nativeRequest?.headers.authorization).toBe('Bearer token');
+    expect(nativeRequest?.url).not.toContain('token');
+  });
+
+  it('keeps the Web and Desktop session fallback in localStorage', async () => {
+    await persistCodSession('web-session');
+    expect(window.localStorage.getItem('cod.session.token')).toBe('web-session');
+    expect(await logoutCod('different-session')).toBe(false);
+    expect(window.localStorage.getItem('cod.session.token')).toBe('web-session');
+    expect(await logoutCod('web-session')).toBe(true);
+    expect(window.localStorage.getItem('cod.session.token')).toBeNull();
+  });
+
+  it('migrates a legacy Expo WebView session into secure storage and removes the plaintext copy', async () => {
+    let secureToken: string | null = null;
+    const saveSessionToken = vi.fn(async (token: string) => { secureToken = token; });
+    const clearSessionToken = vi.fn(async (expected?: string) => {
+      if (expected !== undefined && secureToken !== null && secureToken !== expected) return false;
+      secureToken = null; return true;
+    });
+    configureCodRuntime({
+      hostPlatform: 'android',
+      loadSessionToken: async () => secureToken,
+      saveSessionToken,
+      clearSessionToken,
+    });
+    window.localStorage.setItem('cod.session.token', 'legacy-session');
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => String(input).endsWith('/api/account')
+      ? json({ userId: 'user', displayName: 'developer', balanceCents: 0, currency: 'CNY', plan: 'developer' })
+      : json([])));
+    await expect(resumeCodSession()).resolves.toMatchObject({ token: 'legacy-session' });
+    expect(saveSessionToken).toHaveBeenCalledWith('legacy-session');
+    expect(secureToken).toBe('legacy-session');
+    expect(window.localStorage.getItem('cod.session.token')).toBeNull();
+  });
+
+  it('fails closed when the Expo secure-session bridge is missing or cannot migrate', async () => {
+    window.localStorage.setItem('cod.session.token', 'legacy-session');
+    configureCodRuntime({ hostPlatform: 'android' });
+    await expect(resumeCodSession()).rejects.toMatchObject({ code: 'secure_session_storage_unavailable' });
+    expect(window.localStorage.getItem('cod.session.token')).toBeNull();
+    window.localStorage.removeItem('cod.session.logout-pending');
+
+    window.localStorage.setItem('cod.session.token', 'another-session');
+    const clearSessionToken = vi.fn(async () => true);
+    configureCodRuntime({
+      hostPlatform: 'android',
+      loadSessionToken: async () => null,
+      saveSessionToken: async () => { throw new Error('native storage unavailable'); },
+      clearSessionToken,
+    });
+    await expect(resumeCodSession()).rejects.toMatchObject({ code: 'secure_session_storage_unavailable' });
+    expect(clearSessionToken).toHaveBeenCalledWith(undefined);
+    expect(window.localStorage.getItem('cod.session.token')).toBeNull();
+  });
+
+  it('does not enter a mobile session when secure persistence fails', async () => {
+    configureCodRuntime({
+      hostPlatform: 'ios',
+      loadSessionToken: async () => null,
+      saveSessionToken: async () => { throw new Error('keychain unavailable'); },
+      clearSessionToken: async () => true,
+    });
+    await expect(persistCodSession('new-session')).rejects.toMatchObject({ code: 'secure_session_storage_unavailable' });
+    expect(window.localStorage.getItem('cod.session.token')).toBeNull();
+  });
+
+  it('uses expected-token CAS so a stale authenticated 401 cannot clear a newer session', async () => {
+    const backing=window.localStorage;
+    let markerMutations=0;
+    const storage:Storage={
+      get length(){return backing.length;},
+      clear:()=>backing.clear(),
+      getItem:(key)=>backing.getItem(key),
+      key:(index)=>backing.key(index),
+      removeItem:(key)=>{
+        if(key==='cod.session.logout-pending'){markerMutations+=1;throw new Error('marker removal failed');}
+        backing.removeItem(key);
+      },
+      setItem:(key,value)=>{
+        if(key==='cod.session.logout-pending')markerMutations+=1;
+        backing.setItem(key,value);
+      },
+    };
+    Object.defineProperty(window,'localStorage',{configurable:true,value:storage});
+    let secureToken: string | null = 'new-session';
+    let releaseClear: () => void = () => undefined;
+    const clearGate = new Promise<void>((resolve) => { releaseClear = resolve; });
+    let markClearStarted: () => void = () => undefined;
+    const clearStarted = new Promise<void>((resolve) => { markClearStarted = resolve; });
+    const clearSessionToken = vi.fn(async (expected?: string) => {
+      markClearStarted();
+      await clearGate;
+      if (expected !== undefined && secureToken !== null && secureToken !== expected) return false;
+      secureToken = null; return true;
+    });
+    configureCodRuntime({
+      hostPlatform: 'android',
+      loadSessionToken: async () => secureToken,
+      saveSessionToken: async (token) => { secureToken = token; },
+      clearSessionToken,
+    });
+    window.localStorage.setItem('cod.messages.current-task', 'new-session-chat');
+    const invalidated = vi.fn();
+    const stopObserving = observeCodSessionInvalidated(invalidated);
+    vi.stubGlobal('fetch', vi.fn(async () => json({ error: 'unauthorized' }, 401)));
+    const request = refreshAccount('old-session');
+    await clearStarted;
+    expect(invalidated).not.toHaveBeenCalled();
+    releaseClear();
+    await expect(request).rejects.toMatchObject({ status: 401 });
+    stopObserving();
+    expect(clearSessionToken).toHaveBeenCalledWith('old-session');
+    expect(invalidated).not.toHaveBeenCalled();
+    expect(secureToken).toBe('new-session');
+    expect(window.localStorage.getItem('cod.messages.current-task')).toBe('new-session-chat');
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBeNull();
+    expect(markerMutations).toBe(0);
+    vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL)=>String(input).endsWith('/api/account')
+      ?json({userId:'user',displayName:'new session',balanceCents:0,currency:'CNY',plan:'developer'})
+      :json([])));
+    await expect(resumeCodSession()).resolves.toMatchObject({token:'new-session'});
+  });
+
+  it('persists the logout marker before waiting for the native tombstone write', async () => {
+    let releaseClear:()=>void=()=>undefined;
+    const clearGate=new Promise<void>((resolve)=>{releaseClear=resolve;});
+    let markClearStarted:()=>void=()=>undefined;
+    const clearStarted=new Promise<void>((resolve)=>{markClearStarted=resolve;});
+    let secureToken:string|null='mobile-session';
+    configureCodRuntime({
+      hostPlatform:'android',
+      loadSessionCleanupPending:async()=>false,
+      loadSessionToken:async()=>secureToken,
+      saveSessionToken:async(token)=>{secureToken=token;},
+      clearSessionToken:async()=>{markClearStarted();await clearGate;secureToken=null;return true;},
+    });
+    const logout=logoutCod('mobile-session',{explicit:true});
+    await clearStarted;
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBe('1');
+    const restartedStorage=createMemoryStorage();
+    restartedStorage.setItem('cod.session.logout-pending',String(window.localStorage.getItem('cod.session.logout-pending')));
+    expect(restartedStorage.getItem('cod.session.logout-pending')).toBe('1');
+    releaseClear();
+    await expect(logout).resolves.toBe(true);
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBeNull();
+  });
+
+  it('keeps explicit mobile logout fail closed until a failed secure deletion is retried', async () => {
+    let secureToken: string | null = 'mobile-session';
+    configureCodRuntime({
+      hostPlatform: 'android',
+      loadSessionToken: async () => secureToken,
+      saveSessionToken: async (token) => { secureToken = token; },
+      clearSessionToken: async () => { throw new Error('secure deletion failed'); },
+    });
+    window.localStorage.setItem('cod.messages.private-task', 'private-chat');
+    await expect(logoutCod('mobile-session', { explicit: true })).rejects.toThrow('secure deletion failed');
+    expect(window.localStorage.getItem('cod.messages.private-task')).toBe('private-chat');
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBe('1');
+
+    configureCodRuntime({
+      hostPlatform: 'android',
+      loadSessionToken: async () => secureToken,
+      saveSessionToken: async (token) => { secureToken = token; },
+      clearSessionToken: async () => { secureToken = null; return true; },
+    });
+    await expect(resumeCodSession()).resolves.toBeNull();
+    expect(secureToken).toBeNull();
+    expect(window.localStorage.getItem('cod.messages.private-task')).toBeNull();
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBeNull();
+  });
+
+  it('fails closed when the pending-logout marker cannot be read', async () => {
+    const backing=window.localStorage;
+    const storage:Storage={
+      get length(){return backing.length;},
+      clear:()=>backing.clear(),
+      getItem:(key)=>{if(key==='cod.session.logout-pending')throw new Error('storage read failed');return backing.getItem(key);},
+      key:(index)=>backing.key(index),
+      removeItem:(key)=>backing.removeItem(key),
+      setItem:(key,value)=>backing.setItem(key,value),
+    };
+    Object.defineProperty(window,'localStorage',{configurable:true,value:storage});
+    let secureToken:string|null='mobile-session';
+    configureCodRuntime({
+      hostPlatform:'ios',
+      loadSessionToken:async()=>secureToken,
+      saveSessionToken:async(token)=>{secureToken=token;},
+      clearSessionToken:async()=>{secureToken=null;return true;},
+    });
+    await expect(resumeCodSession()).rejects.toMatchObject({code:'logout_marker_unavailable'});
+    expect(secureToken).toBeNull();
+  });
+
+  it('treats a corrupted mobile logout marker as pending and never restores the secure session', async () => {
+    let secureToken:string|null='mobile-session';
+    configureCodRuntime({
+      hostPlatform:'android',
+      loadSessionCleanupPending:async()=>false,
+      loadSessionToken:async()=>secureToken,
+      saveSessionToken:async(token)=>{secureToken=token;},
+      clearSessionToken:async()=>{secureToken=null;return true;},
+    });
+    window.localStorage.setItem('cod.session.logout-pending','corrupted');
+    await expect(resumeCodSession()).resolves.toBeNull();
+    expect(secureToken).toBeNull();
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBeNull();
+  });
+
+  it('requires app-data cleanup when both logout recovery layers fail', async () => {
+    const backing=window.localStorage;
+    const storage:Storage={
+      get length(){return backing.length;},
+      clear:()=>backing.clear(),
+      getItem:(key)=>backing.getItem(key),
+      key:(index)=>backing.key(index),
+      removeItem:(key)=>backing.removeItem(key),
+      setItem:(key,value)=>{if(key==='cod.session.logout-pending')throw new Error('marker write failed');backing.setItem(key,value);},
+    };
+    Object.defineProperty(window,'localStorage',{configurable:true,value:storage});
+    let secureToken:string|null='mobile-session';
+    configureCodRuntime({
+      hostPlatform:'android',
+      loadSessionToken:async()=>secureToken,
+      saveSessionToken:async(token)=>{secureToken=token;},
+      clearSessionToken:async()=>{throw new Error('secure deletion failed');},
+    });
+    window.localStorage.setItem('cod.messages.private-task','private-chat');
+    await expect(logoutCod('mobile-session',{explicit:true})).rejects.toMatchObject({code:'logout_recovery_unavailable'});
+    expect(window.localStorage.getItem('cod.messages.private-task')).toBe('private-chat');
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBeNull();
+    expect(secureToken).toBe('mobile-session');
+  });
+
+  it('retries the fallback logout marker after plaintext cleanup frees storage', async () => {
+    const values=new Map<string,string>([
+      ['cod.session.token','legacy-mobile-session'],
+      ['cod.messages.private-task','private-chat'],
+    ]);
+    let markerWrites=0;
+    const storage:Storage={
+      get length(){return values.size;},
+      clear:()=>values.clear(),
+      getItem:(key)=>values.get(key)??null,
+      key:(index)=>[...values.keys()][index]??null,
+      removeItem:(key)=>{values.delete(key);},
+      setItem:(key,value)=>{
+        if(key==='cod.session.logout-pending'){
+          markerWrites+=1;
+          if(values.has('cod.session.token'))throw new Error('quota exhausted');
+        }
+        values.set(key,String(value));
+      },
+    };
+    Object.defineProperty(window,'localStorage',{configurable:true,value:storage});
+    let secureToken:string|null='mobile-session';
+    let secureLogoutPending=false;
+    let failSecureClear=true;
+    const configureRestartedRuntime=()=>configureCodRuntime({
+      hostPlatform:'android',
+      loadSessionCleanupPending:async()=>secureLogoutPending,
+      loadSessionToken:async()=>secureLogoutPending?null:secureToken,
+      saveSessionToken:async(token)=>{secureToken=token;secureLogoutPending=false;},
+      clearSessionToken:async(expected)=>{
+        if(failSecureClear)throw new Error('secure tombstone failed');
+        if(expected!==undefined&&secureToken!==null&&secureToken!==expected)return false;
+        secureToken=null;secureLogoutPending=true;return true;
+      },
+    });
+    configureRestartedRuntime();
+    await expect(logoutCod('mobile-session',{explicit:true})).rejects.toThrow('secure tombstone failed');
+    expect(markerWrites).toBe(2);
+    expect(window.localStorage.getItem('cod.session.token')).toBeNull();
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBe('1');
+    expect(window.localStorage.getItem('cod.messages.private-task')).toBe('private-chat');
+
+    failSecureClear=false;
+    configureRestartedRuntime();
+    await expect(resumeCodSession()).resolves.toBeNull();
+    expect(secureLogoutPending).toBe(true);
+    expect(window.localStorage.getItem('cod.messages.private-task')).toBeNull();
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBeNull();
+  });
+
+  it('uses the native logout tombstone after restart when local fallback storage is unavailable', async () => {
+    const values=new Map<string,string>([['cod.session.token','stale-legacy-session']]);
+    let allowPlaintextRemoval=false;
+    const storage:Storage={
+      get length(){return values.size;},
+      clear:()=>values.clear(),
+      getItem:(key)=>values.get(key)??null,
+      key:(index)=>[...values.keys()][index]??null,
+      removeItem:(key)=>{if(key!=='cod.session.token'||allowPlaintextRemoval)values.delete(key);},
+      setItem:(key,value)=>{
+        if(key==='cod.session.logout-pending')throw new Error('marker storage unavailable');
+        values.set(key,String(value));
+      },
+    };
+    Object.defineProperty(window,'localStorage',{configurable:true,value:storage});
+    let secureToken:string|null='mobile-session';
+    let secureLogoutPending=false;
+    const saveSessionToken=vi.fn(async(token:string)=>{secureToken=token;secureLogoutPending=false;});
+    const configureRestartedRuntime=()=>configureCodRuntime({
+      hostPlatform:'ios',
+      loadSessionCleanupPending:async()=>secureLogoutPending,
+      loadSessionToken:async()=>secureLogoutPending?null:secureToken,
+      saveSessionToken,
+      clearSessionToken:async(expected)=>{
+        if(expected!==undefined&&secureToken!==null&&secureToken!==expected)return false;
+        secureToken=null;secureLogoutPending=true;return true;
+      },
+    });
+    configureRestartedRuntime();
+    await expect(logoutCod('mobile-session',{explicit:true})).rejects.toMatchObject({code:'plaintext_session_cleanup_failed',sessionCredentialCleared:true});
+    expect(secureLogoutPending).toBe(true);
+    expect(window.localStorage.getItem('cod.session.token')).toBe('stale-legacy-session');
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBeNull();
+
+    allowPlaintextRemoval=true;
+    configureRestartedRuntime();
+    await expect(resumeCodSession()).resolves.toBeNull();
+    expect(window.localStorage.getItem('cod.session.token')).toBeNull();
+    expect(saveSessionToken).not.toHaveBeenCalled();
+    expect(secureLogoutPending).toBe(true);
+  });
+
+  it('fails closed and removes the secure copy when legacy plaintext deletion cannot be verified', async () => {
+    const values = new Map<string, string>([['cod.session.token', 'legacy-session']]);
+    const storage: Storage = {
+      get length() { return values.size; },
+      clear: () => values.clear(),
+      getItem: (key) => values.get(key) ?? null,
+      key: (index) => [...values.keys()][index] ?? null,
+      removeItem: (key) => { if (key !== 'cod.session.token') values.delete(key); },
+      setItem: (key, value) => { values.set(key, String(value)); },
+    };
+    Object.defineProperty(window, 'localStorage', { configurable: true, value: storage });
+    let secureToken: string | null = null;
+    configureCodRuntime({
+      hostPlatform: 'ios',
+      loadSessionToken: async () => secureToken,
+      saveSessionToken: async (token) => { secureToken = token; },
+      clearSessionToken: async () => { secureToken = null; return true; },
+    });
+    await expect(resumeCodSession()).rejects.toMatchObject({ code: 'plaintext_session_cleanup_failed' });
+    expect(secureToken).toBeNull();
+    expect(window.localStorage.getItem('cod.session.token')).toBe('legacy-session');
+  });
+
+  it('does not invalidate an existing session for a login-credentials 401', async () => {
+    window.localStorage.setItem('cod.session.token', 'existing-session');
+    const invalidated = vi.fn();
+    const stopObserving = observeCodSessionInvalidated(invalidated);
+    vi.stubGlobal('fetch', vi.fn(async () => json({ error: 'invalid_credentials', message: '邮箱或密码错误' }, 401)));
+    await expect(loginCod('developer@kai.com', 'wrong-password')).rejects.toMatchObject({ status: 401 });
+    stopObserving();
+    expect(invalidated).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem('cod.session.token')).toBe('existing-session');
+  });
+
+  it('clears persisted Expo chat history on logout without removing harmless preferences', async () => {
+    let secureToken: string | null = 'mobile-session';
+    configureCodRuntime({
+      hostPlatform: 'android',
+      loadSessionToken: async () => secureToken,
+      saveSessionToken: async (token) => { secureToken = token; },
+      clearSessionToken: async (expected) => {
+        if (expected !== undefined && secureToken !== null && secureToken !== expected) return false;
+        secureToken = null; return true;
+      },
+    });
+    window.localStorage.setItem('cod.messages.task-1', JSON.stringify([{ content: 'private' }]));
+    window.localStorage.setItem('kai.color-mode.v1', 'dark');
+    await logoutCod('mobile-session');
+    expect(window.localStorage.getItem('cod.messages.task-1')).toBeNull();
+    expect(window.localStorage.getItem('kai.color-mode.v1')).toBe('dark');
+    expect(secureToken).toBeNull();
+  });
+
+  it('keeps a logout tombstone when a newly written secure session cannot be rolled back', async () => {
+    let secureToken: string | null = null;
+    let verificationReads = 0;
+    configureCodRuntime({
+      hostPlatform: 'android',
+      loadSessionToken: async () => {
+        verificationReads += 1;
+        if (verificationReads === 1) return 'different-session';
+        return secureToken;
+      },
+      saveSessionToken: async (token) => { secureToken = token; },
+      clearSessionToken: async () => { throw new Error('secure deletion failed'); },
+    });
+    await expect(persistCodSession('new-session')).rejects.toMatchObject({ code: 'secure_session_storage_unavailable' });
+    expect(secureToken).toBe('new-session');
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBe('1');
+
+    configureCodRuntime({
+      hostPlatform: 'android',
+      loadSessionToken: async () => secureToken,
+      saveSessionToken: async (token) => { secureToken = token; },
+      clearSessionToken: async () => { secureToken = null; return true; },
+    });
+    await expect(resumeCodSession()).resolves.toBeNull();
+    expect(secureToken).toBeNull();
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBeNull();
+  });
+
+  it('never cancels an older pending logout when pre-login cleanup cannot reach SecureStore', async () => {
+    let secureToken:string|null='old-session';
+    let secureLogoutPending=false;
+    let clearAttempts=0;
+    const saveSessionToken=vi.fn(async(token:string)=>{secureToken=token;secureLogoutPending=false;});
+    const configureRestartedRuntime=()=>configureCodRuntime({
+      hostPlatform:'android',
+      loadSessionCleanupPending:async()=>secureLogoutPending,
+      loadSessionToken:async()=>secureLogoutPending?null:secureToken,
+      saveSessionToken,
+      clearSessionToken:async(expected)=>{
+        clearAttempts+=1;
+        if(clearAttempts===1)throw new Error('temporary SecureStore failure');
+        if(expected!==undefined&&secureToken!==null&&secureToken!==expected)return false;
+        secureToken=null;secureLogoutPending=true;return true;
+      },
+    });
+    window.localStorage.setItem('cod.session.logout-pending','1');
+    configureRestartedRuntime();
+    await expect(persistCodSession('new-session')).rejects.toMatchObject({code:'secure_session_storage_unavailable'});
+    expect(clearAttempts).toBe(1);
+    expect(saveSessionToken).not.toHaveBeenCalled();
+    expect(secureToken).toBe('old-session');
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBe('1');
+
+    configureRestartedRuntime();
+    await expect(resumeCodSession()).resolves.toBeNull();
+    expect(secureLogoutPending).toBe(true);
+    expect(secureToken).toBeNull();
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBeNull();
+  });
+
+  it('does not complete mobile logout while private chat removal is unverified', async () => {
+    const values = new Map<string, string>([['cod.messages.private-task', 'private-chat']]);
+    let allowChatRemoval = false;
+    const storage: Storage = {
+      get length() { return values.size; },
+      clear: () => values.clear(),
+      getItem: (key) => values.get(key) ?? null,
+      key: (index) => [...values.keys()][index] ?? null,
+      removeItem: (key) => { if (allowChatRemoval || !key.startsWith('cod.messages.')) values.delete(key); },
+      setItem: (key, value) => { values.set(key, String(value)); },
+    };
+    Object.defineProperty(window, 'localStorage', { configurable: true, value: storage });
+    let secureToken: string | null = 'mobile-session';
+    configureCodRuntime({
+      hostPlatform: 'ios',
+      loadSessionToken: async () => secureToken,
+      saveSessionToken: async (token) => { secureToken = token; },
+      clearSessionToken: async () => { secureToken = null; return true; },
+    });
+    await expect(logoutCod('mobile-session', { explicit: true })).rejects.toMatchObject({ code: 'chat_history_cleanup_failed', sessionCredentialCleared: true });
+    expect(secureToken).toBeNull();
+    expect(window.localStorage.getItem('cod.messages.private-task')).toBe('private-chat');
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBe('1');
+    allowChatRemoval = true;
+    await expect(resumeCodSession()).resolves.toBeNull();
+    expect(window.localStorage.getItem('cod.messages.private-task')).toBeNull();
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBeNull();
+  });
+
+  it('does not claim Web logout succeeded when localStorage retains the token', async () => {
+    const values = new Map<string, string>([['cod.session.token', 'web-session']]);
+    const storage: Storage = {
+      get length() { return values.size; },
+      clear: () => values.clear(),
+      getItem: (key) => values.get(key) ?? null,
+      key: (index) => [...values.keys()][index] ?? null,
+      removeItem: (key) => { if (key !== 'cod.session.token') values.delete(key); },
+      setItem: (key, value) => { values.set(key, String(value)); },
+    };
+    Object.defineProperty(window, 'localStorage', { configurable: true, value: storage });
+    await expect(logoutCod('web-session', { explicit: true })).rejects.toMatchObject({ code: 'session_cleanup_failed' });
+    expect(window.localStorage.getItem('cod.session.token')).toBe('web-session');
   });
 
   it('sends recent multi-turn context to the model gateway', async () => {
@@ -251,6 +741,20 @@ describe('COD workspace', () => {
 
   it('automatically continues the saved first message after login', async () => {
     let taskVersion = 1;
+    let secureToken: string | null = null;
+    let releasePersistence: () => void = () => undefined;
+    const persistenceGate = new Promise<void>((resolve) => { releasePersistence = resolve; });
+    let markPersistenceStarted: () => void = () => undefined;
+    const persistenceStarted = new Promise<void>((resolve) => { markPersistenceStarted = resolve; });
+    configureCodRuntime({
+      hostPlatform: 'android',
+      loadSessionToken: async () => secureToken,
+      saveSessionToken: async (token) => { markPersistenceStarted(); await persistenceGate; secureToken = token; },
+      clearSessionToken: async (expected) => {
+        if (expected !== undefined && secureToken !== null && secureToken !== expected) return false;
+        secureToken = null; return true;
+      },
+    });
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith('/api/capabilities')) return json(capabilities);
@@ -282,12 +786,116 @@ describe('COD workspace', () => {
     fireEvent.change(within(dialog).getByLabelText('邮箱'), { target: { value: 'developer@kai.com' } });
     fireEvent.change(within(dialog).getByLabelText('密码'), { target: { value: 'Password123' } });
     fireEvent.click(within(dialog).getByRole('button', { name: '登录并继续' }));
+    await persistenceStarted;
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/v1/chat/completions'))).toBe(false);
+    expect(screen.getByRole('dialog', { name: '登录后继续' })).toBeInTheDocument();
+    releasePersistence();
     expect(await screen.findByText('自动回复')).toBeInTheDocument();
     expect(screen.getByText(/输入 12 \/ 输出 34 Token/)).toBeInTheDocument();
     expect(screen.queryByText('¥0.01')).not.toBeInTheDocument();
     const chatCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/v1/chat/completions'));
     expect(JSON.parse(String(chatCall?.[1]?.body)).messages).toEqual([{ role: 'user', content: '登录后自动发送' }]);
     const heartbeatIndex=fetchMock.mock.calls.findIndex(([url])=>String(url).endsWith('/api/devices/web-device/heartbeat'));const createIndex=fetchMock.mock.calls.findIndex(([url,init])=>String(url).endsWith('/api/tasks')&&init?.method==='POST');expect(heartbeatIndex).toBeGreaterThanOrEqual(0);expect(heartbeatIndex).toBeLessThan(createIndex);
+  });
+
+  it('does not load private workspace state or auto-send when secure persistence fails', async () => {
+    configureCodRuntime({
+      hostPlatform: 'ios',
+      loadSessionToken: async () => null,
+      saveSessionToken: async () => { throw new Error('keychain unavailable'); },
+      clearSessionToken: async () => true,
+    });
+    const fetchMock=vi.fn(async(input:RequestInfo|URL)=>{
+      const url=String(input);
+      if(url.endsWith('/api/capabilities'))return json(capabilities);
+      if(url.endsWith('/api/model-catalog'))return json([]);
+      if(url.endsWith('/api/auth/login'))return json({token:'new-mobile-session'});
+      if(url.endsWith('/api/account'))return json({userId:'private-user',displayName:'private developer',balanceCents:9876,currency:'CNY',plan:'developer'});
+      if(url.endsWith('/api/model-sources'))return json([{id:'ai-kai',label:'AI.KAI.COM',status:'live',callable:true,paymentDirection:'钱包 → ai.kai.com',note:'已连接',models:[]}]);
+      throw new Error(`Unexpected authenticated workspace request: ${url}`);
+    });
+    vi.stubGlobal('fetch',fetchMock);
+    render(<App/>);
+    await screen.findByRole('heading',{name:'新对话'});
+    const composer=screen.getByPlaceholderText('问 COD 任何问题...');
+    fireEvent.change(composer,{target:{value:'不要提前发送'}});
+    fireEvent.click(screen.getByRole('button',{name:'发送'}));
+    const dialog=await screen.findByRole('dialog',{name:'登录后继续'});
+    fireEvent.change(within(dialog).getByLabelText('邮箱'),{target:{value:'developer@kai.com'}});
+    fireEvent.change(within(dialog).getByLabelText('密码'),{target:{value:'Password123'}});
+    fireEvent.click(within(dialog).getByRole('button',{name:'登录并继续'}));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('无法安全保存移动端登录状态，请重试。');
+    expect(screen.getByRole('heading',{name:'新对话'})).toBeInTheDocument();
+    expect(screen.getByText('登录后查看')).toBeInTheDocument();
+    expect(screen.queryByText('private developer')).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue('不要提前发送')).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url])=>/\/api\/(devices|tasks|products|ledger|credit-packs)$/.test(String(url)))).toBe(false);
+    expect(fetchMock.mock.calls.some(([url])=>String(url).endsWith('/v1/chat/completions'))).toBe(false);
+  });
+
+  it('keeps a cleanup tombstone when closing login races a failed SecureStore rollback', async () => {
+    let secureToken:string|null=null;
+    let allowSecureClear=false;
+    let releaseSave:()=>void=()=>undefined;
+    const saveGate=new Promise<void>((resolve)=>{releaseSave=resolve;});
+    let markSaveStarted:()=>void=()=>undefined;
+    const saveStarted=new Promise<void>((resolve)=>{markSaveStarted=resolve;});
+    const clearSessionToken=vi.fn(async(expected?:string)=>{if(!allowSecureClear)throw new Error('secure deletion failed');if(expected!==undefined&&secureToken!==null&&secureToken!==expected)return false;secureToken=null;return true;});
+    configureCodRuntime({hostPlatform:'android',loadSessionToken:async()=>secureToken,saveSessionToken:async(token)=>{markSaveStarted();await saveGate;secureToken=token;},clearSessionToken});
+    const fetchMock=vi.fn(async(input:RequestInfo|URL)=>{
+      const url=String(input);
+      if(url.endsWith('/api/capabilities'))return json(capabilities);
+      if(url.endsWith('/api/model-catalog'))return json([]);
+      if(url.endsWith('/api/auth/login'))return json({token:'cancelled-mobile-session'});
+      if(url.endsWith('/api/account'))return json({userId:'user',displayName:'developer',balanceCents:0,currency:'CNY',plan:'developer'});
+      if(url.endsWith('/api/model-sources'))return json([]);
+      throw new Error(`Unexpected authenticated workspace request: ${url}`);
+    });
+    vi.stubGlobal('fetch',fetchMock);
+    render(<App/>);
+    await screen.findByRole('heading',{name:'新对话'});
+    fireEvent.change(screen.getByPlaceholderText('问 COD 任何问题...'),{target:{value:'取消登录'}});
+    fireEvent.click(screen.getByRole('button',{name:'发送'}));
+    const dialog=await screen.findByRole('dialog',{name:'登录后继续'});
+    fireEvent.change(within(dialog).getByLabelText('邮箱'),{target:{value:'developer@kai.com'}});
+    fireEvent.change(within(dialog).getByLabelText('密码'),{target:{value:'Password123'}});
+    fireEvent.click(within(dialog).getByRole('button',{name:'登录并继续'}));
+    await saveStarted;
+    fireEvent.click(within(dialog).getByTitle('关闭'));
+    releaseSave();
+    await waitFor(()=>expect(clearSessionToken).toHaveBeenCalledWith('cancelled-mobile-session'));
+    expect(secureToken).toBe('cancelled-mobile-session');
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBe('1');
+    expect(screen.queryByRole('dialog',{name:'登录后继续'})).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url])=>/\/api\/(devices|tasks|products|ledger|credit-packs)$/.test(String(url)))).toBe(false);
+    allowSecureClear=true;
+    await expect(resumeCodSession()).resolves.toBeNull();
+    expect(secureToken).toBeNull();
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBeNull();
+  });
+
+  it('signs out the active session after an authenticated runtime 401', async () => {
+    let expired=false;
+    const fetchMock=vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{
+      const url=String(input);const headers=new Headers(init?.headers);
+      if(expired&&headers.has('authorization'))return json({error:'unauthorized'},401);
+      if(url.endsWith('/api/capabilities'))return json(capabilities);
+      if(url.endsWith('/api/model-catalog')||url.endsWith('/api/compute/offers'))return json([]);
+      if(url.endsWith('/api/account'))return json({userId:'user',displayName:'developer',balanceCents:5000,currency:'CNY',plan:'developer'});
+      if(url.endsWith('/api/model-sources'))return json([{id:'ai-kai',label:'AI.KAI.COM',status:'live',callable:true,paymentDirection:'钱包 → ai.kai.com',note:'已连接',models:[{id:'model',label:'模型',contextWindow:128000,inputPricePerMillionCents:100,outputPricePerMillionCents:200}]}]);
+      if(url.endsWith('/api/devices/web-device/heartbeat'))return json({id:'web-device',name:'COD Web',platform:'web',status:'online',lastSeenAt:new Date().toISOString()});
+      if(url.endsWith('/api/devices'))return json([{id:'web-device',name:'COD Web',platform:'web',status:'online',lastSeenAt:new Date().toISOString()}]);
+      if(url.endsWith('/api/credit-packs'))return json(creditPacks);
+      if(url.endsWith('/api/referrals'))return json({inviteCode:'KAI-TEST',referredUsers:0,commissionRateBps:0,pendingCommissionCents:0,settledCommissionCents:0});
+      if(url.endsWith('/api/tasks')||url.endsWith('/api/products')||url.endsWith('/api/ledger')||url.endsWith('/api/compute/requests'))return json([]);
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal('fetch',fetchMock);window.localStorage.setItem('cod.session.token','active-session');window.localStorage.setItem('cod.device.id','web-device');
+    render(<App/>);expect(await screen.findByRole('heading',{name:'新建或选择任务'})).toBeInTheDocument();
+    expired=true;document.dispatchEvent(new Event('visibilitychange'));
+    expect((await screen.findAllByText('登录已过期，请重新登录。')).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByRole('heading',{name:'新对话'})).toBeInTheDocument();
+    expect(window.localStorage.getItem('cod.session.token')).toBeNull();
   });
 
   it('ignores a late lease-heartbeat 409 after terminal commit and still refreshes the wallet',async()=>{

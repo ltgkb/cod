@@ -20,6 +20,12 @@
             "backgroundColor": "#0b1416"
           }
         }
+      ],
+      [
+        "expo-secure-store",
+        {
+          "configureAndroidBackup": true
+        }
       ]
     ],
     "ios": {

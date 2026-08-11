@@ -9,7 +9,7 @@ export function MarkdownContent({ children, className = '' }: { children: string
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          a: ({ children: label, href }) => <a href={href} target="_blank" rel="noopener noreferrer" onClick={(event) => { event.preventDefault(); if (href) void openCodExternalUrl(href); }}>{label}</a>,
+          a: ({ children: label, href }) => <button type="button" className="markdown-link" onClick={() => { if (href) void openCodExternalUrl(href); }}>{label}</button>,
         }}
       >
         {children}

@@ -20,6 +20,10 @@ export interface CodRuntimeConfig {
   copyText?: (value: string) => Promise<void>;
   setNativeColorMode?: (mode: 'light' | 'dark') => Promise<void>;
   setNativeTopmostUiVisible?: (visible: boolean) => Promise<void>;
+  loadSessionCleanupPending?: () => Promise<boolean>;
+  loadSessionToken?: () => Promise<string | null>;
+  saveSessionToken?: (token: string) => Promise<void>;
+  clearSessionToken?: (expectedToken?: string) => Promise<boolean>;
 }
 
 let runtime: CodRuntimeConfig = {};

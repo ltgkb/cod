@@ -6,6 +6,7 @@ const vm = require('node:vm');
 
 const {
   COD_BOOTSTRAP_MARKER,
+  COD_CSP_MARKER,
   NATIVE_ACTION_NAMES,
   assertExpoDevelopmentDomHtml,
   createBootstrapScript,
@@ -14,6 +15,7 @@ const {
 } = require('./expo-dom-bootstrap.cjs');
 
 const expoTemplate = `<!doctype html><body>
+<meta charset="utf-8" />
         <script>
           var injectedObject = {};
           try {
@@ -53,6 +55,13 @@ test('recovers synchronously when Android WebView has not installed injectedObje
   assert.equal(window.$$EXPO_INITIAL_PROPS.props.hostPlatform, 'android');
 });
 
+test('keeps every secure-session action available in the Expo Go fallback bridge', () => {
+  assert.deepEqual(
+    NATIVE_ACTION_NAMES.filter((name) => name.includes('Session')),
+    ['loadSessionCleanupPending', 'loadSessionToken', 'saveSessionToken', 'clearSessionToken']
+  );
+});
+
 test('recovers from malformed native JSON and selects iOS outside Android', () => {
   const window = runBootstrap({
     bridge: { injectedObjectJson: () => '{broken' },
@@ -67,6 +76,10 @@ test('transforms the Expo template exactly once and is idempotent', () => {
   assert.match(transformed, new RegExp(COD_BOOTSTRAP_MARKER));
   assert.match(transformed, /window\.\$\$EXPO_DOM_HOST_OS/);
   assert.match(transformed, /window\.\$\$EXPO_INITIAL_PROPS/);
+  assert.match(transformed, new RegExp(COD_CSP_MARKER));
+  assert.match(transformed, /frame-src 'none'/);
+  assert.match(transformed, /connect-src http: https: ws: wss:/);
+  assert.doesNotMatch(transformed, /script-src[^;]*'unsafe-inline'/);
   assert.doesNotMatch(transformed, /throw new Error\('Failed to parse injectedObjectJson/);
   assert.equal(transformExpoDomHtml(transformed, 'https://cod.kai.com'), transformed);
 });
