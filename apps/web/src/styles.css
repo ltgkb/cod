@@ -632,6 +632,7 @@ button:active { transform: translateY(1px); }
   .mobile-only { display: grid; }
   .conversation-scroll { padding: 22px 16px; }
   .composer-wrap { padding: 8px 12px 12px; }
+  .context-strip { flex-wrap: wrap; overflow-x: visible; }
   .workspace-header { align-items: stretch; flex-direction: column; height: auto; min-height: 106px; padding: 0 12px 10px; }
   .task-heading { flex: 1; min-height: 58px; }
   .header-actions { display: grid; grid-template-columns: auto minmax(0, .9fr) minmax(0, 1.1fr); gap: 6px; }
