@@ -2,6 +2,12 @@
 
 COD is a cross-platform agent workspace for code optimization and everyday AI conversations.
 
+## Open source
+
+COD is open source under the Apache License 2.0. Forks, integrations, bug reports, and pull requests are welcome. See `CONTRIBUTING.md` for contribution guidelines and `SECURITY.md` for responsible vulnerability reporting.
+
+The open-source license covers the code in this repository. Third-party services, model APIs, hosted infrastructure, trademarks, and separately licensed assets remain subject to their own terms.
+
 ## Architecture
 
 - `apps/web`: shared React product UI for desktop, web, and the future PWA.
