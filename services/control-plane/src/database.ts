@@ -542,7 +542,15 @@ const taskFromRow = (row: Record<string, unknown>): SyncedTask => ({ id: String(
 
 export class PostgresDatabase implements CodDatabase {
   private readonly pool: Pool;
-  constructor(databaseUrl: string) { this.pool = new Pool({ connectionString: databaseUrl, max: 10, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 5_000 }); }
+  constructor(databaseUrl: string) {
+    this.pool = new Pool({ connectionString: databaseUrl, max: 10, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 5_000 });
+    // PostgreSQL can report an error on an idle pooled client after a restart or
+    // network interruption. EventEmitter treats an unhandled `error` as fatal,
+    // so consume it here and let subsequent requests/readiness checks reconnect.
+    this.pool.on('error', (error) => {
+      console.error(JSON.stringify({ level: 'error', event: 'postgres.pool.error', error: error.message }));
+    });
+  }
   async initialize() {
     await this.pool.query(schema);
     await this.transaction(async (client) => {
