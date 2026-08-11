@@ -81,12 +81,12 @@ import {
   type RemoteTask,
   type ReferralSummary,
 } from './api';
-import { hasDesktopBridge, loadProject, openProject, readProjectFile } from './desktop';
+import { hasDesktopBridge, loadProject, loadProjectDiff, loadProjectFiles, readProjectFile, selectProjectRoot } from './desktop';
 import { chatFailureMessage } from './chat-errors';
 import { filterModelCatalog, groupModelCatalog } from './model-catalog';
 import { permissionOptionLabel, presentPermissionOptions } from './permissions';
 import { MarkdownContent } from './presentation';
-import { copyCodText, getCodRuntime, openCodExternalUrl } from './runtime';
+import { copyCodText, getCodRuntime, openCodExternalUrl, setCodNativeBackHandler } from './runtime';
 import type { InspectorTab, ProjectSnapshot, WorkspaceMode } from './types';
 
 const statusLabels: Record<TaskStatus, string> = {
@@ -96,6 +96,7 @@ const emptyProject: ProjectSnapshot = { root: '', files: [], diff: '', selectedF
 type Overlay = 'login' | 'new-task' | 'account' | 'commands' | 'models' | 'compute' | null;
 type AuthState = 'loading' | 'signed-out' | 'signed-in';
 type ColorMode = 'light' | 'dark';
+type ProjectDiffStatus = 'idle' | 'loading' | 'ready' | 'error';
 interface ComparisonResult { sourceId: string; sourceLabel: string; model: string; modelId?: string; content: string; inputTokens?: number; outputTokens?: number; durationMs: number; error?: string }
 interface ChatMessage { id: string; role: 'user' | 'assistant' | 'comparison'; content: string; mode?: 'live' | 'demo'; sourceLabel?: string; model?: string; inputTokens?: number; outputTokens?: number; usageEstimated?: boolean; fallbackUsed?: boolean; failed?: boolean; cancelled?: boolean; retryPrompt?: string; comparisonResults?: ComparisonResult[]; selectedComparisonKey?: string; createdAt: string }
 interface ActiveRun { taskId:string; controller:AbortController; cancelled:boolean; mode:WorkspaceMode }
@@ -119,6 +120,9 @@ function storageGet(key: string): string | null {
 }
 function storageSet(key: string, value: string): void {
   try { window.localStorage.setItem(key, value); } catch { /* Storage can be unavailable in private contexts. */ }
+}
+function storageRemove(key: string): void {
+  try { window.localStorage.removeItem(key); } catch { /* Storage can be unavailable in private contexts. */ }
 }
 function initialColorMode(): ColorMode {
   const stored = storageGet('kai.color-mode.v1');
@@ -320,15 +324,78 @@ export function App() {
   const [agentStatus, setAgentStatus] = useState('就绪');
   const [pendingPermission, setPendingPermission] = useState<{ title: string; options: Array<{ optionId: string; name: string; kind: string }> } | null>(null);
   const [project, setProject] = useState<ProjectSnapshot>(emptyProject);
+  const [projectDiffStatus, setProjectDiffStatus] = useState<ProjectDiffStatus>('idle');
   const permissionResolver = useRef<((optionId: string | null) => void) | null>(null);
   const pendingSendRunner = useRef<(prompt: string, mode: WorkspaceMode) => void>(() => undefined);
   const activeRunRef=useRef<ActiveRun|null>(null);
   const sendingRef=useRef(false);
   const authGenerationRef=useRef(0);
+  const projectLoadGenerationRef=useRef(0);
+  const fileReadGenerationRef=useRef(0);
+  const validatedProjectRef=useRef<ProjectSnapshot>(emptyProject);
+  const validatedProjectDiffStatusRef=useRef<ProjectDiffStatus>('idle');
+  const projectRootRef=useRef(project.root);
+  projectRootRef.current=project.root;
   const sessionToken = session?.token ?? null;
   const sessionTokenRef=useRef<string|null>(sessionToken);
   sessionTokenRef.current=sessionToken;
   const pendingPaymentOrderId = paymentOrder?.status === 'pending' ? paymentOrder.id : null;
+
+  const loadProjectForDisplay = async (root:string,generation:number,failureMessage:string,preserveSelection=false):Promise<ProjectSnapshot|null> => {
+    fileReadGenerationRef.current+=1;
+    let filesLoaded=false;
+    const diffResult:{status:ProjectDiffStatus;value:string;error:string}={status:'loading',value:'',error:''};
+    const diffRequest=loadProjectDiff(root).then((diff)=>{
+      if(diff===null)return;
+      diffResult.status='ready';diffResult.value=diff;
+      if(!filesLoaded||generation!==projectLoadGenerationRef.current)return;
+      setProject((current)=>{
+        if(current.root!==root)return current;
+        const next={...current,diff};validatedProjectRef.current=next;return next;
+      });
+      validatedProjectDiffStatusRef.current='ready';setProjectDiffStatus('ready');
+    }).catch((error)=>{
+      diffResult.status='error';diffResult.error=error instanceof Error?error.message:'Git 改动读取失败';
+      if(!filesLoaded||generation!==projectLoadGenerationRef.current)return;
+      validatedProjectDiffStatusRef.current='error';setProjectDiffStatus('error');setNotice(`项目文件已加载，但 Git 改动读取失败：${diffResult.error}`);
+    });
+    void diffRequest;
+    try{
+      const snapshot=await loadProjectFiles(root);
+      if(!snapshot)throw new Error('桌面端项目桥接不可用');
+      if(generation!==projectLoadGenerationRef.current)return null;
+      filesLoaded=true;
+      const nextSnapshot={...snapshot,diff:diffResult.status==='ready'?diffResult.value:''};
+      setProject((current)=>{
+        const next=preserveSelection&&current.root===root?{...nextSnapshot,diff:diffResult.status==='ready'?diffResult.value:current.diff,selectedFile:current.selectedFile,selectedContent:current.selectedContent}:nextSnapshot;
+        validatedProjectRef.current=next;return next;
+      });
+      validatedProjectDiffStatusRef.current=diffResult.status;setProjectDiffStatus(diffResult.status);
+      if(diffResult.status==='error')setNotice(`项目文件已加载，但 Git 改动读取失败：${diffResult.error}`);
+      return nextSnapshot;
+    }catch(error){
+      if(generation!==projectLoadGenerationRef.current)return null;
+      projectLoadGenerationRef.current+=1;
+      const fallback=validatedProjectRef.current;
+      setProject(fallback);setProjectDiffStatus(validatedProjectDiffStatusRef.current);
+      if(fallback.root)storageSet('cod.project.root',fallback.root);else storageRemove('cod.project.root');
+      const detail=error instanceof Error?`：${error.message}`:'';
+      setNotice(`${failureMessage}${fallback.root?'，已恢复上一个可用项目':'，已清除失效项目'}${detail}`);
+      return null;
+    }
+  };
+
+  const commitProjectSnapshot = (snapshot:ProjectSnapshot,root:string,generation:number):boolean => {
+    if(snapshot.root!==root||generation!==projectLoadGenerationRef.current||projectRootRef.current!==root)return false;
+    fileReadGenerationRef.current+=1;
+    setProject((current)=>{
+      if(current.root!==root||generation!==projectLoadGenerationRef.current)return current;
+      const next={...snapshot,selectedFile:current.selectedFile,selectedContent:current.selectedContent};
+      validatedProjectRef.current=next;return next;
+    });
+    validatedProjectDiffStatusRef.current='ready';setProjectDiffStatus('ready');
+    return true;
+  };
 
   useEffect(() => {
     document.documentElement.dataset.colorMode = colorMode;
@@ -337,6 +404,28 @@ export function App() {
     storageSet('kai.color-mode.v1', colorMode);
     void getCodRuntime().setNativeColorMode?.(colorMode);
   }, [colorMode]);
+
+  useEffect(() => {
+    if (getCodRuntime().hostPlatform !== 'android') return;
+    if (overlay) {
+      setCodNativeBackHandler(() => {
+        if (overlay === 'login') {
+          authGenerationRef.current += 1;
+          setPendingSend(null);
+          setResumeComputeAfterLogin(false);
+        }
+        setOverlay(null);
+      });
+      return;
+    }
+    if (sidebarOpen) {
+      setCodNativeBackHandler(() => setSidebarOpen(false));
+      return;
+    }
+    setCodNativeBackHandler(null);
+  }, [overlay, sidebarOpen]);
+
+  useEffect(() => () => setCodNativeBackHandler(null), []);
 
   useEffect(() => { listComputeOffers().then(setComputeOffers).catch(() => setComputeOffers([])); }, []);
 
@@ -511,7 +600,12 @@ export function App() {
   useEffect(() => {
     if (!hasDesktopBridge()) return;
     const recentRoot = storageGet('cod.project.root');
-    if (recentRoot) loadProject(recentRoot).then((snapshot) => snapshot && setProject(snapshot)).catch(() => storageSet('cod.project.root', ''));
+    if (!recentRoot) return;
+    const generation=++projectLoadGenerationRef.current;
+    setProjectDiffStatus('loading');
+    setProject({...emptyProject,root:recentRoot});
+    void loadProjectForDisplay(recentRoot,generation,'上次使用的项目无法打开');
+    return()=>{if(generation===projectLoadGenerationRef.current)projectLoadGenerationRef.current+=1;};
   }, []);
 
   const handleLogin = async (email: string, password: string) => {
@@ -648,6 +742,7 @@ export function App() {
     if(comparisonRequest&&compareTargets.length<2){setNotice('多模型对比至少需要选择 2 个可用模型。');return;}
     if (!comparisonRequest&&(!selectedSource?.callable || !selectedModelInfo)) { setNotice('当前模型源仅供查看目录，配置该源密钥后才能调用。'); return; }
     const token=session.token;
+    const projectContext=project.root?{root:project.root,generation:projectLoadGenerationRef.current}:null;
     let task = requestedTask;
     let promptAppended = false;
     let responseAppended = false;
@@ -688,7 +783,7 @@ export function App() {
       let reply = '';
       let replyMode: 'live' | 'demo' = capabilities?.ai.mode === 'demo' ? 'demo' : 'live';
       if(requestedMode==='code'){
-        projectBeforeRun=await loadProject(project.root);
+        projectBeforeRun=await loadProject(projectContext!.root);
         assertActive();
         if(!projectBeforeRun)throw new Error('无法读取项目运行前状态，本次代码任务未执行。');
       }
@@ -708,12 +803,12 @@ export function App() {
         const { buildCodeExecutionPrompt, runGooseTask, validateCodeRun } = await import('./goose');
         setAgentStatus('连接本机 Goose');
         const contextualPrompt = conversationMessages.length === 1 ? submittedPrompt : `Continue this conversation using the current project.\n\n${conversationMessages.map((message) => `${message.role === 'user' ? 'User' : 'Assistant'}: ${message.content}`).join('\n\n')}`;
-        const gooseRun = await runGooseTask({ acpUrl, cwd: project.root, prompt: buildCodeExecutionPrompt(contextualPrompt), signal:run.controller.signal, onUpdate: (update) => { if(run.cancelled||sessionTokenRef.current!==token)return;if (update.kind === 'message') reply += update.text; if (update.kind === 'tool' || update.kind === 'status') setAgentStatus(update.text); }, requestPermission: (request) => new Promise((resolve) => { if(run.cancelled||sessionTokenRef.current!==token){resolve(null);return;}permissionResolver.current = resolve; setPendingPermission({ title: request.toolCall.title ?? '工具权限请求', options: request.options }); }) });
+        const gooseRun = await runGooseTask({ acpUrl, cwd: projectContext!.root, prompt: buildCodeExecutionPrompt(contextualPrompt), signal:run.controller.signal, onUpdate: (update) => { if(run.cancelled||sessionTokenRef.current!==token)return;if (update.kind === 'message') reply += update.text; if (update.kind === 'tool' || update.kind === 'status') setAgentStatus(update.text); }, requestPermission: (request) => new Promise((resolve) => { if(run.cancelled||sessionTokenRef.current!==token){resolve(null);return;}permissionResolver.current = resolve; setPendingPermission({ title: request.toolCall.title ?? '工具权限请求', options: request.options }); }) });
         assertActive();
-        const projectAfterRun=await loadProject(project.root);
+        const projectAfterRun=await loadProject(projectContext!.root);
         assertActive();
         if(!projectAfterRun)throw new Error('无法读取项目运行后状态，因此未将本次代码任务标记为完成。');
-        setProject((current)=>({...projectAfterRun,selectedFile:current.selectedFile,selectedContent:current.selectedContent}));
+        commitProjectSnapshot(projectAfterRun,projectContext!.root,projectContext!.generation);
         reply=gooseRun.answer;validateCodeRun(submittedPrompt,gooseRun,Boolean(projectBeforeRun&&projectBeforeRun.diff!==projectAfterRun.diff));
         if (!reply) reply = 'Goose 已完成任务，请在右侧刷新文件与 Diff。';
       } else {
@@ -725,10 +820,12 @@ export function App() {
       if (!comparisonRequest&&requestedMode === 'code'&&selectedSource&&selectedModelInfo) { appendMessage(task.id, { id: createClientId(), role: 'assistant', content: reply, mode: replyMode, sourceLabel: selectedSource.label, model: selectedModelInfo.id, createdAt: new Date().toISOString() }); responseAppended = true; }
       if (task.status === 'running' || task.status === 'waiting') {task = await changeTaskStatus(task, 'complete', { result: reply, error: null });assertActive();}
       setAgentStatus('已完成');
-      const [walletRefresh,projectRefresh]=await Promise.allSettled([refreshWallet(true),requestedMode!=='code'&&hasDesktopBridge()&&project.root?loadProject(project.root):Promise.resolve(null)]);
+      const refreshContext=requestedMode!=='code'&&hasDesktopBridge()?projectContext:null;
+      const [walletRefresh,projectRefresh]=await Promise.allSettled([refreshWallet(true),refreshContext?loadProject(refreshContext.root):Promise.resolve(null)]);
       assertActive();
-      if(projectRefresh.status==='fulfilled'&&projectRefresh.value)setProject((current)=>({...projectRefresh.value!,selectedFile:current.selectedFile,selectedContent:current.selectedContent}));
-      const refreshFailures=[walletRefresh.status==='rejected'||walletRefresh.value===false?'余额/账单':'',projectRefresh.status==='rejected'?'项目状态':''].filter(Boolean);
+      const projectRefreshIsCurrent=Boolean(refreshContext&&refreshContext.generation===projectLoadGenerationRef.current&&projectRootRef.current===refreshContext.root);
+      if(projectRefresh.status==='fulfilled'&&projectRefresh.value&&refreshContext&&projectRefreshIsCurrent)commitProjectSnapshot(projectRefresh.value,refreshContext.root,refreshContext.generation);
+      const refreshFailures=[walletRefresh.status==='rejected'||walletRefresh.value===false?'余额/账单':'',projectRefresh.status==='rejected'&&projectRefreshIsCurrent?'项目状态':''].filter(Boolean);
       if(refreshFailures.length)setNotice(`回复已完成，但${refreshFailures.join('、')}刷新失败，可稍后手动刷新。`);
     } catch (error) {
       if(run.cancelled||sessionTokenRef.current!==token||isTaskCancellation(error)){if(sessionTokenRef.current===token)setAgentStatus('已终止');return;}
@@ -777,18 +874,35 @@ export function App() {
   const resolvePermission = (optionId: string | null) => { permissionResolver.current?.(optionId); permissionResolver.current = null; setPendingPermission(null); };
   const handleOpenProject = async () => {
     if (!hasDesktopBridge()) { setNotice('Web 端不能读取服务器或本机文件。请在 COD Desktop 中选择项目。'); return; }
-    try { const snapshot = await openProject(); if (snapshot) { setProject(snapshot); storageSet('cod.project.root', snapshot.root); } }
+    try {
+      const root=await selectProjectRoot();
+      if(!root)return;
+      const generation=++projectLoadGenerationRef.current;
+      storageSet('cod.project.root',root);
+      setProjectDiffStatus('loading');
+      setProject({...emptyProject,root});
+      await loadProjectForDisplay(root,generation,'项目打开失败');
+    }
     catch (error) { setNotice(error instanceof Error ? error.message : '项目打开失败'); }
   };
   const refreshProject = async () => {
     if (!hasDesktopBridge() || !project.root) { setNotice('请先在 COD Desktop 中选择项目。'); return; }
-    try { const snapshot = await loadProject(project.root); if (snapshot) setProject((current) => ({ ...snapshot, selectedFile: current.selectedFile, selectedContent: current.selectedContent })); }
+    try { const generation=++projectLoadGenerationRef.current;setProjectDiffStatus('loading');await loadProjectForDisplay(project.root,generation,'项目刷新失败',true); }
     catch (error) { setNotice(error instanceof Error ? error.message : '项目刷新失败'); }
   };
   const handleFileSelect = async (file: WorkspaceFile) => {
+    const fileReadGeneration=++fileReadGenerationRef.current;
     if (file.kind !== 'file' || !project.root) return;
-    try { const content = await readProjectFile(project.root, file.path); setProject((current) => ({ ...current, selectedFile: file.path, selectedContent: content })); }
-    catch (error) { setNotice(error instanceof Error ? error.message : '文件读取失败'); }
+    const root=project.root;const generation=projectLoadGenerationRef.current;
+    try {
+      const content=await readProjectFile(root,file.path);
+      if(fileReadGeneration!==fileReadGenerationRef.current||generation!==projectLoadGenerationRef.current||projectRootRef.current!==root)return;
+      setProject((current)=>{
+        if(fileReadGeneration!==fileReadGenerationRef.current||current.root!==root||generation!==projectLoadGenerationRef.current)return current;
+        const next={...current,selectedFile:file.path,selectedContent:content};validatedProjectRef.current=next;return next;
+      });
+    }
+    catch (error) { if(fileReadGeneration===fileReadGenerationRef.current&&generation===projectLoadGenerationRef.current&&projectRootRef.current===root)setNotice(error instanceof Error ? error.message : '文件读取失败'); }
   };
   const handleRun = async () => {
     if (!window.codDesktop || !project.root) { setNotice('Web 端不会执行或伪造终端命令；请使用 COD Desktop 并选择项目。'); return; }
@@ -802,6 +916,8 @@ export function App() {
     return next;
   });
   const hiddenMobileContextCount = 3 + Number(Boolean(selectedSource)) + Number(Boolean(selectedModelInfo));
+  const isNativeHost = Boolean(getCodRuntime().hostPlatform);
+  const sendHint=isNativeHost?'发送':window.codDesktop?.platform==='darwin'?'⌘ Enter 发送':'Ctrl / ⌘ Enter 发送';
 
   return <div className={`app-shell${inspectorOpen ? '' : ' inspector-hidden'}`}>
     <aside className="rail"><Brand /><div className="rail-actions"><button className={`icon-button ${mode === 'code' ? 'active' : ''}`} title="任务" onClick={() => { selectWorkspaceMode('code'); setSidebarOpen(true); }}><ListChecks weight="fill" /></button><button className={`icon-button ${mode === 'chat' ? 'active' : ''}`} title="普通对话" onClick={() => selectWorkspaceMode('chat')}><ChatCircleDots /></button><button className="icon-button compute-entry" title="算力市场" onClick={() => setOverlay('compute')}><Storefront weight="fill" /></button><button className="icon-button" title="模型库" onClick={() => setOverlay('models')}><Stack /></button><button className="icon-button" title="命令面板" onClick={() => setOverlay('commands')}><Command /></button>{products.map((product) => <button className="icon-button" title={product.name} key={product.id} onClick={() => void handleProductLaunch(product)}><ArrowSquareOut /></button>)}</div><div className="rail-footer"><ThemeToggle colorMode={colorMode} onChange={setColorMode} /><button className="icon-button" title={session ? '账户' : '登录'} onClick={() => setOverlay(session ? 'account' : 'login')}><UserCircle /></button></div></aside>
@@ -824,10 +940,10 @@ export function App() {
           </div>
           {notice && <div className="remote-notice"><span>{notice}</span><button title="关闭提示" onClick={() => setNotice('')}><X /></button></div>}
           {knowledgeHits.length > 0 && <div className="knowledge-strip">{knowledgeHits.map((hit) => <a href={hit.url} target="_blank" rel="noreferrer" key={hit.id} onClick={(event)=>{event.preventDefault();void openCodExternalUrl(hit.url);}}><strong>{hit.title}</strong><span>{hit.excerpt}</span></a>)}</div>}
-          <div className="composer"><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void handleSend(); }} placeholder={mode === 'code' ? '让 COD 修改、检查或解释这个项目...' : compareEnabled ? `输入一个问题，同时询问 ${compareTargets.length} 个模型...` : '问 COD 任何问题...'} /><div className="composer-footer"><button className="composer-tool" title="查看项目文件" onClick={() => { if (hasDesktopBridge()) setInspectorTab('files'); else setNotice('项目文件仅在 COD Desktop 中可用。'); }}><Plus /></button><span>{compareEnabled&&mode==='chat'?`${compareTargets.length} 个模型 · 独立计费`:'⌘ ↵ 发送'}</span><button className="send" title="发送" disabled={!prompt.trim() || isSending || Boolean(session && (compareEnabled&&mode==='chat' ? compareTargets.length<2 : !selectedSource?.callable && !(mode === 'code' && hasDesktopBridge() && project.root)))} onClick={() => void handleSend()}>{isSending ? <CircleNotch className="spin" /> : <PaperPlaneTilt weight="fill" />}</button></div></div>
+          <div className="composer"><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void handleSend(); }} placeholder={mode === 'code' ? '让 COD 修改、检查或解释这个项目...' : compareEnabled ? `输入一个问题，同时询问 ${compareTargets.length} 个模型...` : '问 COD 任何问题...'} /><div className="composer-footer">{hasDesktopBridge() && <button className="composer-tool" title="查看项目文件" onClick={() => setInspectorTab('files')}><Plus /></button>}<span>{compareEnabled&&mode==='chat'?`${compareTargets.length} 个模型 · 独立计费`:sendHint}</span><button className="send" title="发送" disabled={!prompt.trim() || isSending || Boolean(session && (compareEnabled&&mode==='chat' ? compareTargets.length<2 : !selectedSource?.callable && !(mode === 'code' && hasDesktopBridge() && project.root)))} onClick={() => void handleSend()}>{isSending ? <CircleNotch className="spin" /> : <PaperPlaneTilt weight="fill" />}</button></div></div>
         </div></section>
     </main>
-    {inspectorOpen && <aside className="inspector"><div className="inspector-tabs"><button className={inspectorTab === 'changes' ? 'active' : ''} onClick={() => setInspectorTab('changes')}><GitDiff /> 改动</button><button className={inspectorTab === 'files' ? 'active' : ''} onClick={() => setInspectorTab('files')}><Folder /> 文件</button><button className={inspectorTab === 'terminal' ? 'active' : ''} onClick={() => setInspectorTab('terminal')}><TerminalWindow /> 终端</button><button className="inspector-close" title="隐藏右侧面板" onClick={toggleInspector}><X /></button></div><div className="inspector-body">{inspectorTab === 'changes' && <><div className="panel-title"><span><GitDiff /> 未提交改动</span><button title="刷新" onClick={refreshProject}><ArrowClockwise /></button></div>{project.root ? <CodeBlock text={project.diff || '当前项目没有未提交改动。'} /> : <div className="panel-empty">Web 端不伪造 Diff。请在 COD Desktop 中选择本机项目。</div>}</>}{inspectorTab === 'files' && <>{project.root ? <><div className="panel-title"><span><Folder /> 项目文件</span><small>{project.files.length}</small></div><FileTree files={project.files} selected={project.selectedFile} onSelect={handleFileSelect} />{project.selectedFile && <div className="file-preview"><strong>{project.selectedFile}</strong><CodeBlock text={project.selectedContent} /></div>}</> : <div className="panel-empty">本机文件仅在 COD Desktop 中可用。</div>}</>}{inspectorTab === 'terminal' && <>{window.codDesktop && project.root ? <><div className="panel-title"><span><TerminalWindow /> 本地终端</span><small>desktop</small></div><div className="terminal"><pre>{terminalOutput}</pre><div className="terminal-command"><span>$</span><input aria-label="终端命令" value={command} onChange={(event) => setCommand(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && handleRun()} /><button onClick={handleRun}>运行</button></div></div></> : <div className="panel-empty">Web 端不会执行或伪造终端结果。请使用 COD Desktop。</div>}</>}</div></aside>}
+    {inspectorOpen && <aside className="inspector"><div className="inspector-tabs"><button className={inspectorTab === 'changes' ? 'active' : ''} onClick={() => setInspectorTab('changes')}><GitDiff /> 改动</button><button className={inspectorTab === 'files' ? 'active' : ''} onClick={() => setInspectorTab('files')}><Folder /> 文件</button><button className={inspectorTab === 'terminal' ? 'active' : ''} onClick={() => setInspectorTab('terminal')}><TerminalWindow /> 终端</button><button className="inspector-close" title="隐藏右侧面板" onClick={toggleInspector}><X /></button></div><div className="inspector-body">{inspectorTab === 'changes' && <><div className="panel-title"><span><GitDiff /> 未提交改动</span><button title="刷新" onClick={refreshProject}><ArrowClockwise /></button></div>{!project.root?<div className="panel-empty">Web 端不伪造 Diff。请在 COD Desktop 中选择本机项目。</div>:projectDiffStatus==='loading'?<div className="panel-empty">正在读取 Git 改动…</div>:projectDiffStatus==='error'?<div className="panel-empty">Git 改动读取失败，可点击刷新重试。</div>:<CodeBlock text={project.diff || '当前项目没有未提交改动。'} />}</>}{inspectorTab === 'files' && <>{project.root ? <><div className="panel-title"><span><Folder /> 项目文件</span><small>{project.files.length}</small></div><FileTree files={project.files} selected={project.selectedFile} onSelect={handleFileSelect} />{project.selectedFile && <div className="file-preview"><strong>{project.selectedFile}</strong><CodeBlock text={project.selectedContent} /></div>}</> : <div className="panel-empty">本机文件仅在 COD Desktop 中可用。</div>}</>}{inspectorTab === 'terminal' && <>{window.codDesktop && project.root ? <><div className="panel-title"><span><TerminalWindow /> 本地终端</span><small>desktop</small></div><div className="terminal"><pre>{terminalOutput}</pre><div className="terminal-command"><span>$</span><input aria-label="终端命令" value={command} onChange={(event) => setCommand(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && handleRun()} /><button onClick={handleRun}>运行</button></div></div></> : <div className="panel-empty">Web 端不会执行或伪造终端结果。请使用 COD Desktop。</div>}</>}</div></aside>}
     {overlay === 'login' && <Modal title={pendingSend ? '登录后继续' : '登录 COD'} onClose={() => { authGenerationRef.current+=1;setPendingSend(null);setResumeComputeAfterLogin(false);setOverlay(null); }}><LoginForm capabilities={capabilities} capabilityError={capabilityError} resumeConversation={Boolean(pendingSend)} onLogin={handleLogin} onRegister={handleRegister} /></Modal>}
     {overlay === 'models' && <Modal title="模型库" wide onClose={() => setOverlay(null)}><ModelLibrary sources={modelCatalog} error={modelCatalogError} signedIn={Boolean(session)} onLogin={() => setOverlay('login')} /></Modal>}
     {overlay === 'compute' && <Modal title="COD 算力市场 · 机房直供 / 卡时 / 分期" wide onClose={() => setOverlay(null)}><ComputeMarket offers={computeOffers} requests={computeRequests} signedIn={Boolean(session)} draft={computeDraft} onDraftChange={setComputeDraft} onLogin={() => { setResumeComputeAfterLogin(true); setOverlay('login'); }} onSubmit={handleComputeRequest} /></Modal>}

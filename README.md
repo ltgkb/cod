@@ -52,4 +52,4 @@ Configure model source keys only in `/etc/cod/control-plane.env`, for example `K
 
 `deploy/control-plane.env.example` lists all production-only secret and integration settings. Do not copy real values into Git.
 
-See `AUDIT_2026-08-10.md` for the latest verified production state, and `FUNCTION_AUDIT.md` for the broader internal scope and external integration boundaries.
+See `AUDIT_2026-08-10.md` for the latest verified production state, `FUNCTION_AUDIT.md` for the broader internal scope and external integration boundaries, `docs/KAI_ACCOUNT_INTEGRATION.md` for the reviewed KAI Account OIDC boundary and rollout gates, and `CLIENT_AUDIT_2026-08-11.md` for the latest Android, iOS, and Desktop validation.

@@ -5,9 +5,29 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
-import { collectUntrackedDiff } from '../dist/git-diff.js';
+import {
+  collectUntrackedDiff,
+  stagedGitDiffArguments,
+  unstagedGitDiffArguments,
+  untrackedGitDiffArguments,
+} from '../dist/git-diff.js';
 
 const execFileAsync = promisify(execFile);
+
+test('disables external diff drivers and text conversion for every automatic diff', () => {
+  const invocations = [
+    unstagedGitDiffArguments(),
+    stagedGitDiffArguments(),
+    untrackedGitDiffArguments('/dev/null', 'example.txt'),
+  ];
+  for (const args of invocations) {
+    assert.equal(args[0], 'diff');
+    assert.ok(args.includes('--no-ext-diff'));
+    assert.ok(args.includes('--no-textconv'));
+  }
+  assert.ok(invocations[1].includes('--cached'));
+  assert.ok(invocations[2].includes('--no-index'));
+});
 
 test('renders untracked text, empty, large, and symbolic-link files safely', async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cod-untracked-diff-'));

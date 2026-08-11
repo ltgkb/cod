@@ -1,20 +1,31 @@
-import { execFile } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { isWithinRoot } from './command-policy.js';
+import { commandTimedOut, executeGitCommand } from './git-command.js';
 
-const execFileAsync = promisify(execFile);
 const untrackedFilePreviewLimitBytes = 256 * 1024;
 const untrackedTotalPreviewLimitBytes = 1024 * 1024;
 const untrackedContentPreviewLimit = 200;
 const untrackedPathLimit = 1_000;
 const untrackedOutputLimitBytes = 2 * 1024 * 1024;
+const gitCommandTimeoutMilliseconds = 15_000;
 
 interface CollectUntrackedDiffOptions {
   contentPreviewLimit?: number;
   outputLimitBytes?: number;
   pathLimit?: number;
+}
+
+export function unstagedGitDiffArguments(): string[] {
+  return ['diff', '--no-ext-diff', '--no-textconv', '--'];
+}
+
+export function stagedGitDiffArguments(): string[] {
+  return ['diff', '--cached', '--no-ext-diff', '--no-textconv', '--'];
+}
+
+export function untrackedGitDiffArguments(emptyFile: string, relativePath: string): string[] {
+  return ['diff', '--no-index', '--no-ext-diff', '--no-textconv', '--', emptyFile, relativePath];
 }
 
 function boundedLimit(value: number | undefined, fallback: number, maximum: number, minimum = 0): number {
@@ -41,9 +52,9 @@ export async function collectUntrackedDiff(root: string, options: CollectUntrack
   const outputLimitBytes = boundedLimit(options.outputLimitBytes, untrackedOutputLimitBytes, untrackedOutputLimitBytes, 1_024);
   const summaryReserveBytes = 512;
   const entryOutputLimitBytes = outputLimitBytes - summaryReserveBytes;
-  const { stdout } = await execFileAsync('git', ['ls-files', '--others', '--exclude-standard', '-z', '--'], {
-    cwd: root,
+  const { stdout } = await executeGitCommand(root, ['ls-files', '--others', '--exclude-standard', '-z', '--'], {
     maxBuffer: 16 * 1024 * 1024,
+    timeoutMilliseconds: gitCommandTimeoutMilliseconds,
   });
   const relativePaths = stdout.split('\0').filter(Boolean);
   const diffs: string[] = [];
@@ -96,13 +107,17 @@ export async function collectUntrackedDiff(root: string, options: CollectUntrack
     previewedFiles += 1;
     const emptyFile = process.platform === 'win32' ? 'NUL' : '/dev/null';
     try {
-      const { stdout: diff } = await execFileAsync('git', ['diff', '--no-index', '--no-ext-diff', '--', emptyFile, relativePath], {
-        cwd: root,
+      const { stdout: diff } = await executeGitCommand(root, untrackedGitDiffArguments(emptyFile, relativePath), {
         maxBuffer: 2 * 1024 * 1024,
+        timeoutMilliseconds: gitCommandTimeoutMilliseconds,
       });
       if (!appendPathDiff(diff || untrackedDiffPlaceholder(relativePath, 'empty file'))) break;
     } catch (error) {
       const details = error as Error & { code?: number | string; stdout?: string };
+      if (commandTimedOut(error)) {
+        appendPathDiff(untrackedDiffPlaceholder(relativePath, 'content preview timed out'));
+        break;
+      }
       const diff = (details.code === 1 || details.code === '1') && details.stdout
         ? details.stdout
         : untrackedDiffPlaceholder(relativePath, 'content preview failed');

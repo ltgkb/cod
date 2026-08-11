@@ -1,11 +1,13 @@
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { WorkspaceFile } from '@cod/contracts';
 import { App } from './App';
 import { createClientId, getControlPlaneUrl, sendChat } from './api';
-import { configureCodRuntime } from './runtime';
+import { configureCodRuntime, dispatchCodNativeBack } from './runtime';
 
 beforeEach(() => {
+  delete window.codDesktop;
   const values = new Map<string, string>();
   const storage: Storage = {
     get length() { return values.size; },
@@ -20,6 +22,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  delete window.codDesktop;
   configureCodRuntime({});
   try { window.localStorage?.clear(); } catch { /* Node can expose localStorage without a backing file. */ }
   vi.unstubAllGlobals();
@@ -88,6 +91,7 @@ describe('COD workspace', () => {
     vi.stubGlobal('fetch', vi.fn(async () => json(capabilities)));
     render(<App />);
     expect(await screen.findByRole('heading', { name: '新对话' })).toBeInTheDocument();
+    expect(screen.getByText('Ctrl / ⌘ Enter 发送', { selector: '.composer-footer > span' })).toBeInTheDocument();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     const composer = screen.getByPlaceholderText('问 COD 任何问题...');
     fireEvent.change(composer, { target: { value: '这是我的第一条消息' } });
@@ -121,6 +125,37 @@ describe('COD workspace', () => {
     fireEvent.click(toggle);
     expect(strip).toHaveClass('mobile-expanded');
     expect(screen.getByRole('button', { name: '收起上下文信息' })).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('dismisses Android DOM layers before releasing hardware back to the system', async () => {
+    const availability: boolean[] = [];
+    configureCodRuntime({
+      hostPlatform: 'android',
+      setNativeBackAvailable: async (available) => {
+        availability.push(available);
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => json(capabilities)));
+    render(<App />);
+    await screen.findByRole('heading', { name: '新对话' });
+    expect(screen.queryByTitle('查看项目文件')).not.toBeInTheDocument();
+    expect(screen.getByText('发送', { selector: '.composer-footer > span' })).toBeInTheDocument();
+    await waitFor(() => expect(availability.at(-1)).toBe(false));
+    expect(dispatchCodNativeBack()).toBe(false);
+
+    fireEvent.click(screen.getByTitle('模型库'));
+    expect(await screen.findByRole('dialog', { name: '模型库' })).toBeInTheDocument();
+    await waitFor(() => expect(availability.at(-1)).toBe(true));
+    expect(dispatchCodNativeBack()).toBe(true);
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '模型库' })).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByTitle('打开任务栏'));
+    expect(screen.getByRole('button', { name: '关闭任务栏' })).toBeInTheDocument();
+    await waitFor(() => expect(availability.at(-1)).toBe(true));
+    expect(dispatchCodNativeBack()).toBe(true);
+    await waitFor(() => expect(screen.queryByRole('button', { name: '关闭任务栏' })).not.toBeInTheDocument());
+    await waitFor(() => expect(availability.at(-1)).toBe(false));
+    expect(dispatchCodNativeBack()).toBe(false);
   });
 
   it('shows public model prices before login', async () => {
@@ -185,6 +220,248 @@ describe('COD workspace', () => {
     expect(window.localStorage.getItem('cod.inspector.open')).toBe('false');
     fireEvent.click(screen.getByRole('button', { name: '显示右侧面板' }));
     expect(screen.getByRole('button', { name: '改动' })).toBeInTheDocument();
+  });
+
+  it('shows project files independently while a Git snapshot is still pending', async () => {
+    const selectedRoot = '/Users/developer/projects/zanzibar-integration';
+    window.codDesktop = {
+      platform: 'win32',
+      controlPlaneUrl: 'https://cod.example',
+      selectProject: vi.fn(async () => selectedRoot),
+      listFiles: vi.fn(async () => [{ path: 'package.json', name: 'package.json', kind: 'file' as const, depth: 0 }]),
+      gitDiff: vi.fn(() => new Promise<string>(() => undefined)),
+      readTextFile: vi.fn(async () => ''),
+      runCommand: vi.fn(async (_root, command) => ({ command, output: '', exitCode: 0 })),
+      getGooseAcpUrl: vi.fn(async () => null),
+      stopGoose: vi.fn(async () => undefined),
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => json(capabilities)));
+    render(<App />);
+    await screen.findByRole('heading', { name: '新对话' });
+
+    const projectSwitcher = screen.getByRole('button', { name: /当前项目/ });
+    fireEvent.click(projectSwitcher);
+
+    expect(await within(projectSwitcher).findByText('zanzibar-integration')).toBeInTheDocument();
+    expect(window.localStorage.getItem('cod.project.root')).toBe(selectedRoot);
+    expect(screen.getByText('Ctrl / ⌘ Enter 发送', { selector: '.composer-footer > span' })).toBeInTheDocument();
+    expect(screen.getByText('正在读取 Git 改动…')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '文件' }));
+    expect(await screen.findByRole('button', { name: 'package.json' })).toBeInTheDocument();
+  });
+
+  it('clears a restored project root when its file list can no longer be read', async () => {
+    const restoredRoot = '/Users/developer/projects/deleted-project';
+    window.localStorage.setItem('cod.project.root', restoredRoot);
+    window.codDesktop = {
+      platform: 'darwin',
+      controlPlaneUrl: 'https://cod.example',
+      selectProject: vi.fn(async () => null),
+      listFiles: vi.fn(async () => { throw new Error('ENOENT'); }),
+      gitDiff: vi.fn(() => new Promise<string>(() => undefined)),
+      readTextFile: vi.fn(async () => ''),
+      runCommand: vi.fn(async (_root, command) => ({ command, output: '', exitCode: 0 })),
+      getGooseAcpUrl: vi.fn(async () => null),
+      stopGoose: vi.fn(async () => undefined),
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => json(capabilities)));
+    render(<App />);
+
+    const projectSwitcher = screen.getByRole('button', { name: /当前项目/ });
+    expect(await within(projectSwitcher).findByText('未连接本机项目')).toBeInTheDocument();
+    expect(window.localStorage.getItem('cod.project.root')).toBeNull();
+    expect(screen.getAllByText(/上次使用的项目无法打开，已清除失效项目/).length).toBeGreaterThan(0);
+  });
+
+  it('rolls a failed project selection back to the last validated project', async () => {
+    const previousRoot = '/Users/developer/projects/working-project';
+    const rejectedRoot = '/Users/developer/projects/missing-project';
+    window.localStorage.setItem('cod.project.root', previousRoot);
+    window.codDesktop = {
+      platform: 'darwin',
+      controlPlaneUrl: 'https://cod.example',
+      selectProject: vi.fn(async () => rejectedRoot),
+      listFiles: vi.fn(async (root) => {
+        if(root===previousRoot)return [{ path: 'working.ts', name: 'working.ts', kind: 'file' as const, depth: 0 }];
+        throw new Error('permission denied');
+      }),
+      gitDiff: vi.fn(async () => ''),
+      readTextFile: vi.fn(async () => ''),
+      runCommand: vi.fn(async (_root, command) => ({ command, output: '', exitCode: 0 })),
+      getGooseAcpUrl: vi.fn(async () => null),
+      stopGoose: vi.fn(async () => undefined),
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => json(capabilities)));
+    render(<App />);
+
+    const projectSwitcher = screen.getByRole('button', { name: /当前项目/ });
+    expect(await within(projectSwitcher).findByText('working-project')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '文件' }));
+    expect(await screen.findByRole('button', { name: 'working.ts' })).toBeInTheDocument();
+    fireEvent.click(projectSwitcher);
+
+    await waitFor(() => expect(window.localStorage.getItem('cod.project.root')).toBe(previousRoot));
+    expect(await within(projectSwitcher).findByText('working-project')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'working.ts' })).toBeInTheDocument();
+    expect(screen.getAllByText(/项目打开失败，已恢复上一个可用项目/).length).toBeGreaterThan(0);
+  });
+
+  it('ignores stale file and diff results after a newer project selection', async () => {
+    const slowRoot='/Users/developer/projects/slow-project';
+    const fastRoot='/Users/developer/projects/fast-project';
+    let resolveSlowFiles:(files:WorkspaceFile[])=>void=()=>undefined;
+    const slowFiles=new Promise<WorkspaceFile[]>((resolve)=>{resolveSlowFiles=resolve;});
+    window.codDesktop = {
+      platform: 'darwin',
+      controlPlaneUrl: 'https://cod.example',
+      selectProject: vi.fn().mockResolvedValueOnce(slowRoot).mockResolvedValueOnce(fastRoot),
+      listFiles: vi.fn(async (root) => root===slowRoot?slowFiles:[{ path: 'fast.ts', name: 'fast.ts', kind: 'file' as const, depth: 0 }]),
+      gitDiff: vi.fn(async (root) => `diff --git a/${root===slowRoot?'slow.ts':'fast.ts'} b/file`),
+      readTextFile: vi.fn(async () => ''),
+      runCommand: vi.fn(async (_root, command) => ({ command, output: '', exitCode: 0 })),
+      getGooseAcpUrl: vi.fn(async () => null),
+      stopGoose: vi.fn(async () => undefined),
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => json(capabilities)));
+    render(<App />);
+    await screen.findByRole('heading', { name: '新对话' });
+
+    const projectSwitcher=screen.getByRole('button',{name:/当前项目/});
+    fireEvent.click(projectSwitcher);
+    expect(await within(projectSwitcher).findByText('slow-project')).toBeInTheDocument();
+    fireEvent.click(projectSwitcher);
+    expect(await within(projectSwitcher).findByText('fast-project')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button',{name:'文件'}));
+    expect(await screen.findByRole('button',{name:'fast.ts'})).toBeInTheDocument();
+
+    resolveSlowFiles([{path:'slow.ts',name:'slow.ts',kind:'file',depth:0}]);
+    await waitFor(()=>expect(window.localStorage.getItem('cod.project.root')).toBe(fastRoot));
+    expect(within(projectSwitcher).getByText('fast-project')).toBeInTheDocument();
+    expect(screen.queryByRole('button',{name:'slow.ts'})).not.toBeInTheDocument();
+  });
+
+  it('ignores a slow file read after switching to another project', async () => {
+    const firstRoot='/Users/developer/projects/first-project';
+    const secondRoot='/Users/developer/projects/second-project';
+    let resolveRead:(content:string)=>void=()=>undefined;
+    const slowRead=new Promise<string>((resolve)=>{resolveRead=resolve;});
+    window.localStorage.setItem('cod.project.root',firstRoot);
+    window.codDesktop={
+      platform:'darwin',controlPlaneUrl:'https://cod.example',selectProject:vi.fn(async()=>secondRoot),
+      listFiles:vi.fn(async(root)=>root===firstRoot?[{path:'first.ts',name:'first.ts',kind:'file' as const,depth:0}]:[{path:'second.ts',name:'second.ts',kind:'file' as const,depth:0}]),
+      gitDiff:vi.fn(async()=>''),readTextFile:vi.fn(async()=>slowRead),
+      runCommand:vi.fn(async(_root,command)=>({command,output:'',exitCode:0})),getGooseAcpUrl:vi.fn(async()=>null),stopGoose:vi.fn(async()=>undefined),
+    };
+    vi.stubGlobal('fetch',vi.fn(async()=>json(capabilities)));
+    render(<App/>);
+
+    const projectSwitcher=screen.getByRole('button',{name:/当前项目/});
+    expect(await within(projectSwitcher).findByText('first-project')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button',{name:'文件'}));
+    fireEvent.click(await screen.findByRole('button',{name:'first.ts'}));
+    expect(window.codDesktop.readTextFile).toHaveBeenCalledWith(firstRoot,'first.ts');
+    fireEvent.click(projectSwitcher);
+    expect(await within(projectSwitcher).findByText('second-project')).toBeInTheDocument();
+    expect(await screen.findByRole('button',{name:'second.ts'})).toBeInTheDocument();
+
+    await act(async()=>{resolveRead('stale first-project contents');await slowRead;});
+    expect(window.localStorage.getItem('cod.project.root')).toBe(secondRoot);
+    expect(within(projectSwitcher).getByText('second-project')).toBeInTheDocument();
+    expect(screen.queryByText('stale first-project contents')).not.toBeInTheDocument();
+    expect(screen.queryByText('first.ts',{selector:'.file-preview > strong'})).not.toBeInTheDocument();
+  });
+
+  it('keeps the latest file selection when an earlier read finishes last', async () => {
+    const root='/Users/developer/projects/file-race';
+    let resolveSlowRead:(content:string)=>void=()=>undefined;
+    const slowRead=new Promise<string>((resolve)=>{resolveSlowRead=resolve;});
+    window.localStorage.setItem('cod.project.root',root);
+    window.codDesktop={
+      platform:'darwin',controlPlaneUrl:'https://cod.example',selectProject:vi.fn(async()=>null),
+      listFiles:vi.fn(async()=>[
+        {path:'slow.ts',name:'slow.ts',kind:'file' as const,depth:0},
+        {path:'fast.ts',name:'fast.ts',kind:'file' as const,depth:0},
+      ]),
+      gitDiff:vi.fn(async()=>''),
+      readTextFile:vi.fn(async(_root,path)=>path==='slow.ts'?slowRead:'fast file contents'),
+      runCommand:vi.fn(async(_root,command)=>({command,output:'',exitCode:0})),getGooseAcpUrl:vi.fn(async()=>null),stopGoose:vi.fn(async()=>undefined),
+    };
+    vi.stubGlobal('fetch',vi.fn(async()=>json(capabilities)));
+    render(<App/>);
+
+    expect(await within(screen.getByRole('button',{name:/当前项目/})).findByText('file-race')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button',{name:'文件'}));
+    fireEvent.click(await screen.findByRole('button',{name:'slow.ts'}));
+    fireEvent.click(screen.getByRole('button',{name:'fast.ts'}));
+    expect(await screen.findByText('fast file contents')).toBeInTheDocument();
+    expect(screen.getByText('fast.ts',{selector:'.file-preview > strong'})).toBeInTheDocument();
+
+    await act(async()=>{resolveSlowRead('stale slow file contents');await slowRead;});
+    expect(screen.getByText('fast.ts',{selector:'.file-preview > strong'})).toBeInTheDocument();
+    expect(screen.getByText('fast file contents')).toBeInTheDocument();
+    expect(screen.queryByText('stale slow file contents')).not.toBeInTheDocument();
+  });
+
+  it('does not let a post-chat project refresh overwrite a newer selection', async () => {
+    const firstRoot='/Users/developer/projects/chat-project';
+    const secondRoot='/Users/developer/projects/new-project';
+    let firstRootReads=0;
+    let resolveRefreshFiles:(files:WorkspaceFile[])=>void=()=>undefined;
+    let markRefreshStarted:()=>void=()=>undefined;
+    const refreshFiles=new Promise<WorkspaceFile[]>((resolve)=>{resolveRefreshFiles=resolve;});
+    const refreshStarted=new Promise<void>((resolve)=>{markRefreshStarted=resolve;});
+    window.localStorage.setItem('cod.project.root',firstRoot);
+    window.localStorage.setItem('cod.session.token','test-token');
+    window.codDesktop={
+      platform:'darwin',controlPlaneUrl:'https://cod.example',selectProject:vi.fn(async()=>secondRoot),
+      listFiles:vi.fn(async(root)=>{
+        if(root===secondRoot)return [{path:'new.ts',name:'new.ts',kind:'file' as const,depth:0}];
+        firstRootReads+=1;
+        if(firstRootReads===1)return [{path:'chat.ts',name:'chat.ts',kind:'file' as const,depth:0}];
+        markRefreshStarted();return refreshFiles;
+      }),
+      gitDiff:vi.fn(async(root)=>root===secondRoot?'diff --git a/new.ts b/new.ts':'diff --git a/chat.ts b/chat.ts'),
+      readTextFile:vi.fn(async()=>''),runCommand:vi.fn(async(_root,command)=>({command,output:'',exitCode:0})),getGooseAcpUrl:vi.fn(async()=>null),stopGoose:vi.fn(async()=>undefined),
+    };
+    let taskVersion=1;
+    const fetchMock=vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{
+      const url=String(input);
+      if(url.endsWith('/api/capabilities'))return json(capabilities);
+      if(url.endsWith('/api/model-catalog'))return json([]);
+      if(url.endsWith('/api/account'))return json({userId:'user',displayName:'developer',balanceCents:5000,currency:'CNY',plan:'developer'});
+      if(url.endsWith('/api/model-sources'))return json([{id:'ai-kai',label:'AI.KAI.COM',status:'live',callable:true,paymentDirection:'钱包 → ai.kai.com',note:'已连接',models:[{id:'model-a',label:'模型 A',contextWindow:128000,inputPricePerMillionCents:100,outputPricePerMillionCents:200}]}]);
+      if(url.endsWith('/api/devices')&&init?.method==='POST')return json({id:'desktop-device',name:'COD Desktop',platform:'macos',status:'online',lastSeenAt:new Date().toISOString()},201);
+      if(url.endsWith('/api/devices'))return json([]);
+      if(url.endsWith('/api/tasks')&&init?.method==='POST')return json({id:'task-race',title:'刷新竞态',status:'draft',deviceId:'desktop-device',updatedAt:new Date().toISOString(),version:taskVersion},201);
+      if(url.endsWith('/api/tasks'))return json([]);
+      if(/\/api\/tasks\/task-race\/status$/.test(url)){const body=JSON.parse(String(init?.body)) as {status:'running'|'complete'};taskVersion+=1;return json({id:'task-race',title:'刷新竞态',status:body.status,deviceId:'desktop-device',updatedAt:new Date().toISOString(),version:taskVersion,result:body.status==='complete'?'已完成':null,error:null});}
+      if(url.endsWith('/v1/chat/completions'))return json({choices:[{message:{content:'刷新竞态回复'}}],usage:{prompt_tokens:4,completion_tokens:6},cod_source:'ai-kai'});
+      if(url.endsWith('/api/credit-packs'))return json(creditPacks);
+      if(url.endsWith('/api/products')||url.endsWith('/api/ledger'))return json([]);
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal('fetch',fetchMock);
+    const {container}=render(<App/>);
+
+    const projectSwitcher=screen.getByRole('button',{name:/当前项目/});
+    expect(await within(projectSwitcher).findByText('chat-project')).toBeInTheDocument();
+    expect(await screen.findByRole('heading',{name:'新建或选择任务'})).toBeInTheDocument();
+    fireEvent.click(screen.getByTitle('普通对话'));
+    fireEvent.change(screen.getByPlaceholderText('问 COD 任何问题...'),{target:{value:'测试刷新竞态'}});
+    fireEvent.click(screen.getByRole('button',{name:'发送'}));
+    await refreshStarted;
+
+    fireEvent.click(projectSwitcher);
+    expect(await within(projectSwitcher).findByText('new-project')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button',{name:'文件'}));
+    expect(await screen.findByRole('button',{name:'new.ts'})).toBeInTheDocument();
+    await act(async()=>{resolveRefreshFiles([{path:'stale.ts',name:'stale.ts',kind:'file',depth:0}]);await refreshFiles;});
+    await waitFor(()=>expect(container.querySelector('.composer .send .spin')).toBeNull());
+
+    expect(window.localStorage.getItem('cod.project.root')).toBe(secondRoot);
+    expect(within(projectSwitcher).getByText('new-project')).toBeInTheDocument();
+    expect(screen.getByRole('button',{name:'new.ts'})).toBeInTheDocument();
+    expect(screen.queryByRole('button',{name:'stale.ts'})).not.toBeInTheDocument();
   });
 
   it('automatically continues the saved first message after login', async () => {

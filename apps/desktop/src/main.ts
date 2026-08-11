@@ -10,14 +10,18 @@ import { promisify } from 'node:util';
 import type { AgentGatewayConfig, TerminalResult } from '@cod/contracts';
 import { mintAgentSession } from './agent-session.js';
 import { commandPathCandidates, commandPolicyViolation, isWithinRoot, parseCommand, validateCommandPath } from './command-policy.js';
-import { collectUntrackedDiff } from './git-diff.js';
+import { commandTimedOut, executeGitCommand } from './git-command.js';
+import { collectUntrackedDiff, stagedGitDiffArguments, unstagedGitDiffArguments } from './git-diff.js';
 import { minimalGooseEnvironment } from './goose-environment.js';
+import { isAllowedDevelopmentNavigation } from './navigation-policy.js';
 import { loadApprovedProjectRoots, maximumApprovedProjectRoots, saveApprovedProjectRoots } from './project-roots.js';
 import { collectWorkspaceFiles } from './workspace-files.js';
 
 const execFileAsync = promisify(execFile);
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const developmentUrl = process.env.COD_DEV_SERVER_URL || 'http://127.0.0.1:5173';
+const gitProbeTimeoutMilliseconds = 3_000;
+const gitDiffTimeoutMilliseconds = 15_000;
 const approvedProjectRoots = new Set<string>();
 let gooseSidecar: ChildProcess | null = null;
 let gooseAcpUrl: string | null = null;
@@ -249,7 +253,7 @@ async function createWindow() {
     return { action: 'deny' };
   });
   window.webContents.on('will-navigate', (event, url) => {
-    const allowedDevelopmentNavigation = !app.isPackaged && url.startsWith(developmentUrl);
+    const allowedDevelopmentNavigation = !app.isPackaged && isAllowedDevelopmentNavigation(url, developmentUrl);
     if (allowedDevelopmentNavigation) return;
     event.preventDefault();
     if (isTrustedExternalUrl(url)) void shell.openExternal(url);
@@ -289,14 +293,18 @@ ipcMain.handle('cod:git-diff', async (_event, root: string) => {
   try {
     const resolvedRoot = await approvedProjectRoot(root);
     try {
-      const { stdout } = await execFileAsync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: resolvedRoot, maxBuffer: 64 * 1024 });
+      const { stdout } = await executeGitCommand(resolvedRoot, ['rev-parse', '--is-inside-work-tree'], {
+        maxBuffer: 64 * 1024,
+        timeoutMilliseconds: gitProbeTimeoutMilliseconds,
+      });
       if (stdout.trim() !== 'true') return '当前目录不是 Git 工作区，暂无可显示的改动。';
-    } catch {
+    } catch (error) {
+      if (commandTimedOut(error)) return 'Git 状态读取超时；项目文件仍可正常使用。可检查仓库元数据权限后重试。';
       return '当前目录不是 Git 仓库，暂无可显示的改动。初始化 Git 后即可在这里查看变更。';
     }
     const [{ stdout: unstaged }, { stdout: staged }, untracked] = await Promise.all([
-      execFileAsync('git', ['diff', '--no-ext-diff', '--'], { cwd: resolvedRoot, maxBuffer: 2 * 1024 * 1024 }),
-      execFileAsync('git', ['diff', '--cached', '--no-ext-diff', '--'], { cwd: resolvedRoot, maxBuffer: 2 * 1024 * 1024 }),
+      executeGitCommand(resolvedRoot, unstagedGitDiffArguments(), { maxBuffer: 2 * 1024 * 1024, timeoutMilliseconds: gitDiffTimeoutMilliseconds }),
+      executeGitCommand(resolvedRoot, stagedGitDiffArguments(), { maxBuffer: 2 * 1024 * 1024, timeoutMilliseconds: gitDiffTimeoutMilliseconds }),
       collectUntrackedDiff(resolvedRoot),
     ]);
     return [
@@ -305,6 +313,7 @@ ipcMain.handle('cod:git-diff', async (_event, root: string) => {
       untracked && '# Untracked files\n' + untracked,
     ].filter(Boolean).join('\n');
   } catch (error) {
+    if (commandTimedOut(error)) return 'Git 改动读取超时；项目文件仍可正常使用。请缩小仓库范围或稍后重试。';
     return error instanceof Error ? error.message : 'Unable to read git diff';
   }
 });

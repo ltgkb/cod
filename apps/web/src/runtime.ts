@@ -19,9 +19,11 @@ export interface CodRuntimeConfig {
   openExternalUrl?: (url: string) => Promise<void>;
   copyText?: (value: string) => Promise<void>;
   setNativeColorMode?: (mode: 'light' | 'dark') => Promise<void>;
+  setNativeBackAvailable?: (available: boolean) => Promise<void>;
 }
 
 let runtime: CodRuntimeConfig = {};
+let nativeBackHandler: (() => void) | null = null;
 
 export function configureCodRuntime(next: CodRuntimeConfig): void {
   runtime = next;
@@ -29,6 +31,25 @@ export function configureCodRuntime(next: CodRuntimeConfig): void {
 
 export function getCodRuntime(): Readonly<CodRuntimeConfig> {
   return runtime;
+}
+
+function publishNativeBackAvailability(available: boolean): void {
+  try {
+    void runtime.setNativeBackAvailable?.(available).catch(() => undefined);
+  } catch {
+    // The native bridge can disappear while the WebView is being torn down.
+  }
+}
+
+export function setCodNativeBackHandler(handler: (() => void) | null): void {
+  nativeBackHandler = handler;
+  publishNativeBackAvailability(Boolean(handler));
+}
+
+export function dispatchCodNativeBack(): boolean {
+  if (!nativeBackHandler) return false;
+  nativeBackHandler();
+  return true;
 }
 
 export async function openCodExternalUrl(value: string): Promise<void> {

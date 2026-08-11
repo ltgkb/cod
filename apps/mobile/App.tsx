@@ -1,10 +1,11 @@
-import { useCallback, useRef, useState } from 'react';
-import { KeyboardAvoidingView, Linking, Platform, StyleSheet, useColorScheme } from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { BackHandler, KeyboardAvoidingView, Linking, Platform, StyleSheet, useColorScheme } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Clipboard from 'expo-clipboard';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
-import CodWorkspace from './src/CodWorkspace.dom';
+import CodWorkspace, { type CodWorkspaceRef } from './src/CodWorkspace.dom';
+import { forwardNativeBack } from './src/native-back';
 import type { NativeHttpRequest, NativeHttpResponse } from '../web/src/runtime';
 
 const controlPlaneUrl = process.env.EXPO_PUBLIC_COD_CONTROL_PLANE_URL ?? 'https://cod.kai.com';
@@ -23,7 +24,7 @@ function createDomBootstrap(platform: 'android' | 'ios', apiUrl: string): string
   // Its fallback WebView also omits injectedObjectJson on some Android WebView builds, so
   // polyfill the exact JSON hook that Expo's generated DOM HTML reads at document start.
   const initialProps = {
-    names: ['nativeRequest', 'cancelNativeRequest', 'openExternalUrl', 'copyText', 'setNativeColorMode'],
+    names: ['nativeRequest', 'cancelNativeRequest', 'openExternalUrl', 'copyText', 'setNativeColorMode', 'setNativeBackAvailable'],
     props: { controlPlaneUrl: apiUrl, hostPlatform: platform },
   };
   const injectedObjectJson = JSON.stringify({
@@ -39,6 +40,8 @@ function createDomBootstrap(platform: 'android' | 'ios', apiUrl: string): string
 
 export default function App() {
   const requestControllers = useRef(new Map<string, AbortController>());
+  const workspaceRef = useRef<CodWorkspaceRef>(null);
+  const nativeBackAvailableRef = useRef(false);
   const systemColorScheme = useColorScheme();
   const [workspaceColorMode, setWorkspaceColorMode] = useState<'light' | 'dark'>(systemColorScheme === 'dark' ? 'dark' : 'light');
 
@@ -77,6 +80,18 @@ export default function App() {
     setWorkspaceColorMode(mode);
   }, []);
 
+  const setNativeBackAvailable = useCallback(async (available: boolean): Promise<void> => {
+    nativeBackAvailableRef.current = available;
+  }, []);
+
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => (
+      forwardNativeBack(nativeBackAvailableRef.current, workspaceRef.current)
+    ));
+    return () => subscription.remove();
+  }, []);
+
   return (
     <SafeAreaProvider>
       <SafeAreaView
@@ -89,6 +104,7 @@ export default function App() {
           style={styles.keyboardAvoiding}
         >
           <CodWorkspace
+            ref={workspaceRef}
             controlPlaneUrl={controlPlaneUrl}
             hostPlatform={hostPlatform}
             nativeRequest={nativeRequest}
@@ -96,6 +112,7 @@ export default function App() {
             openExternalUrl={openExternalUrl}
             copyText={copyText}
             setNativeColorMode={setNativeColorMode}
+            setNativeBackAvailable={setNativeBackAvailable}
             dom={{
               useExpoDOMWebView: false,
               scrollEnabled: false,
