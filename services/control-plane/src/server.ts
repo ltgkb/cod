@@ -7,12 +7,13 @@ import { loadConfig, type ControlPlaneConfig } from './config.js';
 import { creditPackCatalog, type CodDatabase, type Principal, PostgresDatabase, type TopupRequest } from './database.js';
 import { errorResponse, HttpError } from './errors.js';
 import { AiGateway } from './gateway.js';
-import { bearerToken, readJson, readText, sendJson } from './http.js';
+import { bearerToken, readJson, readText, sendJson, sendText } from './http.js';
 import { KnowledgeAdapter } from './knowledge.js';
 import { MemoryDatabase } from './memory-database.js';
 import { ProductRegistry } from './products.js';
 import { beginRequest, recordRequest, renderMetrics } from './metrics.js';
 import { computeOfferCatalog, validateComputeRequest } from './compute-market.js';
+import { OfficialPaymentService } from './payments.js';
 
 export interface ControlPlaneOptions {
   config?: ControlPlaneConfig;
@@ -153,6 +154,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
   const gateway = options.gateway ?? new AiGateway(config);
   const knowledge = new KnowledgeAdapter(config);
   const products = new ProductRegistry(config);
+  const officialPayments = new OfficialPaymentService(config);
   const seenFeishuMessages = new Set<string>();
   interface ActiveChatRequest { controller: AbortController; reservationId: string; reservationReady: Promise<void> }
   const activeChats = new Map<string, Set<ActiveChatRequest>>();
@@ -200,7 +202,12 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         authentication: { mode: 'password', registrationEnabled: config.registrationEnabled, inviteCodeOptional: !config.inviteCodeRequired, inviteCodeRequired: config.inviteCodeRequired, accessCodeRequired: false },
         ai: { mode: await gateway.mode(), streaming: true, streamingMode: 'buffered-sse' },
         knowledge: { mode: knowledge.mode() },
-        payments: { topupEnabled: config.developmentTopupEnabled, orderApi: Boolean(config.paymentWebhookSecret), mode: config.paymentWebhookSecret ? 'verified-webhook' : config.developmentTopupEnabled ? 'pilot-credit' : 'unavailable' },
+        payments: {
+          topupEnabled: config.developmentTopupEnabled,
+          orderApi: Boolean(config.paymentWebhookSecret) || officialPayments.availableChannels().length > 0,
+          channels: officialPayments.availableChannels(),
+          mode: officialPayments.availableChannels().length > 0 ? 'official-merchant' : config.paymentWebhookSecret ? 'verified-webhook' : config.developmentTopupEnabled ? 'pilot-credit' : 'unavailable',
+        },
         synchronization: { transport: 'polling', taskStatusVersioning: true, taskCancellation: true },
         remote: {
           feishu: config.feishuVerificationToken && config.feishuAppId && config.feishuAppSecret && Object.keys(config.feishuBindings).length ? 'live' : 'unavailable',
@@ -291,6 +298,16 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         const completed = await database.completePaymentOrder({ orderId: event.orderId, amountCents: Number(event.amountCents), currency: 'CNY', channel, providerPaymentId: event.providerPaymentId, providerEventId: event.eventId });
         return sendJson(response, 200, { accepted: true, credited: true, order: completed.order, ledgerId: completed.entry.id });
       }
+      if (request.method === 'POST' && url.pathname === '/api/webhooks/payments/wechat') {
+        const event = officialPayments.verifyWechatNotification(await readText(request), request.headers);
+        if (event) await database.completePaymentOrder(event);
+        return sendJson(response, 200, { code: 'SUCCESS', message: '成功' });
+      }
+      if (request.method === 'POST' && url.pathname === '/api/webhooks/payments/alipay') {
+        const event = officialPayments.verifyAlipayNotification(await readText(request));
+        if (event) await database.completePaymentOrder(event);
+        return sendText(response, 200, 'success');
+      }
       const session = verifySessionToken(bearerToken(request) ?? '', config.sessionSecret);
       if (!session) return sendJson(response, 401, { error: 'unauthorized' });
       const principal = principalFromSession(session);
@@ -312,12 +329,15 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         return sendJson(response,201,result);
       }
       if (request.method === 'POST' && url.pathname === '/api/payment-orders') {
-        if(!config.paymentWebhookSecret)throw new HttpError('支付渠道尚未接入',503,'payments_unavailable');
         const key=String(request.headers['idempotency-key']??'');if(!key)throw new HttpError('idempotency-key is required',400,'idempotency_required');
         const body=await readJson<{amountCents?:number;channel?:'wechat'|'alipay'}>(request);
-        const order=await database.createPaymentOrder(principal,{amountCents:Number(body.amountCents),channel:body.channel as 'wechat'|'alipay',idempotencyKey:key});
+        const channel=body.channel as 'wechat'|'alipay';
+        const officialChannel=officialPayments.availableChannels().includes(channel);
+        if(!officialChannel&&!config.paymentWebhookSecret)throw new HttpError('所选支付渠道尚未接入',503,'payments_unavailable');
+        const order=await database.createPaymentOrder(principal,{amountCents:Number(body.amountCents),channel,idempotencyKey:key});
         await database.audit(principal,'payment.order.created','payment_order',order.id,{amountCents:order.amountCents,channel:order.channel});
-        return sendJson(response,201,order);
+        if (!officialChannel) return sendJson(response,201,order);
+        return sendJson(response,201,{order,checkout:await officialPayments.createCheckout(order)});
       }
       if (request.method === 'GET' && url.pathname.match(/^\/api\/payment-orders\/[^/]+$/)) return sendJson(response,200,await database.getPaymentOrder(principal,url.pathname.split('/')[3]));
       if (request.method === 'GET' && url.pathname === '/api/audit') return sendJson(response, 200, await database.listAudit(principal, queryInteger(url.searchParams.get('limit'), 50, 200)));

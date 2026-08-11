@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
+import QRCode from 'qrcode';
 import {
   ArrowClockwise,
   ArrowSquareOut,
@@ -42,8 +43,10 @@ import {
   createRemoteTask,
   createComputeRequest,
   createClientId,
+  createPaymentOrder,
   getCapabilities,
   getCreditPacks,
+  getPaymentOrder,
   getReferralSummary,
   heartbeatDevice,
   listDevices,
@@ -74,6 +77,8 @@ import {
   type CreditPackState,
   type LedgerEntry,
   type ModelSourceInfo,
+  type PaymentCheckout,
+  type PaymentOrder,
   type RemoteTask,
   type ReferralSummary,
 } from './api';
@@ -278,6 +283,10 @@ export function App() {
   const [creditPacks, setCreditPacks] = useState<CreditPackState>({ packs: [], summary: { availableCents: 0, grants: [] } });
   const [referralSummary, setReferralSummary] = useState<ReferralSummary | null>(null);
   const [purchasingPackId, setPurchasingPackId] = useState('');
+  const [paymentAmountCents, setPaymentAmountCents] = useState(5000);
+  const [paymentBusy, setPaymentBusy] = useState(false);
+  const [paymentOrder, setPaymentOrder] = useState<PaymentOrder | null>(null);
+  const [paymentCheckout, setPaymentCheckout] = useState<(PaymentCheckout & { qrDataUrl?: string }) | null>(null);
   const [compareEnabled, setCompareEnabled] = useState(false);
   const [compareModelKeys, setCompareModelKeys] = useState<string[]>([]);
   const [products, setProducts] = useState<ProductManifest[]>([]);
@@ -310,6 +319,8 @@ export function App() {
   const permissionResolver = useRef<((optionId: string | null) => void) | null>(null);
   const pendingSendRunner = useRef<(prompt: string, mode: WorkspaceMode) => void>(() => undefined);
   const activeRunRef=useRef<ActiveRun|null>(null);
+  const sessionToken = session?.token ?? null;
+  const pendingPaymentOrderId = paymentOrder?.status === 'pending' ? paymentOrder.id : null;
 
   useEffect(() => {
     document.documentElement.dataset.colorMode = colorMode;
@@ -410,21 +421,48 @@ export function App() {
   }, [activeTaskId, messagesByTask]);
 
   useEffect(() => {
-    if (!session) return;
+    if (!sessionToken) return;
+    const token = sessionToken;
     const sync = async () => {
       if (!hasDesktopBridge() && document.visibilityState === 'hidden') return;
       try {
-        const [nextTasks, nextDevices] = await Promise.all([listTasks(session.token), listDevices(session.token)]);
-        setTasks(nextTasks); setDevices(nextDevices);
+        const [nextTasks, nextDevices, account, nextCreditPacks] = await Promise.all([
+          listTasks(token), listDevices(token), refreshAccount(token), getCreditPacks(token),
+        ]);
+        setTasks(nextTasks); setDevices(nextDevices); setCreditPacks(nextCreditPacks);
+        setSession((current) => current?.token === token ? { ...current, account } : current);
         const currentDeviceId = storageGet('cod.device.id');
-        if (currentDeviceId) await heartbeatDevice(session.token, currentDeviceId);
+        if (currentDeviceId) await heartbeatDevice(token, currentDeviceId);
       } catch { /* Keep the last synchronized snapshot and retry. */ }
     };
     const interval = window.setInterval(sync, 15_000);
     const syncWhenVisible=()=>{if(document.visibilityState==='visible')void sync();};
     document.addEventListener('visibilitychange',syncWhenVisible);
     return () => { window.clearInterval(interval); document.removeEventListener('visibilitychange',syncWhenVisible); };
-  }, [session]);
+  }, [sessionToken]);
+
+  useEffect(() => {
+    if (!sessionToken || !pendingPaymentOrderId) return;
+    const token = sessionToken;
+    const orderId = pendingPaymentOrderId;
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const next = await getPaymentOrder(token, orderId);
+        if (stopped) return;
+        setPaymentOrder(next);
+        if (next.status === 'paid') {
+          const [account, nextLedger, nextCreditPacks] = await Promise.all([refreshAccount(token), listLedger(token), getCreditPacks(token)]);
+          if (stopped) return;
+          setSession((current) => current?.token === token ? { ...current, account } : current);
+          setLedger(nextLedger); setCreditPacks(nextCreditPacks); setNotice('充值已到账，所有登录设备会自动同步最新额度。');
+        }
+      } catch { /* Provider callbacks can take a few seconds; keep polling. */ }
+    };
+    const interval = window.setInterval(() => void poll(), 2_000);
+    void poll();
+    return () => { stopped = true; window.clearInterval(interval); };
+  }, [pendingPaymentOrderId, sessionToken]);
 
   useEffect(()=>{
     const run=activeRunRef.current;if(!run||run.cancelled)return;
@@ -458,6 +496,16 @@ export function App() {
     if (!session || !capabilities?.payments.topupEnabled) { setNotice('支付渠道尚未接入，当前不可充值。'); setOverlay('account'); return; }
     try { const account = await topup(session.token, amountCents); setSession({ ...session, account }); await refreshWallet(); setNotice(`已预存 ¥${(amountCents / 100).toFixed(2)} 试点额度。`); }
     catch (error) { setNotice(error instanceof Error ? error.message : '充值失败'); }
+  };
+  const handleOfficialPayment = async (channel: PaymentOrder['channel']) => {
+    if (!session || paymentBusy) return;
+    setPaymentBusy(true); setPaymentOrder(null); setPaymentCheckout(null);
+    try {
+      const result = await createPaymentOrder(session.token, paymentAmountCents, channel);
+      const qrDataUrl = result.checkout.kind === 'qr' ? await QRCode.toDataURL(result.checkout.url, { width: 220, margin: 1, errorCorrectionLevel: 'M' }) : undefined;
+      setPaymentOrder(result.order); setPaymentCheckout({ ...result.checkout, qrDataUrl });
+    } catch (error) { setNotice(error instanceof Error ? error.message : '创建支付订单失败'); }
+    finally { setPaymentBusy(false); }
   };
   const handleCopyInviteCode=async()=>{
     if(!referralSummary?.inviteCode)return;
@@ -649,7 +697,7 @@ export function App() {
   return <div className={`app-shell${inspectorOpen ? '' : ' inspector-hidden'}`}>
     <aside className="rail"><Brand /><div className="rail-actions"><button className={`icon-button ${mode === 'code' ? 'active' : ''}`} title="任务" onClick={() => { setMode('code'); setSidebarOpen(true); }}><ListChecks weight="fill" /></button><button className={`icon-button ${mode === 'chat' ? 'active' : ''}`} title="普通对话" onClick={() => setMode('chat')}><ChatCircleDots /></button><button className="icon-button compute-entry" title="算力市场" onClick={() => setOverlay('compute')}><Storefront weight="fill" /></button><button className="icon-button" title="模型库" onClick={() => setOverlay('models')}><Stack /></button><button className="icon-button" title="命令面板" onClick={() => setOverlay('commands')}><Command /></button>{products.map((product) => <button className="icon-button" title={product.name} key={product.id} onClick={() => void handleProductLaunch(product)}><ArrowSquareOut /></button>)}</div><div className="rail-footer"><ThemeToggle colorMode={colorMode} onChange={setColorMode} /><button className="icon-button" title={session ? '账户' : '登录'} onClick={() => setOverlay(session ? 'account' : 'login')}><UserCircle /></button></div></aside>
     {sidebarOpen && <button className="sidebar-scrim" aria-label="关闭任务栏" onClick={() => setSidebarOpen(false)} />}
-    <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}><div className="sidebar-head"><div><small>工作区</small><strong>{mode === 'code' ? '代码任务' : '对话'}</strong></div><button className="new-task" onClick={() => setOverlay(session ? 'new-task' : 'login')}><Plus weight="bold" /> 新任务</button></div><div className="search"><MagnifyingGlass /><input aria-label="搜索任务" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="搜索任务或状态" /></div><TaskList tasks={filteredTasks} devices={devices} activeId={activeTaskId} onSelect={(id) => { setActiveTaskId(id); setSidebarOpen(false); }} /><div className="sidebar-bottom">{notice && <div className="remote-notice">{notice}</div>}<button className="project-switch" onClick={handleOpenProject}><span className="project-icon"><Folder weight="fill" /></span><span><small>当前项目</small><strong>{projectName}</strong></span><CaretDown /></button><div className="balance-preview"><Lightning weight="fill" /><span><small>可用使用额度</small><strong>{session ? `¥ ${((session.account.balanceCents + creditPacks.summary.availableCents) / 100).toFixed(2)}` : '登录后查看'}</strong></span><button onClick={() => setOverlay(session ? 'account' : 'login')}>{session ? '额度包' : '登录'}</button></div></div></aside>
+    <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}><div className="sidebar-head"><div><small>工作区</small><strong>{mode === 'code' ? '代码任务' : '对话'}</strong></div><button className="new-task" onClick={() => setOverlay(session ? 'new-task' : 'login')}><Plus weight="bold" /> 新任务</button></div><div className="search"><MagnifyingGlass /><input aria-label="搜索任务" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="搜索任务或状态" /></div><TaskList tasks={filteredTasks} devices={devices} activeId={activeTaskId} onSelect={(id) => { setActiveTaskId(id); setSidebarOpen(false); }} /><div className="sidebar-bottom">{notice && <div className="remote-notice">{notice}</div>}<button className="project-switch" onClick={handleOpenProject}><span className="project-icon"><Folder weight="fill" /></span><span><small>当前项目</small><strong>{projectName}</strong></span><CaretDown /></button><div className="balance-preview"><Lightning weight="fill" /><span><small>可用使用额度</small><strong>{session ? session.account.billingExempt ? '不限额度' : `¥ ${((session.account.balanceCents + creditPacks.summary.availableCents) / 100).toFixed(2)}` : '登录后查看'}</strong></span><button onClick={() => setOverlay(session ? 'account' : 'login')}>{session ? '额度包' : '登录'}</button></div></div></aside>
     <main className="workspace"><header className="workspace-header"><div className="task-heading"><button className="mobile-only icon-button" title="打开任务栏" onClick={() => setSidebarOpen(true)}><SidebarSimple /></button><div><h1>{activeTask?.title ?? (session ? '新建或选择任务' : '新对话')}</h1><p>{project.root || (authState === 'loading' ? '正在连接 COD…' : session ? 'Web 远程工作区' : '输入消息即可开始')}</p></div></div><div className="header-actions">{activeTask && <span className={`header-status ${activeTask.status}`}>{statusLabels[activeTask.status]}</span>}<div className="mode-switch" aria-label="工作模式"><button className={mode === 'code' ? 'active' : ''} onClick={() => setMode('code')}><Code /> 代码</button><button className={mode === 'chat' ? 'active' : ''} onClick={() => setMode('chat')}><ChatCircleDots /> 对话</button></div><select className="source-picker" aria-label="模型源" value={selectedSource?.id ?? ''} onChange={(event) => handleSourceChange(event.target.value)} disabled={!session}><option value="">{authState === 'loading' ? '正在连接…' : '登录后选择模型源'}</option>{session?.sources.map((source) => <option key={source.id} value={source.id}>{source.label} · {source.callable ? '已连接' : source.status === 'catalog' ? '目录' : '不可用'}</option>)}</select><select className="model-picker" aria-label="模型" value={selectedModelInfo?.id ?? ''} onChange={(event) => handleModelChange(event.target.value)} disabled={!session || !sourceModels.length}><option value="">登录后选择模型</option>{sourceModels.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}</select><button className={`icon-button inspector-toggle${inspectorOpen ? ' active' : ''}`} title={inspectorOpen ? '隐藏右侧面板' : '显示右侧面板'} onClick={toggleInspector}><SidebarSimple /></button></div></header>
       <section className="conversation"><div className="conversation-scroll">{!activeTask && <div className="empty-state"><div className="agent-avatar"><span>C</span></div><h2>{session ? '从一个真实任务开始' : '有什么可以帮你？'}</h2><p>{session ? '新建任务后，状态、目标设备和执行结果会同步保存。' : '直接输入你的第一条消息；发送时再登录，内容不会丢失。'}</p>{session && <button className="primary-button" onClick={() => setOverlay('new-task')}><Plus /> 新建任务</button>}</div>}{activeTask && !activeMessages.length && !activeTask.result && !activeTask.error && <div className="empty-state compact"><StatusGlyph status={activeTask.status} /><h2>{activeTask.title}</h2><p>{activeTask.status==='cancelled'?'任务已终止，可重新执行。':`任务已同步到 ${devices.find((device) => device.id === activeTask.deviceId)?.name ?? '目标设备'}。输入内容开始执行。`}</p></div>}{activeTask && !activeMessages.length && (activeTask.result || activeTask.error) && <article className="agent-message"><div className="agent-avatar"><span>C</span></div><div><header><strong>{activeTask.error ? '远程任务失败' : '远程任务结果'}</strong></header><MarkdownContent>{activeTask.error ? chatFailureMessage(new Error(activeTask.error)) : activeTask.result ?? ''}</MarkdownContent><small>{formatTime(activeTask.updatedAt)}</small></div></article>}{activeMessages.map((message) => message.role === 'user' ? <article className="user-message" key={message.id}><p>{message.content}</p><small>{formatTime(message.createdAt)}</small></article> : message.role === 'comparison' ? <article className="comparison-message" key={message.id}><header><div><Stack weight="fill" /><span><strong>多模型对比</strong><small>同一问题 · {message.comparisonResults?.length ?? 0} 个模型</small></span></div><time>{formatTime(message.createdAt)}</time></header><div className="comparison-results">{message.comparisonResults?.map((result) => <section className={result.error ? 'failed' : ''} key={`${result.sourceId}-${result.model}`}><header><span><strong>{result.model}</strong><small>{result.sourceLabel}</small></span><div><i>{result.error ? '失败' : `${(result.durationMs / 1000).toFixed(1)}s`}</i>{!result.error&&<button onClick={()=>chooseComparisonModel(result.sourceId,result.model)}>选用此模型</button>}</div></header><MarkdownContent className={result.error ? 'comparison-error' : ''}>{result.error ?? result.content}</MarkdownContent><footer>{result.inputTokens !== undefined && result.outputTokens !== undefined ? `输入 ${result.inputTokens.toLocaleString('zh-CN')} / 输出 ${result.outputTokens.toLocaleString('zh-CN')} Token` : '未返回 Token 用量'}</footer></section>)}</div></article> : <article className={`agent-message${message.failed ? ' failed' : message.cancelled?' cancelled':''}`} key={message.id}><div className="agent-avatar"><span>{message.failed ? '!' : message.cancelled?'■':'C'}</span></div><div><header><strong>{message.failed ? '本次未扣费' : message.cancelled?'任务已终止':'COD Agent'}</strong>{message.mode === 'demo' && <span className="demo-chip">演示响应</span>}{message.sourceLabel && <span className="source-chip">{message.sourceLabel} · {message.model}{message.fallbackUsed ? '（健康模型降级）' : ''}{message.inputTokens !== undefined && message.outputTokens !== undefined ? ` · 输入 ${message.inputTokens.toLocaleString('zh-CN')} / 输出 ${message.outputTokens.toLocaleString('zh-CN')} Token${message.usageEstimated ? '（估算）' : ''}` : ''}</span>}</header><MarkdownContent>{message.content}</MarkdownContent>{message.failed && message.retryPrompt && <button className="retry-message" disabled={isSending} onClick={() => void handleSend(message.retryPrompt, activeTask, mode)}><ArrowClockwise /> 重试这条消息</button>}<small>{formatTime(message.createdAt)}</small></div></article>)}{isSending && <div className="agent-intro"><div className="agent-avatar"><span>C</span></div><div><strong>COD Agent</strong><small>{agentStatus}</small></div><span className="live-chip"><CircleNotch className="spin" /> running</span></div>}{pendingPermission && <div className="live-permission"><strong>{pendingPermission.title}</strong><p>Goose 请求执行权限，请确认本次操作。</p><div>{pendingPermission.options.map((option) => <button className={option.kind.startsWith('allow') ? 'approve' : ''} key={option.optionId} onClick={() => resolvePermission(option.optionId)}>{option.name}</button>)}<button onClick={() => resolvePermission(null)}>取消</button></div></div>}</div>
         <div className="composer-wrap">
@@ -667,11 +715,16 @@ export function App() {
     {overlay === 'compute' && <Modal title="COD 算力市场 · 机房直供 / 卡时 / 分期" wide onClose={() => setOverlay(null)}><ComputeMarket offers={computeOffers} requests={computeRequests} signedIn={Boolean(session)} onLogin={() => setOverlay('login')} onSubmit={handleComputeRequest} /></Modal>}
     {overlay === 'new-task' && session && <Modal title="新建任务" onClose={() => setOverlay(null)}><form className="modal-form" onSubmit={handleCreateTask}><label>任务标题<input aria-label="任务标题" value={newTaskTitle} onChange={(event) => setNewTaskTitle(event.target.value)} placeholder="例如：审计登录流程" required autoFocus /></label><label>目标设备<select aria-label="目标设备" value={targetDeviceId} onChange={(event) => setTargetDeviceId(event.target.value)} required>{devices.map((device) => <option key={device.id} value={device.id}>{device.name} · {device.status}</option>)}</select></label><button className="primary-button" disabled={!newTaskTitle.trim() || !targetDeviceId}><Plus /> 创建并同步</button></form></Modal>}
     {overlay === 'account' && session && <Modal title="钱包与额度包" wide onClose={() => setOverlay(null)}><div className="account-panel">
-      <div className="balance-grid"><div className="account-balance"><small>钱包余额 · 永久有效</small><strong>¥ {(session.account.balanceCents / 100).toFixed(2)}</strong><span>不买额度包也能按模型原价直接扣款</span></div><div className="account-balance credit"><small>AI.KAI.COM 使用额度 · 优先扣减</small><strong>¥ {(creditPacks.summary.availableCents / 100).toFixed(2)}</strong><span>含限时赠额 · {creditPacks.summary.grants.filter((grant) => grant.status === 'active').length} 个有效批次</span></div></div>
+      <div className="balance-grid"><div className="account-balance"><small>{session.account.billingExempt ? '管理员测试账户' : '钱包余额 · 永久有效'}</small><strong>{session.account.billingExempt ? '不限额度' : `¥ ${(session.account.balanceCents / 100).toFixed(2)}`}</strong><span>{session.account.billingExempt ? '模型调用会记录零元测试流水，不扣钱包或额度包' : '不买额度包也能按模型原价直接扣款'}</span></div><div className="account-balance credit"><small>AI.KAI.COM 使用额度 · 优先扣减</small><strong>¥ {(creditPacks.summary.availableCents / 100).toFixed(2)}</strong><span>含限时赠额 · {creditPacks.summary.grants.filter((grant) => grant.status === 'active').length} 个有效批次</span></div></div>
       <section className="credit-pack-section"><header><div><strong>钱包兑换 AI.KAI.COM 180 天额度包</strong><small>额度包按模型原价计量，但可获得限时赠额；不用额度包时继续从永久钱包按原价扣款。</small></div></header><div className="credit-pack-grid">{creditPacks.packs.map((pack) => <article key={pack.id}><span>{pack.bonusPercent ? `赠 ${pack.bonusPercent}%` : '基础档'}</span><strong>{pack.name}</strong><b>¥ {(pack.creditCents / 100).toFixed(0)} <small>使用额度</small></b><p>钱包兑换 ¥{(pack.priceCents / 100).toFixed(0)} · {pack.validityDays} 天</p><button disabled={Boolean(purchasingPackId) || session.account.balanceCents < pack.priceCents} onClick={() => void handlePurchaseCreditPack(pack.id)}>{purchasingPackId === pack.id ? <CircleNotch className="spin" /> : <Lightning weight="fill" />} {session.account.balanceCents < pack.priceCents ? '钱包余额不足' : '使用钱包兑换'}</button></article>)}</div></section>
       {creditPacks.summary.grants.length > 0 && <section className="credit-grants"><header><strong>额度批次</strong><small>试用金 30 天；购买额度包 180 天</small></header>{creditPacks.summary.grants.map((grant) => <div key={grant.id}><span><strong>{grant.name}</strong><small>{grant.status === 'expired' ? '已过期' : grant.status === 'depleted' ? '已用完' : `有效至 ${new Date(grant.expiresAt).toLocaleDateString('zh-CN')}`}</small></span><b className={grant.status}>¥ {(grant.remainingCents / 100).toFixed(2)} / ¥ {(grant.originalCents / 100).toFixed(2)}</b></div>)}</section>}
       <div className="service-grid"><span>实际模型网关<strong className={capabilities?.ai.mode === 'live' ? 'live' : 'demo'}>{capabilities?.ai.mode === 'live' ? 'ai.kai.com 已连接' : capabilities?.ai.mode === 'demo' ? '演示模式' : '不可用'}</strong></span><span>扣费顺序<strong>临期额度 → 永久钱包</strong></span><span>当前归因来源<strong>{selectedSource?.label ?? '未选择'} · 分成 {(selectedSource?.commissionRateBps ?? 0) / 100}%</strong></span><span>支付方向<strong>{selectedSource?.paymentDirection ?? '未选择'}</strong></span></div>
       {referralSummary && <div className="invite-panel"><span><small>我的邀请码</small><code>{referralSummary.inviteCode}</code><i>已邀请 {referralSummary.referredUsers} 人</i></span><button onClick={() => void handleCopyInviteCode()}><Key /> 复制邀请码</button></div>}
+      {(capabilities?.payments.channels?.length ?? 0) > 0 && <section className="official-payment">
+        <header><div><strong>官方商户充值</strong><small>订单金额与回调金额一致后才会入账；未支付订单不会增加余额。</small></div><label>充值金额<select aria-label="充值金额" value={paymentAmountCents} onChange={(event) => setPaymentAmountCents(Number(event.target.value))} disabled={paymentBusy}><option value={1000}>¥10</option><option value={5000}>¥50</option><option value={10000}>¥100</option><option value={20000}>¥200</option><option value={50000}>¥500</option></select></label></header>
+        <div className="official-payment-actions">{capabilities?.payments.channels?.includes('wechat') && <button className="wechat" disabled={paymentBusy} onClick={() => void handleOfficialPayment('wechat')}>{paymentBusy ? <CircleNotch className="spin" /> : <CreditCard />} 微信支付</button>}{capabilities?.payments.channels?.includes('alipay') && <button className="alipay" disabled={paymentBusy} onClick={() => void handleOfficialPayment('alipay')}>{paymentBusy ? <CircleNotch className="spin" /> : <CreditCard />} 支付宝</button>}</div>
+        {paymentCheckout && paymentOrder && <div className={`payment-checkout ${paymentOrder.status}`}><div>{paymentCheckout.kind === 'qr' && paymentCheckout.qrDataUrl ? <img src={paymentCheckout.qrDataUrl} alt="微信支付二维码" /> : <CreditCard weight="duotone" />}</div><span><strong>{paymentOrder.status === 'paid' ? '充值已到账' : paymentCheckout.kind === 'qr' ? '请使用微信扫码支付' : '支付宝订单已创建'}</strong><small>订单 {paymentOrder.id} · ¥{(paymentOrder.amountCents / 100).toFixed(2)}</small>{paymentOrder.status === 'pending' && paymentCheckout.kind === 'redirect' && <a href={paymentCheckout.url} target="_blank" rel="noreferrer">前往支付宝付款 <ArrowSquareOut /></a>}{paymentOrder.status === 'pending' && <i>正在等待官方支付结果…</i>}</span></div>}
+      </section>}
       {capabilities?.payments.mode === 'unavailable' && <div className="payment-status unavailable"><strong>充值渠道尚未开通</strong><small>当前只能使用已有钱包余额和试用额度；COD 不会创建无法支付的订单。</small></div>}
       {capabilities?.payments.topupEnabled && <div className="topup-panel"><div><strong>预存试点钱包</strong><small>仅用于本轮产品与计费闭环测试，不代表真实支付已到账。</small></div><div><button onClick={() => handleTopup(1000)}>+ ¥10</button><button onClick={() => handleTopup(5000)}>+ ¥50</button><button onClick={() => handleTopup(10000)}>+ ¥100</button></div></div>}
       <div className="ledger"><header><strong>最近流水</strong><button onClick={refreshWallet}><ArrowClockwise /> 刷新</button></header>{ledger.length ? ledger.map((entry) => <div key={entry.id}><span>{entry.type === 'usage' ? `${entry.model ?? '模型'} 用量` : entry.type === 'pack_purchase' ? `兑换 ${entry.reference}` : entry.type === 'trial_credit' ? '新用户试用金' : entry.type === 'credit_grant' ? `${entry.reference} 到账` : '钱包预存'}<small>{entry.paymentDirection ?? entry.reference} · {formatTime(entry.createdAt)}{entry.type === 'usage' && entry.creditAmountCents !== 0 ? ` · 额度 ¥${Math.abs(entry.creditAmountCents / 100).toFixed(2)}` : ''}{entry.type === 'usage' && entry.walletAmountCents !== 0 ? ` · 钱包 ¥${Math.abs(entry.walletAmountCents / 100).toFixed(2)}` : ''}{entry.type === 'usage' && entry.sourceId ? ` · 归因 ${entry.sourceId} / 上游 ${entry.upstreamSourceId ?? 'ai-kai'}` : ''}{entry.type === 'usage' && (entry.commissionRateBps ?? 0) > 0 ? ` · 分成 ¥${((entry.commissionCents ?? 0) / 100).toFixed(2)}` : ''}</small></span><strong className={entry.amountCents < 0 ? 'negative' : 'positive'}>{entry.amountCents > 0 ? '+' : ''}¥ {(entry.amountCents / 100).toFixed(2)}</strong></div>) : <p>暂无流水</p>}</div><button className="secondary-button" onClick={handleLogout}><SignOut /> 退出登录</button>

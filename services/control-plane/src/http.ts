@@ -31,6 +31,15 @@ export function sendJson(response: ServerResponse, status: number, value: unknow
   response.end(JSON.stringify(value));
 }
 
+export function sendText(response: ServerResponse, status: number, value: string): void {
+  response.writeHead(status, {
+    'content-type': 'text/plain; charset=utf-8',
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+  });
+  response.end(value);
+}
+
 export function bearerToken(request: IncomingMessage): string | null {
   const value = request.headers.authorization;
   return value?.startsWith('Bearer ') ? value.slice(7) : null;
