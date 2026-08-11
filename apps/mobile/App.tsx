@@ -1,10 +1,11 @@
-import { useCallback, useRef, useState } from 'react';
-import { KeyboardAvoidingView, Linking, Platform, StyleSheet, useColorScheme } from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { BackHandler, KeyboardAvoidingView, Linking, Platform, StyleSheet, useColorScheme } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Clipboard from 'expo-clipboard';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import CodWorkspace from './src/CodWorkspace.dom';
+import type { CodWorkspaceHandle } from './src/CodWorkspace.dom';
 import type { NativeHttpRequest, NativeHttpResponse } from '../web/src/runtime';
 
 const controlPlaneUrl = process.env.EXPO_PUBLIC_COD_CONTROL_PLANE_URL ?? 'https://cod.kai.com';
@@ -39,6 +40,8 @@ function createDomBootstrap(platform: 'android' | 'ios', apiUrl: string): string
 
 export default function App() {
   const requestControllers = useRef(new Map<string, AbortController>());
+  const workspaceRef = useRef<CodWorkspaceHandle>(null);
+  const hasTopmostUiRef = useRef(false);
   const systemColorScheme = useColorScheme();
   const [workspaceColorMode, setWorkspaceColorMode] = useState<'light' | 'dark'>(systemColorScheme === 'dark' ? 'dark' : 'light');
 
@@ -77,6 +80,20 @@ export default function App() {
     setWorkspaceColorMode(mode);
   }, []);
 
+  const setNativeTopmostUiVisible = useCallback(async (visible: boolean): Promise<void> => {
+    hasTopmostUiRef.current = visible;
+  }, []);
+
+  useEffect(() => {
+    if (Platform.OS !== 'android') return undefined;
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (!hasTopmostUiRef.current || !workspaceRef.current) return false;
+      workspaceRef.current.closeTopmostUi();
+      return true;
+    });
+    return () => subscription.remove();
+  }, []);
+
   return (
     <SafeAreaProvider>
       <SafeAreaView
@@ -89,6 +106,7 @@ export default function App() {
           style={styles.keyboardAvoiding}
         >
           <CodWorkspace
+            ref={workspaceRef}
             controlPlaneUrl={controlPlaneUrl}
             hostPlatform={hostPlatform}
             nativeRequest={nativeRequest}
@@ -96,6 +114,7 @@ export default function App() {
             openExternalUrl={openExternalUrl}
             copyText={copyText}
             setNativeColorMode={setNativeColorMode}
+            setNativeTopmostUiVisible={setNativeTopmostUiVisible}
             dom={{
               useExpoDOMWebView: false,
               scrollEnabled: false,

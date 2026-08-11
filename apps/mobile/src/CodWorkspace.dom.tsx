@@ -1,9 +1,17 @@
 'use dom';
 
+import { forwardRef } from 'react';
+import { useDOMImperativeHandle } from 'expo/dom';
+import type { DOMImperativeFactory } from 'expo/dom';
+
 import { App } from '../../web/src/App';
-import { configureCodRuntime } from '../../web/src/runtime';
+import { configureCodRuntime, requestCodTopmostUiClose } from '../../web/src/runtime';
 import type { NativeHttpRequest, NativeHttpResponse } from '../../web/src/runtime';
 import '../../web/src/styles.css';
+
+export interface CodWorkspaceHandle extends DOMImperativeFactory {
+  closeTopmostUi: () => void;
+}
 
 interface CodWorkspaceProps {
   controlPlaneUrl: string;
@@ -13,10 +21,11 @@ interface CodWorkspaceProps {
   openExternalUrl: (url: string) => Promise<void>;
   copyText: (value: string) => Promise<void>;
   setNativeColorMode: (mode: 'light' | 'dark') => Promise<void>;
+  setNativeTopmostUiVisible: (visible: boolean) => Promise<void>;
   dom?: import('expo/dom').DOMProps;
 }
 
-export default function CodWorkspace({
+const CodWorkspace = forwardRef<CodWorkspaceHandle, CodWorkspaceProps>(function CodWorkspace({
   controlPlaneUrl,
   hostPlatform,
   nativeRequest,
@@ -24,7 +33,9 @@ export default function CodWorkspace({
   openExternalUrl,
   copyText,
   setNativeColorMode,
-}: CodWorkspaceProps) {
+  setNativeTopmostUiVisible,
+}, ref) {
+  useDOMImperativeHandle(ref, () => ({ closeTopmostUi: requestCodTopmostUiClose }), []);
   configureCodRuntime({
     controlPlaneUrl,
     hostPlatform,
@@ -33,6 +44,9 @@ export default function CodWorkspace({
     openExternalUrl,
     copyText,
     setNativeColorMode,
+    setNativeTopmostUiVisible,
   });
   return <App />;
-}
+});
+
+export default CodWorkspace;

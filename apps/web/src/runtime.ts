@@ -19,9 +19,11 @@ export interface CodRuntimeConfig {
   openExternalUrl?: (url: string) => Promise<void>;
   copyText?: (value: string) => Promise<void>;
   setNativeColorMode?: (mode: 'light' | 'dark') => Promise<void>;
+  setNativeTopmostUiVisible?: (visible: boolean) => Promise<void>;
 }
 
 let runtime: CodRuntimeConfig = {};
+const closeTopmostUiEvent = 'cod:close-topmost-ui';
 
 export function configureCodRuntime(next: CodRuntimeConfig): void {
   runtime = next;
@@ -29,6 +31,15 @@ export function configureCodRuntime(next: CodRuntimeConfig): void {
 
 export function getCodRuntime(): Readonly<CodRuntimeConfig> {
   return runtime;
+}
+
+export function requestCodTopmostUiClose(): void {
+  window.dispatchEvent(new Event(closeTopmostUiEvent));
+}
+
+export function observeCodTopmostUiClose(listener: () => void): () => void {
+  window.addEventListener(closeTopmostUiEvent, listener);
+  return () => window.removeEventListener(closeTopmostUiEvent, listener);
 }
 
 export async function openCodExternalUrl(value: string): Promise<void> {

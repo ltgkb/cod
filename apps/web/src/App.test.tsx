@@ -1,9 +1,9 @@
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { createClientId, getControlPlaneUrl, getTaskExecutionLease, heartbeatDevice, logoutCod, sendChat, updateRemoteTask } from './api';
-import { configureCodRuntime } from './runtime';
+import { configureCodRuntime, requestCodTopmostUiClose } from './runtime';
 
 beforeEach(() => {
   const values = new Map<string, string>();
@@ -125,6 +125,38 @@ describe('COD workspace', () => {
     const dialog = await screen.findByRole('dialog', { name: '登录后继续' });
     expect(within(dialog).getByLabelText('密码')).toBeRequired();
     expect(composer).toHaveValue('这是我的第一条消息');
+    act(() => requestCodTopmostUiClose());
+    expect(screen.queryByRole('dialog', { name: '登录后继续' })).not.toBeInTheDocument();
+    expect(composer).toHaveValue('这是我的第一条消息');
+  });
+
+  it('closes the topmost Web UI before releasing Android back navigation', async () => {
+    const setNativeTopmostUiVisible = vi.fn(async () => undefined);
+    configureCodRuntime({ setNativeTopmostUiVisible });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/capabilities')) return json(capabilities);
+      if (url.endsWith('/api/model-catalog')) return json([]);
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<App />);
+    await screen.findByRole('heading', { name: '新对话' });
+    await waitFor(() => expect(setNativeTopmostUiVisible).toHaveBeenLastCalledWith(false));
+
+    fireEvent.click(screen.getByTitle('打开任务栏'));
+    fireEvent.click(screen.getByTitle('模型库'));
+    expect(await screen.findByRole('dialog', { name: '模型库' })).toBeInTheDocument();
+    await waitFor(() => expect(setNativeTopmostUiVisible).toHaveBeenLastCalledWith(true));
+
+    act(() => requestCodTopmostUiClose());
+    expect(screen.queryByRole('dialog', { name: '模型库' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '关闭任务栏' })).toBeInTheDocument();
+    expect(setNativeTopmostUiVisible).toHaveBeenLastCalledWith(true);
+
+    act(() => requestCodTopmostUiClose());
+    expect(screen.queryByRole('button', { name: '关闭任务栏' })).not.toBeInTheDocument();
+    await waitFor(() => expect(setNativeTopmostUiVisible).toHaveBeenLastCalledWith(false));
   });
 
   it('keeps only two primary mobile context items outside the more disclosure', async () => {
