@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { BackHandler, KeyboardAvoidingView, Linking, Platform, StyleSheet, useColorScheme } from 'react-native';
+import { BackHandler, KeyboardAvoidingView, Linking, NativeModules, Platform, StyleSheet, useColorScheme } from 'react-native';
 import { isRunningInExpoGo } from 'expo';
 import Constants from 'expo-constants';
 import * as Crypto from 'expo-crypto';
@@ -9,6 +9,7 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import CodWorkspace from './src/CodWorkspace.dom';
 import type { CodWorkspaceHandle } from './src/CodWorkspace.dom';
+import { resolveDevelopmentServerOrigin } from './src/development-origin';
 import { decideDomNavigation, domOriginWhitelist } from './src/navigation-policy';
 import { createNativeBridgeDocumentStartScript, runAuthorizedNativeBridgeAction } from './src/native-bridge-security';
 import { clearSessionToken, loadSessionCleanupPending, loadSessionToken, saveSessionToken } from './src/session-store';
@@ -20,8 +21,21 @@ const runningInExpoGo = isRunningInExpoGo();
 
 function getDevelopmentServerOrigin(): string | undefined {
   if (!__DEV__) return undefined;
-  const debuggerHost = Constants.expoGoConfig?.debuggerHost ?? Constants.expoConfig?.hostUri;
-  return debuggerHost ? new URL(`http://${debuggerHost}`).origin : undefined;
+  const sourceCode = NativeModules.SourceCode as {
+    getConstants?: () => { scriptURL?: unknown };
+    scriptURL?: unknown;
+  } | undefined;
+  let sourceCodeScriptUrl: unknown;
+  try {
+    sourceCodeScriptUrl = sourceCode?.getConstants?.().scriptURL ?? sourceCode?.scriptURL;
+  } catch {
+    sourceCodeScriptUrl = undefined;
+  }
+  return resolveDevelopmentServerOrigin(
+    sourceCodeScriptUrl,
+    Constants.expoGoConfig?.debuggerHost,
+    Constants.expoConfig?.hostUri,
+  );
 }
 
 const developmentServerOrigin = getDevelopmentServerOrigin();
