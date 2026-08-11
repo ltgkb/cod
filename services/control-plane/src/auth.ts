@@ -17,6 +17,7 @@ export interface SessionPayload extends TokenPrincipal {
 
 export interface AgentSessionScope {
   taskId: string;
+  executionId: string;
   sourceId: string;
   model: string;
 }
@@ -101,7 +102,8 @@ export function verifyAgentSessionToken(token: string, secret: string, now = Dat
   const parsed = verifySignedPayload(token, secret);
   if (!parsed || parsed.kind !== 'agent' || typeof parsed.exp !== 'number' || parsed.exp <= now || !hasValidPrincipal(parsed)) return null;
   if (typeof parsed.jti !== 'string' || !/^[a-f0-9]{32}$/.test(parsed.jti)) return null;
-  if (typeof parsed.taskId !== 'string' || !/^[a-f0-9-]{36}$/i.test(parsed.taskId)) return null;
+  if (typeof parsed.taskId !== 'string' || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(parsed.taskId)) return null;
+  if (typeof parsed.executionId !== 'string' || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(parsed.executionId)) return null;
   if (typeof parsed.sourceId !== 'string' || !/^[a-z0-9-]{2,40}$/.test(parsed.sourceId)) return null;
   if (typeof parsed.model !== 'string' || !parsed.model.trim() || parsed.model.length > 200) return null;
   return parsed as unknown as AgentSessionPayload;

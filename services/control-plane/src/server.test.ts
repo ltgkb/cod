@@ -6,6 +6,7 @@ import { AiGateway } from './gateway.js';
 import { MemoryDatabase } from './memory-database.js';
 
 const servers: Array<ReturnType<typeof createControlPlane>> = [];
+const taskClaim=(expectedVersion:number,marker='A')=>({status:'running' as const,expectedVersion,claimId:marker.repeat(43),leaseToken:(marker==='Z'?'Y':'Z').repeat(43)});
 afterEach(async () => Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve())))));
 
 async function start(overrides: Record<string, string> = {}, gatewayFetcher?:typeof fetch) {
@@ -116,6 +117,15 @@ describe('control-plane production rules', () => {
     expect(forbiddenOrigin.status).toBe(403);
     const allowedOrigin = await fetch(`${base}/api/capabilities`, { headers: { origin: 'https://cod.example' } });
     expect(allowedOrigin.headers.get('access-control-allow-origin')).toBe('https://cod.example');
+  });
+
+  it('rejects malformed UUID path parameters before they reach the database',async()=>{
+    const {base}=await start();const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com',password:'Password123'})});const {token}=await login.json() as {token:string};const headers={authorization:`Bearer ${token}`,'content-type':'application/json'};const malformed='------------------------------------';
+    const payment=await fetch(`${base}/api/payment-orders/${malformed}`,{headers});expect(payment.status).toBe(400);expect(await payment.json()).toMatchObject({error:'invalid_payment_order_id'});
+    const heartbeat=await fetch(`${base}/api/devices/${malformed}/heartbeat`,{method:'POST',headers,body:'{}'});expect(heartbeat.status).toBe(400);expect(await heartbeat.json()).toMatchObject({error:'invalid_device_id'});
+    const create=await fetch(`${base}/api/tasks`,{method:'POST',headers,body:JSON.stringify({title:'bad device',deviceId:malformed})});expect(create.status).toBe(400);expect(await create.json()).toMatchObject({error:'invalid_device_id'});
+    const cancel=await fetch(`${base}/api/tasks/${malformed}/cancel`,{method:'POST',headers,body:JSON.stringify({expectedVersion:1})});expect(cancel.status).toBe(400);expect(await cancel.json()).toMatchObject({error:'invalid_task_id'});
+    const status=await fetch(`${base}/api/tasks/${malformed}/status`,{method:'POST',headers,body:JSON.stringify({status:'running',expectedVersion:1,claimId:'A'.repeat(43),leaseToken:'B'.repeat(43)})});expect(status.status).toBe(400);expect(await status.json()).toMatchObject({error:'invalid_task_id'});
   });
 
   it('publishes a read-only model price catalog without requiring a session', async () => {
@@ -291,18 +301,27 @@ describe('control-plane production rules', () => {
     const {base,database}=await start();const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com',password:'Password123'})});const {token,user}=await login.json() as {token:string;user:{id:string;email:string}};const full={authorization:`Bearer ${token}`,'content-type':'application/json'};
     const device=await (await fetch(`${base}/api/devices`,{method:'POST',headers:full,body:JSON.stringify({name:'Scoped Agent',platform:'macos'})})).json() as {id:string};
     const created=await (await fetch(`${base}/api/tasks`,{method:'POST',headers:full,body:JSON.stringify({title:'Scoped task',deviceId:device.id})})).json() as {id:string;version:number};
-    const running=await (await fetch(`${base}/api/tasks/${created.id}/status`,{method:'POST',headers:full,body:JSON.stringify({status:'running',expectedVersion:created.version})})).json() as {version:number};
-    const before=Date.now();const issuedResponse=await fetch(`${base}/api/agent-sessions`,{method:'POST',headers:full,body:JSON.stringify({taskId:created.id,sourceId:'demo',model:'coder-pro'})});expect(issuedResponse.status).toBe(201);
-    const issued=await issuedResponse.json() as {token:string;expiresAt:string;scope:{taskId:string;sourceId:string;model:string}};expect(issued.scope).toEqual({taskId:created.id,sourceId:'demo',model:'coder-pro'});expect(new Date(issued.expiresAt).getTime()-before).toBeGreaterThan(59*60*1000);expect(new Date(issued.expiresAt).getTime()-before).toBeLessThanOrEqual(60*60*1000+1000);
+    const running=await (await fetch(`${base}/api/tasks/${created.id}/status`,{method:'POST',headers:full,body:JSON.stringify(taskClaim(created.version,'A'))})).json() as {version:number;execution:{executionId:string;leaseToken:string}};
+    const before=Date.now();const issuedResponse=await fetch(`${base}/api/agent-sessions`,{method:'POST',headers:full,body:JSON.stringify({taskId:created.id,...running.execution,sourceId:'demo',model:'coder-pro'})});expect(issuedResponse.status).toBe(201);
+    const issued=await issuedResponse.json() as {token:string;expiresAt:string;scope:{taskId:string;executionId:string;sourceId:string;model:string}};expect(issued.scope).toEqual({taskId:created.id,executionId:running.execution.executionId,sourceId:'demo',model:'coder-pro'});expect(new Date(issued.expiresAt).getTime()-before).toBeGreaterThan(59*60*1000);expect(new Date(issued.expiresAt).getTime()-before).toBeLessThanOrEqual(60*60*1000+1000);
     const agent={authorization:`Bearer ${issued.token}`,'content-type':'application/json'};
     expect((await fetch(`${base}/api/account`,{headers:agent})).status).toBe(403);
     expect((await fetch(`${base}/v1/tasks/${created.id}/sources/other/chat/completions`,{method:'POST',headers:agent,body:JSON.stringify({model:'coder-pro',messages:[{role:'user',content:'x'}]})})).status).toBe(403);
     const wrongModel=await fetch(`${base}/v1/tasks/${created.id}/sources/demo/chat/completions`,{method:'POST',headers:agent,body:JSON.stringify({model:'writer-pro',messages:[{role:'user',content:'x'}]})});expect(wrongModel.status).toBe(403);expect(await wrongModel.json()).toMatchObject({error:'agent_scope_forbidden'});
     const chatBody=JSON.stringify({model:'coder-pro',messages:[{role:'user',content:'scoped'}]});expect((await fetch(`${base}/v1/tasks/${created.id}/sources/demo/chat/completions`,{method:'POST',headers:agent,body:chatBody})).status).toBe(200);expect((await fetch(`${base}/v1/tasks/${created.id}/sources/demo/chat/completions`,{method:'POST',headers:agent,body:chatBody})).status).toBe(200);
     expect((await fetch(`${base}/api/account`,{headers:full})).status).toBe(200);
-    const completed=await fetch(`${base}/api/tasks/${created.id}/status`,{method:'POST',headers:full,body:JSON.stringify({status:'complete',expectedVersion:running.version,result:'done'})});expect(completed.status).toBe(200);
-    const terminal=await fetch(`${base}/v1/tasks/${created.id}/sources/demo/chat/completions`,{method:'POST',headers:agent,body:chatBody});expect(terminal.status).toBe(409);expect(await terminal.json()).toMatchObject({error:'task_not_running'});
+    const completed=await fetch(`${base}/api/tasks/${created.id}/status`,{method:'POST',headers:full,body:JSON.stringify({status:'complete',expectedVersion:running.version,result:'done',...running.execution})});expect(completed.status).toBe(200);
+    const terminal=await fetch(`${base}/v1/tasks/${created.id}/sources/demo/chat/completions`,{method:'POST',headers:agent,body:chatBody});expect(terminal.status).toBe(409);expect(await terminal.json()).toMatchObject({error:'task_lease_expired'});
     const principal={userId:user.id,tenantId:'tenant_kai_com',email:user.email,role:'member' as const};expect((await database.listAudit(principal,20)).some((entry)=>entry.action==='agent_session.issue')).toBe(true);expect(await database.getLedger(principal)).toHaveLength(2);
+  });
+
+  it('recovers the same execution when the committed claim response is retried',async()=>{
+    const {base,database}=await start();const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com',password:'Password123'})});const {token,user}=await login.json() as {token:string;user:{id:string;email:string}};const headers={authorization:`Bearer ${token}`,'content-type':'application/json'};const principal={userId:user.id,tenantId:'tenant_kai_com',email:user.email,role:'member' as const};
+    const device=await (await fetch(`${base}/api/devices`,{method:'POST',headers,body:JSON.stringify({name:'Claim retry',platform:'macos'})})).json() as {id:string};const task=await (await fetch(`${base}/api/tasks`,{method:'POST',headers,body:JSON.stringify({title:'Recover lost response',deviceId:device.id})})).json() as {id:string;version:number};const claim=taskClaim(task.version,'R');
+    const firstResponse=await fetch(`${base}/api/tasks/${task.id}/status`,{method:'POST',headers,body:JSON.stringify(claim)});expect(firstResponse.status).toBe(200);const first=await firstResponse.json() as {version:number;execution:{executionId:string;leaseToken:string;leaseExpiresAt:string}};const cursor=(await database.eventsAfter(principal,0)).at(-1)!.cursor;const auditBefore=(await database.listAudit(principal,200)).length;
+    const replayResponse=await fetch(`${base}/api/tasks/${task.id}/status`,{method:'POST',headers,body:JSON.stringify(claim)});expect(replayResponse.status).toBe(200);const replay=await replayResponse.json() as typeof first;
+    expect(replay).toMatchObject({version:first.version,execution:first.execution});expect(await database.eventsAfter(principal,cursor)).toHaveLength(0);expect(await database.listAudit(principal,200)).toHaveLength(auditBefore);
+    const competing=await fetch(`${base}/api/tasks/${task.id}/status`,{method:'POST',headers,body:JSON.stringify(taskClaim(task.version,'S'))});expect(competing.status).toBe(409);expect(await competing.json()).toMatchObject({error:'task_already_running'});
   });
 
   it('refuses responses above the 512 KiB durable-cache ceiling without charging',async()=>{
@@ -350,8 +369,8 @@ describe('control-plane production rules', () => {
     const {token,user}=await login.json() as {token:string;user:{id:string;email:string}};const headers={authorization:`Bearer ${token}`,'content-type':'application/json'};
     const device=await (await fetch(`${base}/api/devices`,{method:'POST',headers,body:JSON.stringify({name:'Windows test',platform:'windows'})})).json() as {id:string};
     const created=await (await fetch(`${base}/api/tasks`,{method:'POST',headers,body:JSON.stringify({title:'取消慢任务',deviceId:device.id})})).json() as {id:string;version:number};
-    const running=await (await fetch(`${base}/api/tasks/${created.id}/status`,{method:'POST',headers,body:JSON.stringify({status:'running',expectedVersion:created.version})})).json() as {version:number};
-    const chat=fetch(`${base}/v1/chat/completions`,{method:'POST',headers,body:JSON.stringify({source:'ai-kai',model:'slow-model',task_id:created.id,messages:[{role:'user',content:'持续生成'}]})});
+    const running=await (await fetch(`${base}/api/tasks/${created.id}/status`,{method:'POST',headers,body:JSON.stringify(taskClaim(created.version,'B'))})).json() as {version:number;execution:{executionId:string;leaseToken:string}};const executionHeaders={...headers,'x-cod-task-execution':running.execution.executionId,'x-cod-task-lease':running.execution.leaseToken};
+    const chat=fetch(`${base}/v1/chat/completions`,{method:'POST',headers:executionHeaders,body:JSON.stringify({source:'ai-kai',model:'slow-model',task_id:created.id,messages:[{role:'user',content:'持续生成'}]})});
     await providerStarted;
     const cancelledResponse=await fetch(`${base}/api/tasks/${created.id}/cancel`,{method:'POST',headers,body:JSON.stringify({expectedVersion:running.version})});
     expect(cancelledResponse.status).toBe(200);expect(await cancelledResponse.json()).toMatchObject({task:{status:'cancelled',result:null,error:null},cancelledRequests:1});
@@ -367,12 +386,12 @@ describe('control-plane production rules', () => {
     const {token,user}=await login.json() as {token:string;user:{id:string;email:string}};const headers={authorization:`Bearer ${token}`,'content-type':'application/json'};
     const device=await (await fetch(`${base}/api/devices`,{method:'POST',headers,body:JSON.stringify({name:'Settlement race',platform:'web'})})).json() as {id:string};
     const created=await (await fetch(`${base}/api/tasks`,{method:'POST',headers,body:JSON.stringify({title:'结算竞态测试',deviceId:device.id})})).json() as {id:string;version:number};
-    const running=await (await fetch(`${base}/api/tasks/${created.id}/status`,{method:'POST',headers,body:JSON.stringify({status:'running',expectedVersion:created.version})})).json() as {version:number};
+    const running=await (await fetch(`${base}/api/tasks/${created.id}/status`,{method:'POST',headers,body:JSON.stringify(taskClaim(created.version,'C'))})).json() as {version:number;execution:{executionId:string;leaseToken:string}};const executionHeaders={...headers,'x-cod-task-execution':running.execution.executionId,'x-cod-task-lease':running.execution.leaseToken};
     let markSettlementCommitted:()=>void=()=>undefined;const settlementCommitted=new Promise<void>((resolve)=>{markSettlementCommitted=resolve;});
     let releaseSettlementReturn:()=>void=()=>undefined;const settlementMayReturn=new Promise<void>((resolve)=>{releaseSettlementReturn=resolve;});
     const originalSettle=database.settleUsage.bind(database);
     vi.spyOn(database,'settleUsage').mockImplementation(async(...args)=>{const entry=await originalSettle(...args);markSettlementCommitted();await settlementMayReturn;return entry;});
-    const chatPromise=fetch(`${base}/v1/tasks/${created.id}/sources/demo/chat/completions`,{method:'POST',headers,body:JSON.stringify({model:'coder-pro',messages:[{role:'user',content:'完成后立刻终止'}]})});
+    const chatPromise=fetch(`${base}/v1/tasks/${created.id}/sources/demo/chat/completions`,{method:'POST',headers:executionHeaders,body:JSON.stringify({model:'coder-pro',messages:[{role:'user',content:'完成后立刻终止'}]})});
     await settlementCommitted;
     const cancelledResponse=await fetch(`${base}/api/tasks/${created.id}/cancel`,{method:'POST',headers,body:JSON.stringify({expectedVersion:running.version})});
     const cancelled=await cancelledResponse.json() as {task:{status:string};cancelledRequests:number};
@@ -412,8 +431,8 @@ describe('control-plane production rules', () => {
     const response = await fetch(`${base}/v1/sources/demo/chat/completions`, { method: 'POST', headers, body: JSON.stringify({ model: 'coder-pro', messages: [{ role: 'user', content: 'desktop' }] }) });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ model: 'coder-pro', cod_source: 'demo', cod_payment_direction: '测试钱包 → COD Demo' });
-    const device=await (await fetch(`${base}/api/devices`,{method:'POST',headers,body:JSON.stringify({name:'COD Desktop (windows)',platform:'windows'})})).json() as {id:string};const task=await (await fetch(`${base}/api/tasks`,{method:'POST',headers,body:JSON.stringify({title:'Desktop Agent',deviceId:device.id})})).json() as {id:string;version:number};const running=await (await fetch(`${base}/api/tasks/${task.id}/status`,{method:'POST',headers,body:JSON.stringify({status:'running',expectedVersion:task.version})})).json() as {version:number};
-    const taskBound=await fetch(`${base}/v1/tasks/${task.id}/sources/demo/chat/completions`,{method:'POST',headers,body:JSON.stringify({model:'coder-pro',messages:[{role:'user',content:'desktop task'}]})});expect(taskBound.status).toBe(200);expect(await taskBound.json()).toMatchObject({model:'coder-pro',cod_source:'demo'});expect(running.version).toBe(2);
+    const device=await (await fetch(`${base}/api/devices`,{method:'POST',headers,body:JSON.stringify({name:'COD Desktop (windows)',platform:'windows'})})).json() as {id:string};const task=await (await fetch(`${base}/api/tasks`,{method:'POST',headers,body:JSON.stringify({title:'Desktop Agent',deviceId:device.id})})).json() as {id:string;version:number};const running=await (await fetch(`${base}/api/tasks/${task.id}/status`,{method:'POST',headers,body:JSON.stringify(taskClaim(task.version,'D'))})).json() as {version:number;execution:{executionId:string;leaseToken:string}};const taskHeaders={...headers,'x-cod-task-execution':running.execution.executionId,'x-cod-task-lease':running.execution.leaseToken};
+    const taskBound=await fetch(`${base}/v1/tasks/${task.id}/sources/demo/chat/completions`,{method:'POST',headers:taskHeaders,body:JSON.stringify({model:'coder-pro',messages:[{role:'user',content:'desktop task'}]})});expect(taskBound.status).toBe(200);expect(await taskBound.json()).toMatchObject({model:'coder-pro',cod_source:'demo'});expect(running.version).toBe(2);
     const conflict = await fetch(`${base}/v1/sources/demo/chat/completions`, { method: 'POST', headers, body: JSON.stringify({ source: 'other', model: 'coder-pro', messages: [{ role: 'user', content: 'desktop' }] }) });
     expect(conflict.status).toBe(400);
     expect(await conflict.json()).toMatchObject({ error: 'source_conflict' });

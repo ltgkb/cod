@@ -52,6 +52,12 @@ export interface RemoteTask {
   error: string | null;
 }
 
+export interface TaskExecutionLease {
+  executionId: string;
+  leaseToken: string;
+  leaseExpiresAt: string;
+}
+
 export interface LedgerEntry {
   id: string;
   type: 'topup' | 'usage' | 'pack_purchase' | 'credit_grant' | 'trial_credit' | 'opening_balance';
@@ -129,10 +135,23 @@ export interface ComputeRequest extends ComputeRequestInput {
 }
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number, readonly code: string) {
+  constructor(message: string, readonly status: number, readonly code: string, readonly retryAfterMs: number | null = null) {
     super(message);
   }
 }
+
+const maximumTaskClaimRetryDelayMs = 5_000;
+const fatalTaskLeaseCodes = new Set(['task_lease_expired', 'task_lease_required', 'invalid_task_lease']);
+
+function retryAfterMs(response: Response): number | null {
+  const value=response.headers.get('retry-after')?.trim();
+  if(!value)return null;
+  if(/^\d+$/.test(value))return Number(value)*1_000;
+  const date=Date.parse(value);
+  return Number.isFinite(date)?Math.max(0,date-Date.now()):null;
+}
+
+function wait(milliseconds:number):Promise<void>{return milliseconds>0?new Promise((resolve)=>setTimeout(resolve,milliseconds)):Promise.resolve();}
 
 export function createClientId(): string {
   if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
@@ -141,6 +160,29 @@ export function createClientId(): string {
     return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
   }
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+const taskExecutionLeases = new Map<string, TaskExecutionLease>();
+interface PendingTaskExecutionClaim { claimId: string; leaseToken: string; expectedVersion: number }
+const pendingTaskExecutionClaims = new Map<string, PendingTaskExecutionClaim>();
+
+function createSecureTaskToken(): string {
+  if (typeof globalThis.crypto?.getRandomValues !== 'function') throw new ApiError('当前环境无法安全启动任务，请升级客户端后重试。', 500, 'secure_random_unavailable');
+  const bytes=globalThis.crypto.getRandomValues(new Uint8Array(32));
+  const alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  let encoded='';
+  for(let index=0;index<bytes.length;index+=3){
+    const first=bytes[index];const second=bytes[index+1];const third=bytes[index+2];
+    encoded+=alphabet[first>>2];
+    encoded+=alphabet[((first&3)<<4)|((second??0)>>4)];
+    if(second!==undefined)encoded+=alphabet[((second&15)<<2)|((third??0)>>6)];
+    if(third!==undefined)encoded+=alphabet[third&63];
+  }
+  return encoded;
+}
+
+export function getTaskExecutionLease(taskId: string): TaskExecutionLease | null {
+  return taskExecutionLeases.get(taskId) ?? null;
 }
 
 function storageGet(key: string): string | null {
@@ -177,7 +219,7 @@ async function request<T>(path: string, token?: string, init?: RequestInit): Pro
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({})) as ApiErrorBody;
-    throw new ApiError(body.message ?? `Control plane request failed: ${response.status}`, response.status, body.error ?? 'request_failed');
+    throw new ApiError(body.message ?? `Control plane request failed: ${response.status}`, response.status, body.error ?? 'request_failed', retryAfterMs(response));
   }
   return response.json() as Promise<T>;
 }
@@ -230,6 +272,8 @@ export function persistCodSession(token:string):void{
 
 export function logoutCod(): void {
   storageSet(sessionStorageKey, null);
+  taskExecutionLeases.clear();
+  pendingTaskExecutionClaims.clear();
 }
 
 export async function refreshAccount(token: string): Promise<AccountSummary> {
@@ -291,12 +335,19 @@ export async function registerDevice(token: string, name: string, platform: Devi
   return request('/api/devices', token, { method: 'POST', body: JSON.stringify({ name, platform }) });
 }
 
-export async function heartbeatDevice(token: string, deviceId: string): Promise<DeviceRecord> {
-  return request(`/api/devices/${encodeURIComponent(deviceId)}/heartbeat`, token, { method: 'POST' });
+export async function heartbeatDevice(token: string, deviceId: string, activeTaskId?: string): Promise<DeviceRecord> {
+  const execution=activeTaskId?taskExecutionLeases.get(activeTaskId):undefined;
+  if(activeTaskId&&!execution)throw new ApiError('任务执行租约已丢失，已停止续租。',409,'task_lease_required');
+  try {
+    return await request(`/api/devices/${encodeURIComponent(deviceId)}/heartbeat`, token, { method: 'POST', body: JSON.stringify(activeTaskId&&execution?{taskId:activeTaskId,executionId:execution.executionId,leaseToken:execution.leaseToken}:{}) });
+  } catch(error) {
+    if(activeTaskId&&error instanceof ApiError&&fatalTaskLeaseCodes.has(error.code)){taskExecutionLeases.delete(activeTaskId);pendingTaskExecutionClaims.delete(activeTaskId);}
+    throw error;
+  }
 }
 
 export async function listTasks(token: string): Promise<RemoteTask[]> {
-  return request('/api/tasks', token);
+  const tasks=await request<RemoteTask[]>('/api/tasks', token);const activeIds=new Set(tasks.filter((task)=>task.status==='running'||task.status==='waiting').map((task)=>task.id));for(const taskId of taskExecutionLeases.keys())if(!activeIds.has(taskId))taskExecutionLeases.delete(taskId);for(const [taskId,claim]of pendingTaskExecutionClaims){const task=tasks.find((item)=>item.id===taskId);if(!task||(!activeIds.has(taskId)&&task.version!==claim.expectedVersion))pendingTaskExecutionClaims.delete(taskId);}return tasks;
 }
 
 export async function createRemoteTask(token: string, title: string, deviceId: string): Promise<RemoteTask> {
@@ -304,14 +355,36 @@ export async function createRemoteTask(token: string, title: string, deviceId: s
 }
 
 export async function updateRemoteTask(token: string, task: RemoteTask, status: TaskStatus, outcome: { result?: string | null; error?: string | null } = {}): Promise<RemoteTask> {
-  return request(`/api/tasks/${encodeURIComponent(task.id)}/status`, token, {
+  const execution=taskExecutionLeases.get(task.id);
+  let claim:PendingTaskExecutionClaim|undefined;
+  if(status==='running'&&!execution){
+    claim=pendingTaskExecutionClaims.get(task.id);
+    if(!claim||((task.status!=='running'&&task.status!=='waiting')&&claim.expectedVersion!==task.version)){
+      claim={claimId:createSecureTaskToken(),leaseToken:createSecureTaskToken(),expectedVersion:task.version};pendingTaskExecutionClaims.set(task.id,claim);
+    }
+  }
+  const submit=()=>request<RemoteTask & {execution?:TaskExecutionLease}>(`/api/tasks/${encodeURIComponent(task.id)}/status`, token, {
     method: 'POST',
-    body: JSON.stringify({ status, expectedVersion: task.version, ...outcome }),
+    body: JSON.stringify({ status, expectedVersion: claim?.expectedVersion??task.version, ...outcome, ...(claim?{claimId:claim.claimId,leaseToken:claim.leaseToken}:execution?{executionId:execution.executionId,leaseToken:execution.leaseToken}:{}) }),
   });
+  let result:RemoteTask & {execution?:TaskExecutionLease};
+  try{result=await submit();}catch(error){
+    const retryable=claim&&(!(error instanceof ApiError)||error.status===429||error.status>=500);
+    if(retryable){
+      const delay=error instanceof ApiError?Math.min(error.retryAfterMs??0,maximumTaskClaimRetryDelayMs):0;
+      await wait(delay);
+      try{result=await submit();}catch(retryError){if(retryError instanceof ApiError&&retryError.status<500&&retryError.status!==429)pendingTaskExecutionClaims.delete(task.id);throw retryError;}
+    }else{if(claim&&error instanceof ApiError&&error.status<500&&error.status!==429)pendingTaskExecutionClaims.delete(task.id);throw error;}
+  }
+  if(status==='running'){
+    if(result.execution){if(!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(result.execution.executionId)||!/^[A-Za-z0-9_-]{43}$/.test(result.execution.leaseToken)||!Number.isFinite(Date.parse(result.execution.leaseExpiresAt))||(claim&&result.execution.leaseToken!==claim.leaseToken))throw new ApiError('服务端未返回有效的任务执行租约。',502,'invalid_task_lease_response');taskExecutionLeases.set(task.id,result.execution);pendingTaskExecutionClaims.delete(task.id);}
+    else if(!execution)throw new ApiError('服务端未返回有效的任务执行租约。',502,'invalid_task_lease_response');
+  }else if(status==='complete'||status==='failed'||status==='cancelled'){taskExecutionLeases.delete(task.id);pendingTaskExecutionClaims.delete(task.id);}
+  return{id:result.id,title:result.title,status:result.status,deviceId:result.deviceId,updatedAt:result.updatedAt,version:result.version,result:result.result,error:result.error};
 }
 
 export async function cancelRemoteTask(token:string,task:RemoteTask):Promise<{task:RemoteTask;cancelledRequests:number}>{
-  return request(`/api/tasks/${encodeURIComponent(task.id)}/cancel`,token,{method:'POST',body:JSON.stringify({expectedVersion:task.version})});
+  const result=await request<{task:RemoteTask;cancelledRequests:number}>(`/api/tasks/${encodeURIComponent(task.id)}/cancel`,token,{method:'POST',body:JSON.stringify({expectedVersion:task.version})});taskExecutionLeases.delete(task.id);pendingTaskExecutionClaims.delete(task.id);return result;
 }
 
 export async function listProducts(token: string): Promise<ProductManifest[]> {
@@ -339,13 +412,15 @@ export async function sendChat(token: string, source: string, model: string, mes
   const sanitizedMessages = messages.filter((message) => typeof message.content === 'string' && message.content.trim().length > 0).slice(-20).map((message) => ({ ...message, content: message.content.trim() }));
   if (!sanitizedMessages.length) throw new ApiError('消息内容不能为空。', 400, 'empty_messages');
   const requestId = createClientId();
+  const execution=options.taskId?taskExecutionLeases.get(options.taskId):undefined;
+  if(options.taskId&&!execution)throw new ApiError('任务执行租约已失效，请重新执行。',409,'task_lease_required');
   let result: { model?: string; choices: Array<{ message: { content: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number; input_tokens?: number; output_tokens?: number }; cod_mode?: 'demo'; cod_source?: string; cod_upstream_source?: string; cod_payment_direction?: string; cod_usage_estimated?: boolean; cod_fallback_used?: boolean } | null = null;
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const attemptSignal=requestSignal(options.signal,255_000);
     try {
       result = await request('/v1/chat/completions', token, {
-        method: 'POST', headers: { 'x-request-id': requestId },
+        method: 'POST', headers: { 'x-request-id': requestId, ...(execution?{'x-cod-task-execution':execution.executionId,'x-cod-task-lease':execution.leaseToken}:{}) },
         body: JSON.stringify({ source, model, messages: sanitizedMessages, max_tokens: 4_096, stream: false, ...(options.taskId?{task_id:options.taskId}:{}) }),
         signal: attemptSignal.signal,
       });

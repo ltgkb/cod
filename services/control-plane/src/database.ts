@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Pool, type PoolClient } from 'pg';
 import type { AccountSummary, DeviceRecord, TaskStatus, UsageEvent } from '@cod/contracts';
 import { HttpError } from './errors.js';
@@ -125,6 +125,28 @@ export interface SyncedTask {
 
 export interface TaskOutcome { result?: string | null; error?: string | null }
 
+export interface TaskExecutionCredential {
+  executionId: string;
+  leaseToken: string;
+}
+
+export interface TaskExecutionClaimCredential {
+  claimId: string;
+  leaseToken: string;
+}
+
+export interface TaskLeaseHeartbeat extends TaskExecutionCredential {
+  taskId: string;
+}
+
+export interface TaskExecutionClaim {
+  task: SyncedTask;
+  executionId: string;
+  leaseToken: string;
+  leaseExpiresAt: string;
+  replayed: boolean;
+}
+
 export interface TaskEvent {
   cursor: number;
   type: 'device.registered' | 'device.heartbeat' | 'task.created' | 'task.updated';
@@ -145,6 +167,7 @@ export interface AuditEntry {
 export interface ChatRequestCompletion {
   requestKey: string;
   fingerprint: string;
+  executionId?: string;
   responsePayload: Record<string, unknown>;
   audit: {
     entityId: string;
@@ -175,20 +198,24 @@ export interface CodDatabase {
   getPaymentOrder(principal: Principal, orderId: string): Promise<PaymentOrder>;
   completePaymentOrder(event: PaymentCompletion): Promise<{ order: PaymentOrder; entry: LedgerEntry }>;
   recordUsage(principal: Principal, event: UsageEvent): Promise<LedgerEntry>;
-  claimChatRequest(principal: Principal, requestKey: string, fingerprint: string): Promise<ChatRequestClaim>;
-  failChatRequest(principal: Principal, requestKey: string, fingerprint: string): Promise<void>;
-  reserveUsage(principal: Principal, reservationId: string, amountCents: number): Promise<void>;
-  settleUsage(principal: Principal, reservationId: string, event: UsageEvent, completion?: ChatRequestCompletion): Promise<LedgerEntry>;
+  claimChatRequest(principal: Principal, requestKey: string, fingerprint: string, executionId?: string): Promise<ChatRequestClaim>;
+  failChatRequest(principal: Principal, requestKey: string, fingerprint: string, executionId?: string): Promise<void>;
+  reserveUsage(principal: Principal, reservationId: string, amountCents: number, taskExecution?: { taskId: string; executionId: string }): Promise<void>;
+  settleUsage(principal: Principal, reservationId: string, event: UsageEvent, completion?: ChatRequestCompletion, executionId?: string): Promise<LedgerEntry>;
   releaseUsage(principal: Principal, reservationId: string): Promise<void>;
   createComputeRequest(principal: Principal, input: ComputeRequestInput, idempotencyKey: string): Promise<ComputeRequest>;
   listComputeRequests(principal: Principal): Promise<ComputeRequest[]>;
   listDevices(principal: Principal): Promise<DeviceRecord[]>;
   registerDevice(principal: Principal, input: Pick<DeviceRecord, 'name' | 'platform'>): Promise<DeviceRecord>;
-  heartbeat(principal: Principal, deviceId: string): Promise<DeviceRecord>;
+  heartbeat(principal: Principal, deviceId: string, taskLease?: TaskLeaseHeartbeat): Promise<DeviceRecord>;
   listTasks(principal: Principal): Promise<SyncedTask[]>;
   getTask(principal: Principal, taskId: string): Promise<SyncedTask>;
   createTask(principal: Principal, input: Pick<SyncedTask, 'title' | 'deviceId'>): Promise<SyncedTask>;
-  updateTask(principal: Principal, taskId: string, status: TaskStatus, expectedVersion: number, outcome?: TaskOutcome): Promise<SyncedTask>;
+  claimTask(principal: Principal, taskId: string, expectedVersion: number, claim: TaskExecutionClaimCredential): Promise<TaskExecutionClaim>;
+  assertTaskLease(principal: Principal, taskId: string, execution: TaskExecutionCredential): Promise<SyncedTask>;
+  assertTaskExecution(principal: Principal, taskId: string, executionId: string): Promise<SyncedTask>;
+  renewTaskExecution(principal: Principal, taskId: string, executionId: string): Promise<void>;
+  updateTask(principal: Principal, taskId: string, status: TaskStatus, expectedVersion: number, outcome?: TaskOutcome, execution?: TaskExecutionCredential): Promise<SyncedTask>;
   eventsAfter(principal: Principal, cursor: number): Promise<TaskEvent[]>;
   audit(principal: Principal, action: string, entityType: string, entityId: string | null, data?: unknown): Promise<void>;
   listAudit(principal: Principal, limit: number): Promise<AuditEntry[]>;
@@ -196,6 +223,13 @@ export interface CodDatabase {
 }
 
 const devicePlatforms = new Set<DeviceRecord['platform']>(['macos', 'windows', 'linux', 'web', 'mobile']);
+export const DEVICE_OFFLINE_AFTER_MS = 45_000;
+export const TASK_LEASE_DURATION_MS = 90_000;
+export const TASK_LEASE_EXPIRED_ERROR = '执行设备已断开，任务租约过期，本次执行已中断。请检查项目状态后重新执行。';
+export const LEGACY_TASK_INTERRUPTED_ERROR = '服务升级后无法确认原执行会话仍在运行，任务已安全中断。请检查项目状态后重新执行。';
+const taskExecutionIdPattern = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i;
+const taskLeaseTokenPattern = /^[A-Za-z0-9_-]{43}$/;
+const taskClaimIdPattern = taskLeaseTokenPattern;
 const taskTransitions: Record<TaskStatus, ReadonlySet<TaskStatus>> = {
   draft: new Set(['running', 'failed', 'cancelled']),
   running: new Set(['waiting', 'complete', 'failed', 'cancelled']),
@@ -219,6 +253,20 @@ export function validateTaskOutcome(status: TaskStatus, result: string | null, e
   if (status === 'complete' && !result?.trim()) throw new HttpError('Completed tasks require a result', 400, 'task_result_required');
   if (status === 'failed' && !error?.trim()) throw new HttpError('Failed tasks require an error', 400, 'task_error_required');
 }
+
+export function validateTaskExecutionCredential(execution: TaskExecutionCredential): void {
+  if (!taskExecutionIdPattern.test(execution.executionId) || !taskLeaseTokenPattern.test(execution.leaseToken) || ('taskId' in execution && (typeof execution.taskId !== 'string' || !taskExecutionIdPattern.test(execution.taskId)))) {
+    throw new HttpError('Task execution lease is invalid', 400, 'invalid_task_lease');
+  }
+}
+
+export function validateTaskExecutionClaimCredential(claim: TaskExecutionClaimCredential): void {
+  if (!taskClaimIdPattern.test(claim.claimId) || !taskLeaseTokenPattern.test(claim.leaseToken)) {
+    throw new HttpError('Task execution claim is invalid', 400, 'invalid_task_claim');
+  }
+}
+
+export const hashTaskLeaseToken = (token: string): string => createHash('sha256').update(token).digest('hex');
 
 export const legacyInviteCodeBackfillMigration = `
 UPDATE cod_users
@@ -311,7 +359,7 @@ export const chatRequestSchemaMigration = `
 CREATE TABLE IF NOT EXISTS cod_chat_requests (
   tenant_id text NOT NULL, user_id text NOT NULL, request_key text NOT NULL,
   request_fingerprint text NOT NULL, status text NOT NULL CHECK (status IN ('pending','complete','failed')),
-  response_payload jsonb, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+  task_execution_id uuid, response_payload jsonb, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
   expires_at timestamptz NOT NULL DEFAULT (now()+interval '1 hour'),
   PRIMARY KEY (tenant_id,user_id,request_key),
   CHECK (char_length(request_key) BETWEEN 1 AND 240),
@@ -319,11 +367,29 @@ CREATE TABLE IF NOT EXISTS cod_chat_requests (
   CHECK ((status='complete')=(response_payload IS NOT NULL))
 );
 ALTER TABLE cod_chat_requests ADD COLUMN IF NOT EXISTS expires_at timestamptz;
+ALTER TABLE cod_chat_requests ADD COLUMN IF NOT EXISTS task_execution_id uuid;
 UPDATE cod_chat_requests SET expires_at=CASE WHEN status='complete' THEN updated_at+interval '24 hours' ELSE updated_at+interval '1 hour' END WHERE expires_at IS NULL;
 ALTER TABLE cod_chat_requests ALTER COLUMN expires_at SET DEFAULT (now()+interval '1 hour');
 ALTER TABLE cod_chat_requests ALTER COLUMN expires_at SET NOT NULL;
 CREATE INDEX IF NOT EXISTS cod_chat_requests_owner_expiry_idx ON cod_chat_requests(tenant_id,user_id,expires_at);
 CREATE INDEX IF NOT EXISTS cod_chat_requests_expiry_idx ON cod_chat_requests(expires_at);
+`;
+
+export const taskExecutionLeaseSchemaMigration = `
+DO $task_execution_lease$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='cod_tasks'::regclass AND conname='cod_tasks_execution_lease_check'
+  ) THEN
+    ALTER TABLE cod_tasks ADD CONSTRAINT cod_tasks_execution_lease_check CHECK (
+      (status IN ('running','waiting') AND execution_id IS NOT NULL AND claim_id_hash IS NOT NULL AND claim_id_hash ~ '^[a-f0-9]{64}$' AND lease_token_hash IS NOT NULL AND lease_token_hash ~ '^[a-f0-9]{64}$' AND lease_expires_at IS NOT NULL)
+      OR
+      (status NOT IN ('running','waiting') AND execution_id IS NULL AND claim_id_hash IS NULL AND lease_token_hash IS NULL AND lease_expires_at IS NULL)
+    ) NOT VALID;
+  END IF;
+END
+$task_execution_lease$;
 `;
 
 const schema = `
@@ -369,8 +435,11 @@ ALTER TABLE cod_credit_grants DROP CONSTRAINT IF EXISTS cod_credit_grants_purcha
 ALTER TABLE cod_credit_grants ADD CONSTRAINT cod_credit_grants_purchase_price_cents_check CHECK (purchase_price_cents >= 0);
 CREATE TABLE IF NOT EXISTS cod_usage_reservations (
   id uuid PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL, amount_cents bigint NOT NULL CHECK (amount_cents >= 0),
-  status text NOT NULL CHECK (status IN ('reserved','settled','released')), created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+  status text NOT NULL CHECK (status IN ('reserved','settled','released')), task_id uuid, task_execution_id uuid,
+  created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE cod_usage_reservations ADD COLUMN IF NOT EXISTS task_id uuid;
+ALTER TABLE cod_usage_reservations ADD COLUMN IF NOT EXISTS task_execution_id uuid;
 ALTER TABLE cod_usage_reservations ADD COLUMN IF NOT EXISTS wallet_cents bigint;
 UPDATE cod_usage_reservations SET wallet_cents=amount_cents WHERE wallet_cents IS NULL;
 ALTER TABLE cod_usage_reservations ALTER COLUMN wallet_cents SET DEFAULT 0;
@@ -402,10 +471,17 @@ CREATE TABLE IF NOT EXISTS cod_devices (
 );
 CREATE TABLE IF NOT EXISTS cod_tasks (
   id uuid PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL, title text NOT NULL, status text NOT NULL,
-  device_id uuid NOT NULL REFERENCES cod_devices(id), version integer NOT NULL DEFAULT 1, result text, error text, updated_at timestamptz NOT NULL DEFAULT now(), created_at timestamptz NOT NULL DEFAULT now()
+  device_id uuid NOT NULL REFERENCES cod_devices(id), version integer NOT NULL DEFAULT 1, result text, error text,
+  execution_id uuid, claim_id_hash text, lease_token_hash text, lease_expires_at timestamptz,
+  updated_at timestamptz NOT NULL DEFAULT now(), created_at timestamptz NOT NULL DEFAULT now()
 );
 ALTER TABLE cod_tasks ADD COLUMN IF NOT EXISTS result text;
 ALTER TABLE cod_tasks ADD COLUMN IF NOT EXISTS error text;
+ALTER TABLE cod_tasks ADD COLUMN IF NOT EXISTS execution_id uuid;
+ALTER TABLE cod_tasks ADD COLUMN IF NOT EXISTS claim_id_hash text;
+ALTER TABLE cod_tasks ADD COLUMN IF NOT EXISTS lease_token_hash text;
+ALTER TABLE cod_tasks ADD COLUMN IF NOT EXISTS lease_expires_at timestamptz;
+${taskExecutionLeaseSchemaMigration}
 CREATE TABLE IF NOT EXISTS cod_events (
   cursor bigserial PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL, type text NOT NULL, entity_id text NOT NULL,
   data jsonb NOT NULL DEFAULT '{}', created_at timestamptz NOT NULL DEFAULT now()
@@ -415,7 +491,9 @@ CREATE TABLE IF NOT EXISTS cod_audit (
   entity_id text, data jsonb NOT NULL DEFAULT '{}', created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS cod_devices_owner_idx ON cod_devices(tenant_id, user_id);
+CREATE INDEX IF NOT EXISTS cod_devices_owner_seen_idx ON cod_devices(tenant_id, user_id, last_seen_at);
 CREATE INDEX IF NOT EXISTS cod_tasks_owner_idx ON cod_tasks(tenant_id, user_id);
+CREATE INDEX IF NOT EXISTS cod_tasks_active_lease_idx ON cod_tasks(lease_expires_at) WHERE status IN ('running','waiting');
 CREATE INDEX IF NOT EXISTS cod_events_owner_cursor_idx ON cod_events(tenant_id, user_id, cursor);
 CREATE INDEX IF NOT EXISTS cod_audit_owner_created_idx ON cod_audit(tenant_id, user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS cod_payment_orders_owner_created_idx ON cod_payment_orders(tenant_id, user_id, created_at DESC);
@@ -457,7 +535,7 @@ const validateChatRequestIdentity = (requestKey: string, fingerprint: string): v
 };
 const deviceFromRow = (row: Record<string, unknown>): DeviceRecord => {
   const lastSeenAt = new Date(String(row.last_seen_at)).toISOString();
-  const stale = Date.now() - new Date(lastSeenAt).getTime() > 45_000;
+  const stale = Date.now() - new Date(lastSeenAt).getTime() > DEVICE_OFFLINE_AFTER_MS;
   return { id: String(row.id), name: String(row.name), platform: row.platform as DeviceRecord['platform'], status: stale ? 'offline' : row.status as DeviceRecord['status'], lastSeenAt };
 };
 const taskFromRow = (row: Record<string, unknown>): SyncedTask => ({ id: String(row.id), title: String(row.title), status: row.status as TaskStatus, deviceId: String(row.device_id), updatedAt: new Date(String(row.updated_at)).toISOString(), version: Number(row.version), result: row.result === null || row.result === undefined ? null : String(row.result), error: row.error === null || row.error === undefined ? null : String(row.error) });
@@ -476,6 +554,10 @@ export class PostgresDatabase implements CodDatabase {
         await this.restoreGrants(client, parseGrantAllocations(row.grant_allocations));
       }
       for (const refund of refunds.values()) await client.query('UPDATE cod_users SET balance_cents=balance_cents+$3,updated_at=now() WHERE tenant_id=$1 AND user_id=$2',[refund.tenantId,refund.userId,refund.amountCents]);
+      await client.query(`UPDATE cod_tasks SET execution_id=NULL,claim_id_hash=NULL,lease_token_hash=NULL,lease_expires_at=NULL
+        WHERE status NOT IN ('running','waiting') AND (execution_id IS NOT NULL OR claim_id_hash IS NOT NULL OR lease_token_hash IS NOT NULL OR lease_expires_at IS NOT NULL)`);
+      await this.expireTaskLeases(client);
+      await client.query('ALTER TABLE cod_tasks VALIDATE CONSTRAINT cod_tasks_execution_lease_check');
     });
   }
   async close() { await this.pool.end(); }
@@ -616,26 +698,28 @@ export class PostgresDatabase implements CodDatabase {
       return this.insertUsageLedger(client,p,billedEvent,allocation.walletCents,creditCents);
     });
   }
-  async claimChatRequest(p: Principal, requestKey: string, fingerprint: string): Promise<ChatRequestClaim> {
+  async claimChatRequest(p: Principal, requestKey: string, fingerprint: string, executionId?: string): Promise<ChatRequestClaim> {
     validateChatRequestIdentity(requestKey, fingerprint);
+    if(executionId&&!taskExecutionIdPattern.test(executionId))throw new HttpError('Task execution is invalid',400,'invalid_task_execution');
     return this.transaction(async (client) => {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`chat-request:${p.tenantId}:${p.userId}:${requestKey}`]);
       await client.query(`WITH expired AS (
         SELECT ctid FROM cod_chat_requests WHERE expires_at<=now() ORDER BY expires_at LIMIT 1000
       ) DELETE FROM cod_chat_requests WHERE ctid IN (SELECT ctid FROM expired)`);
       const existing = await client.query(
-        'SELECT request_fingerprint,status,response_payload FROM cod_chat_requests WHERE tenant_id=$1 AND user_id=$2 AND request_key=$3 FOR UPDATE',
+        'SELECT request_fingerprint,status,response_payload,task_execution_id FROM cod_chat_requests WHERE tenant_id=$1 AND user_id=$2 AND request_key=$3 FOR UPDATE',
         [p.tenantId,p.userId,requestKey],
       );
       const row = existing.rows[0] as Record<string, unknown> | undefined;
       if (!row) {
         await client.query(
-          `INSERT INTO cod_chat_requests (tenant_id,user_id,request_key,request_fingerprint,status,expires_at) VALUES ($1,$2,$3,$4,'pending',now()+interval '1 hour')`,
-          [p.tenantId,p.userId,requestKey,fingerprint],
+          `INSERT INTO cod_chat_requests (tenant_id,user_id,request_key,request_fingerprint,task_execution_id,status,expires_at) VALUES ($1,$2,$3,$4,$5,'pending',now()+interval '1 hour')`,
+          [p.tenantId,p.userId,requestKey,fingerprint,executionId??null],
         );
         return { state: 'claimed' };
       }
       if (String(row.request_fingerprint) !== fingerprint) throw new HttpError('Request ID was already used for a different chat request',409,'idempotency_conflict');
+      if((row.task_execution_id?String(row.task_execution_id):null)!==(executionId??null))throw new HttpError('Request ID belongs to another task execution',409,'idempotency_conflict');
       if (row.status === 'complete') {
         const payload = row.response_payload;
         if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new HttpError('Cached chat response is invalid',500,'chat_cache_invalid');
@@ -649,28 +733,40 @@ export class PostgresDatabase implements CodDatabase {
       return { state: 'claimed' };
     });
   }
-  async failChatRequest(p: Principal, requestKey: string, fingerprint: string): Promise<void> {
+  async failChatRequest(p: Principal, requestKey: string, fingerprint: string, executionId?: string): Promise<void> {
     validateChatRequestIdentity(requestKey, fingerprint);
+    if(executionId&&!taskExecutionIdPattern.test(executionId))throw new HttpError('Task execution is invalid',400,'invalid_task_execution');
     await this.transaction(async (client) => {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`chat-request:${p.tenantId}:${p.userId}:${requestKey}`]);
       await client.query(
         `UPDATE cod_chat_requests r SET status='failed',response_payload=NULL,updated_at=now(),expires_at=now()+interval '1 hour'
-         WHERE r.tenant_id=$1 AND r.user_id=$2 AND r.request_key=$3 AND r.request_fingerprint=$4 AND r.status='pending'
+         WHERE r.tenant_id=$1 AND r.user_id=$2 AND r.request_key=$3 AND r.request_fingerprint=$4
+           AND r.task_execution_id IS NOT DISTINCT FROM $5::uuid AND r.status='pending'
            AND NOT EXISTS (
              SELECT 1 FROM cod_ledger l
-             WHERE l.tenant_id=r.tenant_id AND l.user_id=r.user_id AND l.idempotency_key=$5
+             WHERE l.tenant_id=r.tenant_id AND l.user_id=r.user_id AND l.idempotency_key=$6
            )`,
-        [p.tenantId,p.userId,requestKey,fingerprint,`chat:${requestKey}:${fingerprint}`],
+        [p.tenantId,p.userId,requestKey,fingerprint,executionId??null,`chat:${requestKey}:${fingerprint}`],
       );
     });
   }
-  async reserveUsage(p: Principal,reservationId:string,amountCents:number) {
+  async reserveUsage(p: Principal,reservationId:string,amountCents:number,taskExecution?:{taskId:string;executionId:string}) {
     if(!Number.isInteger(amountCents)||amountCents<0) throw new HttpError('Reservation amount is invalid',400,'invalid_reservation');
+    if(taskExecution&&(!taskExecutionIdPattern.test(taskExecution.taskId)||!taskExecutionIdPattern.test(taskExecution.executionId)))throw new HttpError('Task execution is invalid',400,'invalid_task_execution');
+    if(taskExecution)await this.reapTaskLeases(p,taskExecution.taskId);
     const reservableAmount=p.role==='admin'?0:amountCents;
-    await this.transaction(async(client)=>{const existing=await client.query('SELECT status FROM cod_usage_reservations WHERE id=$1 AND tenant_id=$2 AND user_id=$3',[reservationId,p.tenantId,p.userId]);if(existing.rows[0])return;const allocation=await this.allocateFunds(client,p,reservableAmount);await client.query(`INSERT INTO cod_usage_reservations (id,tenant_id,user_id,amount_cents,wallet_cents,grant_allocations,status) VALUES ($1,$2,$3,$4,$5,$6,'reserved')`,[reservationId,p.tenantId,p.userId,reservableAmount,allocation.walletCents,JSON.stringify(allocation.grantAllocations)]);});
+    await this.transaction(async(client)=>{
+      const existing=await client.query('SELECT status,task_id,task_execution_id FROM cod_usage_reservations WHERE id=$1 AND tenant_id=$2 AND user_id=$3',[reservationId,p.tenantId,p.userId]);
+      if(existing.rows[0]){if((existing.rows[0].task_id?String(existing.rows[0].task_id):null)!==(taskExecution?.taskId??null)||(existing.rows[0].task_execution_id?String(existing.rows[0].task_execution_id):null)!==(taskExecution?.executionId??null))throw new HttpError('Reservation belongs to another task execution',409,'reservation_execution_conflict');return;}
+      if(taskExecution){const task=await client.query(`SELECT 1 FROM cod_tasks WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND execution_id=$4 AND status IN ('running','waiting') AND lease_expires_at>now() FOR UPDATE`,[taskExecution.taskId,p.tenantId,p.userId,taskExecution.executionId]);if(!task.rows[0])throw new HttpError('Task execution lease is no longer active',409,'task_lease_expired');}
+      const allocation=await this.allocateFunds(client,p,reservableAmount);
+      await client.query(`INSERT INTO cod_usage_reservations (id,tenant_id,user_id,amount_cents,wallet_cents,grant_allocations,task_id,task_execution_id,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'reserved')`,[reservationId,p.tenantId,p.userId,reservableAmount,allocation.walletCents,JSON.stringify(allocation.grantAllocations),taskExecution?.taskId??null,taskExecution?.executionId??null]);
+    });
   }
-  async settleUsage(p:Principal,reservationId:string,event:UsageEvent,completion?:ChatRequestCompletion) {
+  async settleUsage(p:Principal,reservationId:string,event:UsageEvent,completion?:ChatRequestCompletion,executionId?:string) {
     if(!Number.isInteger(event.costCents)||event.costCents<0)throw new HttpError('Usage cost is invalid',400,'invalid_usage');
+    if(executionId&&!taskExecutionIdPattern.test(executionId))throw new HttpError('Task execution is invalid',400,'invalid_task_execution');
+    if(event.taskId!=='chat')await this.reapTaskLeases(p,event.taskId);
     if(completion){
       validateChatRequestIdentity(completion.requestKey,completion.fingerprint);
       if(event.idempotencyKey!==`chat:${completion.requestKey}:${completion.fingerprint}`)throw new HttpError('Chat settlement key is invalid',400,'invalid_idempotency_key');
@@ -681,17 +777,19 @@ export class PostgresDatabase implements CodDatabase {
       if(completion)await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`chat-request:${p.tenantId}:${p.userId}:${completion.requestKey}`]);
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`${p.tenantId}:${p.userId}:${event.idempotencyKey}`]);
       const chatRequest=completion?await client.query(
-        'SELECT request_fingerprint,status FROM cod_chat_requests WHERE tenant_id=$1 AND user_id=$2 AND request_key=$3 FOR UPDATE',
+        'SELECT request_fingerprint,status,task_execution_id FROM cod_chat_requests WHERE tenant_id=$1 AND user_id=$2 AND request_key=$3 FOR UPDATE',
         [p.tenantId,p.userId,completion.requestKey],
       ):null;
       if(completion){
         const row=chatRequest?.rows[0] as Record<string,unknown>|undefined;
         if(!row||String(row.request_fingerprint)!==completion.fingerprint)throw new HttpError('Chat request claim was not found',409,'chat_request_not_claimed');
+        if((row.task_execution_id?String(row.task_execution_id):null)!==(completion.executionId??null))throw new HttpError('Chat request belongs to another task execution',409,'chat_request_not_claimed');
         if(row.status==='failed')throw new HttpError('Chat request is no longer pending',409,'chat_request_not_pending');
       }
       const reservation=await client.query(`SELECT * FROM cod_usage_reservations WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE`,[reservationId,p.tenantId,p.userId]);
       const existing=await client.query('SELECT * FROM cod_ledger WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3',[p.tenantId,p.userId,event.idempotencyKey]);
       if(existing.rows[0]){
+        if(event.taskId!=='chat'&&((reservation.rows[0]?.task_id?String(reservation.rows[0].task_id):null)!==event.taskId||(reservation.rows[0]?.task_execution_id?String(reservation.rows[0].task_execution_id):null)!==executionId))throw new HttpError('Reservation belongs to another task execution',409,'reservation_execution_conflict');
         if(reservation.rows[0]?.status==='reserved')await this.releaseReservation(client,p,reservation.rows[0],reservationId);
         if(completion&&chatRequest?.rows[0]?.status==='pending')await client.query(
           `UPDATE cod_chat_requests SET status='complete',response_payload=$4,updated_at=now(),expires_at=now()+interval '24 hours' WHERE tenant_id=$1 AND user_id=$2 AND request_key=$3`,
@@ -699,14 +797,14 @@ export class PostgresDatabase implements CodDatabase {
         );
         return ledgerFromRow(existing.rows[0]);
       }
+      if(event.taskId!=='chat'){
+        if(!executionId)throw new HttpError('Task execution is required for settlement',409,'task_lease_required');
+        if((reservation.rows[0]?.task_id?String(reservation.rows[0].task_id):null)!==event.taskId||(reservation.rows[0]?.task_execution_id?String(reservation.rows[0].task_execution_id):null)!==executionId)throw new HttpError('Reservation belongs to another task execution',409,'reservation_execution_conflict');
+        const task=await client.query(`SELECT 1 FROM cod_tasks WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND execution_id=$4 AND status IN ('running','waiting') AND lease_expires_at>now() FOR UPDATE`,[event.taskId,p.tenantId,p.userId,executionId]);
+        if(!task.rows[0])throw new HttpError('Task execution lease is no longer active',409,'task_lease_expired');
+      }
       if(completion&&chatRequest?.rows[0]?.status==='complete')throw new HttpError('Completed chat request is missing its billing record',500,'chat_billing_inconsistent');
       if(!reservation.rows[0]||reservation.rows[0].status!=='reserved')throw new HttpError('Usage reservation not found',409,'reservation_not_found');
-      if(event.taskId!=='chat'){
-        const task=await client.query('SELECT status FROM cod_tasks WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE',[event.taskId,p.tenantId,p.userId]);
-        if(!task.rows[0])throw new HttpError('Task not found',404,'task_not_found');
-        if(task.rows[0].status==='cancelled')throw new HttpError('Task was cancelled before settlement',409,'task_cancelled');
-        if(task.rows[0].status!=='running'&&task.rows[0].status!=='waiting')throw new HttpError('Task is not running',409,'task_not_running');
-      }
       const billedEvent=p.role==='admin'?{...event,costCents:0,paymentDirection:'管理员测试免计费',commissionRateBps:0,commissionCents:0}:event;
       const reservedGrants=parseGrantAllocations(reservation.rows[0].grant_allocations);const reservedWallet=Number(reservation.rows[0].wallet_cents);let remaining=billedEvent.costCents;let creditConsumed=0;
       for(const allocation of reservedGrants){const consumed=Math.min(allocation.amountCents,remaining);creditConsumed+=consumed;remaining-=consumed;const refund=allocation.amountCents-consumed;if(refund>0)await this.restoreGrants(client,[{grantId:allocation.grantId,amountCents:refund}]);}
@@ -742,19 +840,103 @@ export class PostgresDatabase implements CodDatabase {
     });
   }
   async listComputeRequests(p:Principal) { const {rows}=await this.pool.query('SELECT * FROM cod_compute_requests WHERE tenant_id=$1 AND user_id=$2 ORDER BY created_at DESC LIMIT 100',[p.tenantId,p.userId]);return rows.map(computeRequestFromRow); }
-  async listDevices(p: Principal) { const {rows}=await this.pool.query('SELECT * FROM cod_devices WHERE tenant_id=$1 AND user_id=$2 ORDER BY created_at',[p.tenantId,p.userId]); return rows.map(deviceFromRow); }
+  async listDevices(p: Principal) {
+    return this.transaction(async (client) => {
+      await client.query(
+        `UPDATE cod_devices SET status='offline'
+         WHERE tenant_id=$1 AND user_id=$2 AND status<>'offline'
+           AND last_seen_at<=now()-$3::double precision*interval '1 millisecond'`,
+        [p.tenantId,p.userId,DEVICE_OFFLINE_AFTER_MS],
+      );
+      const {rows}=await client.query('SELECT * FROM cod_devices WHERE tenant_id=$1 AND user_id=$2 ORDER BY created_at',[p.tenantId,p.userId]);
+      return rows.map(deviceFromRow);
+    });
+  }
   async registerDevice(p: Principal,input:Pick<DeviceRecord,'name'|'platform'>) { validateDeviceInput(input); const id=randomUUID(); const {rows}=await this.pool.query(`INSERT INTO cod_devices (id,tenant_id,user_id,name,platform,status,last_seen_at) VALUES ($1,$2,$3,$4,$5,'online',now()) RETURNING *`,[id,p.tenantId,p.userId,input.name.trim().slice(0,100),input.platform]); const device=deviceFromRow(rows[0]); await this.append(p,'device.registered',id,device); return device; }
-  async heartbeat(p: Principal,id:string) { const {rows}=await this.pool.query(`UPDATE cod_devices SET status='online',last_seen_at=now() WHERE id=$1 AND tenant_id=$2 AND user_id=$3 RETURNING *`,[id,p.tenantId,p.userId]); if(!rows[0]) throw new HttpError('Device not found',404,'device_not_found'); return deviceFromRow(rows[0]); }
-  async listTasks(p: Principal) { const {rows}=await this.pool.query('SELECT * FROM cod_tasks WHERE tenant_id=$1 AND user_id=$2 ORDER BY updated_at DESC',[p.tenantId,p.userId]); return rows.map(taskFromRow); }
-  async getTask(p:Principal,id:string) { const {rows}=await this.pool.query('SELECT * FROM cod_tasks WHERE id=$1 AND tenant_id=$2 AND user_id=$3',[id,p.tenantId,p.userId]);if(!rows[0])throw new HttpError('Task not found',404,'task_not_found');return taskFromRow(rows[0]); }
-  async createTask(p: Principal,input:Pick<SyncedTask,'title'|'deviceId'>) { if(!input.title?.trim()) throw new HttpError('Task title is required',400,'invalid_task'); const device=await this.pool.query('SELECT 1 FROM cod_devices WHERE id=$1 AND tenant_id=$2 AND user_id=$3',[input.deviceId,p.tenantId,p.userId]); if(!device.rows[0]) throw new HttpError('Device not found',404,'device_not_found'); const id=randomUUID(); const {rows}=await this.pool.query(`INSERT INTO cod_tasks (id,tenant_id,user_id,title,status,device_id) VALUES ($1,$2,$3,$4,'draft',$5) RETURNING *`,[id,p.tenantId,p.userId,input.title.trim().slice(0,500),input.deviceId]); const task=taskFromRow(rows[0]); await this.append(p,'task.created',id,task); return task; }
-  async updateTask(p: Principal,id:string,status:TaskStatus,version:number,outcome:TaskOutcome={}) {
+  async heartbeat(p: Principal,id:string,taskLease?:TaskLeaseHeartbeat) {
+    if(taskLease)validateTaskExecutionCredential(taskLease);
+    return this.transaction(async(client)=>{
+      const {rows}=await client.query(`UPDATE cod_devices SET status='online',last_seen_at=now() WHERE id=$1 AND tenant_id=$2 AND user_id=$3 RETURNING *`,[id,p.tenantId,p.userId]);
+      if(!rows[0])throw new HttpError('Device not found',404,'device_not_found');
+      if(taskLease){
+        const renewed=await client.query(
+          `UPDATE cod_tasks SET lease_expires_at=now()+$7::double precision*interval '1 millisecond'
+           WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND device_id=$4
+             AND execution_id=$5 AND lease_token_hash=$6 AND status IN ('running','waiting') AND lease_expires_at>now()`,
+          [taskLease.taskId,p.tenantId,p.userId,id,taskLease.executionId,hashTaskLeaseToken(taskLease.leaseToken),TASK_LEASE_DURATION_MS],
+        );
+        if(renewed.rowCount!==1)throw new HttpError('Task execution lease is no longer active',409,'task_lease_expired');
+      }
+      return deviceFromRow(rows[0]);
+    });
+  }
+  async listTasks(p: Principal) {
+    await this.reapTaskLeases(p);const {rows}=await this.pool.query('SELECT * FROM cod_tasks WHERE tenant_id=$1 AND user_id=$2 ORDER BY updated_at DESC',[p.tenantId,p.userId]);return rows.map(taskFromRow);
+  }
+  async getTask(p:Principal,id:string) {
+    await this.reapTaskLeases(p,id);const {rows}=await this.pool.query('SELECT * FROM cod_tasks WHERE id=$1 AND tenant_id=$2 AND user_id=$3',[id,p.tenantId,p.userId]);if(!rows[0])throw new HttpError('Task not found',404,'task_not_found');return taskFromRow(rows[0]);
+  }
+  async createTask(p: Principal,input:Pick<SyncedTask,'title'|'deviceId'>) {
+    if(!input.title?.trim())throw new HttpError('Task title is required',400,'invalid_task');
+    const device=await this.pool.query(`SELECT 1 FROM cod_devices WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND status='online' AND last_seen_at>now()-$4::double precision*interval '1 millisecond'`,[input.deviceId,p.tenantId,p.userId,DEVICE_OFFLINE_AFTER_MS]);
+    if(!device.rows[0]){const exists=await this.pool.query('SELECT 1 FROM cod_devices WHERE id=$1 AND tenant_id=$2 AND user_id=$3',[input.deviceId,p.tenantId,p.userId]);if(!exists.rows[0])throw new HttpError('Device not found',404,'device_not_found');throw new HttpError('Device is offline',409,'device_offline');}
+    const id=randomUUID();const {rows}=await this.pool.query(`INSERT INTO cod_tasks (id,tenant_id,user_id,title,status,device_id) VALUES ($1,$2,$3,$4,'draft',$5) RETURNING *`,[id,p.tenantId,p.userId,input.title.trim().slice(0,500),input.deviceId]);const task=taskFromRow(rows[0]);await this.append(p,'task.created',id,task);return task;
+  }
+  async claimTask(p:Principal,id:string,version:number,claim:TaskExecutionClaimCredential):Promise<TaskExecutionClaim>{
+    validateTaskExecutionClaimCredential(claim);
+    await this.reapTaskLeases(p,id);
+    return this.transaction(async(client)=>{
+      const currentResult=await client.query('SELECT *,lease_expires_at>now() AS lease_active FROM cod_tasks WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE',[id,p.tenantId,p.userId]);
+      if(!currentResult.rows[0])throw new HttpError('Task not found',404,'task_not_found');
+      const current=taskFromRow(currentResult.rows[0]);
+      if(current.status==='running'||current.status==='waiting'){
+        const sameClaim=String(currentResult.rows[0].claim_id_hash??'')===hashTaskLeaseToken(claim.claimId)
+          && String(currentResult.rows[0].lease_token_hash??'')===hashTaskLeaseToken(claim.leaseToken)
+          && Boolean(currentResult.rows[0].execution_id)
+          && currentResult.rows[0].lease_active===true;
+        if(!sameClaim)throw new HttpError('Task already has an active execution',409,'task_already_running');
+        return{task:current,executionId:String(currentResult.rows[0].execution_id),leaseToken:claim.leaseToken,leaseExpiresAt:new Date(String(currentResult.rows[0].lease_expires_at)).toISOString(),replayed:true};
+      }
+      if(current.version!==version)throw new HttpError('Task version conflict',409,'version_conflict');
+      validateTaskTransition(current.status,'running');
+      const device=await client.query(`SELECT 1 FROM cod_devices WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND status='online' AND last_seen_at>now()-$4::double precision*interval '1 millisecond'`,[current.deviceId,p.tenantId,p.userId,DEVICE_OFFLINE_AFTER_MS]);
+      if(!device.rows[0])throw new HttpError('Device is offline',409,'device_offline');
+      const executionId=randomUUID();
+      const updated=await client.query(
+        `UPDATE cod_tasks SET status='running',result=NULL,error=NULL,execution_id=$2,claim_id_hash=$3,lease_token_hash=$4,
+           lease_expires_at=now()+$5::double precision*interval '1 millisecond',version=version+1,updated_at=now()
+         WHERE id=$1 RETURNING *`,
+        [id,executionId,hashTaskLeaseToken(claim.claimId),hashTaskLeaseToken(claim.leaseToken),TASK_LEASE_DURATION_MS],
+      );
+      const task=taskFromRow(updated.rows[0]);const leaseExpiresAt=new Date(String(updated.rows[0].lease_expires_at)).toISOString();
+      await client.query('INSERT INTO cod_events (tenant_id,user_id,type,entity_id,data) VALUES ($1,$2,$3,$4,$5)',[p.tenantId,p.userId,'task.updated',id,JSON.stringify(task)]);
+      await client.query('INSERT INTO cod_audit (id,tenant_id,user_id,action,entity_type,entity_id,data) VALUES ($1,$2,$3,$4,$5,$6,$7)',[randomUUID(),p.tenantId,p.userId,'task.execution.claim','task',id,JSON.stringify({executionId,leaseExpiresAt})]);
+      return{task,executionId,leaseToken:claim.leaseToken,leaseExpiresAt,replayed:false};
+    });
+  }
+  async assertTaskExecution(p:Principal,id:string,executionId:string){
+    if(!taskExecutionIdPattern.test(executionId))throw new HttpError('Task execution is invalid',400,'invalid_task_execution');
+    await this.reapTaskLeases(p,id);const {rows}=await this.pool.query(`SELECT * FROM cod_tasks WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND execution_id=$4 AND status IN ('running','waiting') AND lease_expires_at>now()`,[id,p.tenantId,p.userId,executionId]);if(!rows[0])throw new HttpError('Task execution lease is no longer active',409,'task_lease_expired');return taskFromRow(rows[0]);
+  }
+  async assertTaskLease(p:Principal,id:string,execution:TaskExecutionCredential){
+    validateTaskExecutionCredential(execution);await this.reapTaskLeases(p,id);const {rows}=await this.pool.query(`SELECT * FROM cod_tasks WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND execution_id=$4 AND lease_token_hash=$5 AND status IN ('running','waiting') AND lease_expires_at>now()`,[id,p.tenantId,p.userId,execution.executionId,hashTaskLeaseToken(execution.leaseToken)]);if(!rows[0])throw new HttpError('Task execution lease is no longer active',409,'task_lease_expired');return taskFromRow(rows[0]);
+  }
+  async renewTaskExecution(p:Principal,id:string,executionId:string){if(!taskExecutionIdPattern.test(executionId))throw new HttpError('Task execution is invalid',400,'invalid_task_execution');const renewed=await this.pool.query(`UPDATE cod_tasks SET lease_expires_at=now()+$5::double precision*interval '1 millisecond' WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND execution_id=$4 AND status IN ('running','waiting') AND lease_expires_at>now()`,[id,p.tenantId,p.userId,executionId,TASK_LEASE_DURATION_MS]);if(renewed.rowCount!==1)throw new HttpError('Task execution lease is no longer active',409,'task_lease_expired');}
+  async updateTask(p: Principal,id:string,status:TaskStatus,version:number,outcome:TaskOutcome={},execution?:TaskExecutionCredential) {
+    await this.reapTaskLeases(p,id);
     return this.transaction(async (client) => {
       const currentResult = await client.query('SELECT * FROM cod_tasks WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE', [id,p.tenantId,p.userId]);
       if (!currentResult.rows[0]) throw new HttpError('Task not found',404,'task_not_found');
       const current = taskFromRow(currentResult.rows[0]);
       if (current.version !== version) throw new HttpError('Task version conflict',409,'version_conflict');
+      if(status==='running'&&current.status!=='waiting'&&current.status!=='running')throw new HttpError('Running tasks must claim a new execution lease',409,'task_claim_required');
       validateTaskTransition(current.status, status);
+      if((current.status==='running'||current.status==='waiting')&&status!=='cancelled'){
+        if(!execution)throw new HttpError('Task execution lease is required',409,'task_lease_required');
+        validateTaskExecutionCredential(execution);
+        const validLease=await client.query(`SELECT 1 FROM cod_tasks WHERE id=$1 AND execution_id=$2 AND lease_token_hash=$3 AND lease_expires_at>now()`,[id,execution.executionId,hashTaskLeaseToken(execution.leaseToken)]);
+        if(!validLease.rows[0])throw new HttpError('Task execution lease is no longer active',409,'task_lease_expired');
+      }
       if (outcome.result !== undefined && outcome.result !== null && outcome.result.length > 50_000) throw new HttpError('Task result is too large', 400, 'task_result_too_large');
       if (outcome.error !== undefined && outcome.error !== null && outcome.error.length > 5_000) throw new HttpError('Task error is too large', 400, 'task_error_too_large');
       if (current.status === status && outcome.result === undefined && outcome.error === undefined) return current;
@@ -765,7 +947,8 @@ export class PostgresDatabase implements CodDatabase {
       if (status === 'failed') nextResult = null;
       if (status === 'cancelled') { nextResult = null; nextError = null; }
       validateTaskOutcome(status, nextResult, nextError);
-      const { rows } = await client.query('UPDATE cod_tasks SET status=$1,result=$3,error=$4,version=version+1,updated_at=now() WHERE id=$2 RETURNING *', [status,id,nextResult,nextError]);
+      const terminal=status==='complete'||status==='failed'||status==='cancelled';
+      const { rows } = await client.query('UPDATE cod_tasks SET status=$1,result=$3,error=$4,execution_id=CASE WHEN $5 THEN NULL ELSE execution_id END,claim_id_hash=CASE WHEN $5 THEN NULL ELSE claim_id_hash END,lease_token_hash=CASE WHEN $5 THEN NULL ELSE lease_token_hash END,lease_expires_at=CASE WHEN $5 THEN NULL ELSE lease_expires_at END,version=version+1,updated_at=now() WHERE id=$2 RETURNING *', [status,id,nextResult,nextError,terminal]);
       const task = taskFromRow(rows[0]);
       await client.query('INSERT INTO cod_events (tenant_id,user_id,type,entity_id,data) VALUES ($1,$2,$3,$4,$5)', [p.tenantId,p.userId,'task.updated',id,JSON.stringify(task)]);
       return task;
@@ -774,6 +957,32 @@ export class PostgresDatabase implements CodDatabase {
   async eventsAfter(p:Principal,cursor:number) { const {rows}=await this.pool.query('SELECT * FROM cod_events WHERE tenant_id=$1 AND user_id=$2 AND cursor>$3 ORDER BY cursor LIMIT 500',[p.tenantId,p.userId,cursor]); return rows.map((row)=>({cursor:Number(row.cursor),type:row.type,entityId:String(row.entity_id),data:row.data,createdAt:new Date(row.created_at).toISOString()})); }
   async audit(p:Principal,action:string,entityType:string,entityId:string|null,data:unknown={}) { await this.pool.query('INSERT INTO cod_audit (id,tenant_id,user_id,action,entity_type,entity_id,data) VALUES ($1,$2,$3,$4,$5,$6,$7)',[randomUUID(),p.tenantId,p.userId,action,entityType,entityId,JSON.stringify(data)]); }
   async listAudit(p:Principal,limit:number) { const {rows}=await this.pool.query('SELECT * FROM cod_audit WHERE tenant_id=$1 AND user_id=$2 ORDER BY created_at DESC LIMIT $3',[p.tenantId,p.userId,Math.min(Math.max(limit,1),200)]); return rows.map((row)=>({id:String(row.id),action:String(row.action),entityType:String(row.entity_type),entityId:row.entity_id?String(row.entity_id):null,data:row.data,createdAt:new Date(row.created_at).toISOString()})); }
+  private async reapTaskLeases(p?:Principal,taskId?:string):Promise<SyncedTask[]>{return this.transaction((client)=>this.expireTaskLeases(client,p,taskId));}
+  private async expireTaskLeases(client:PoolClient,p?:Principal,taskId?:string):Promise<SyncedTask[]>{
+    const values:unknown[]=[LEGACY_TASK_INTERRUPTED_ERROR,TASK_LEASE_EXPIRED_ERROR];
+    const conditions=[`t.status IN ('running','waiting')`,`(t.execution_id IS NULL OR t.claim_id_hash IS NULL OR t.claim_id_hash !~ '^[a-f0-9]{64}$' OR t.lease_token_hash IS NULL OR t.lease_token_hash !~ '^[a-f0-9]{64}$' OR t.lease_expires_at IS NULL OR t.lease_expires_at<=now())`];
+    if(p){values.push(p.tenantId);conditions.push(`t.tenant_id=$${values.length}`);values.push(p.userId);conditions.push(`t.user_id=$${values.length}`);}
+    if(taskId){values.push(taskId);conditions.push(`t.id=$${values.length}`);}
+    const expired=await client.query(
+      `WITH candidates AS (
+         SELECT t.id,t.tenant_id,t.user_id,t.execution_id AS previous_execution_id,
+           (t.execution_id IS NULL OR t.claim_id_hash IS NULL OR t.claim_id_hash !~ '^[a-f0-9]{64}$' OR t.lease_token_hash IS NULL OR t.lease_token_hash !~ '^[a-f0-9]{64}$' OR t.lease_expires_at IS NULL) AS legacy
+         FROM cod_tasks t WHERE ${conditions.join(' AND ')} FOR UPDATE
+       ), updated AS (
+         UPDATE cod_tasks t SET status='failed',result=NULL,error=CASE WHEN c.legacy THEN $1 ELSE $2 END,
+           execution_id=NULL,claim_id_hash=NULL,lease_token_hash=NULL,lease_expires_at=NULL,version=t.version+1,updated_at=now()
+         FROM candidates c WHERE t.id=c.id RETURNING t.*,c.legacy,c.previous_execution_id
+       ) SELECT * FROM updated`,
+      values,
+    );
+    const tasks:SyncedTask[]=[];
+    for(const row of expired.rows){
+      const task=taskFromRow(row);tasks.push(task);const reason=row.legacy?'legacy_missing_lease':'lease_expired';
+      await client.query('INSERT INTO cod_events (tenant_id,user_id,type,entity_id,data) VALUES ($1,$2,$3,$4,$5)',[row.tenant_id,row.user_id,'task.updated',task.id,JSON.stringify(task)]);
+      await client.query('INSERT INTO cod_audit (id,tenant_id,user_id,action,entity_type,entity_id,data) VALUES ($1,$2,$3,$4,$5,$6,$7)',[randomUUID(),row.tenant_id,row.user_id,'task.execution.interrupted','task',task.id,JSON.stringify({reason,executionId:row.previous_execution_id??null})]);
+    }
+    return tasks;
+  }
   private async allocateFunds(client:PoolClient,p:Principal,amountCents:number):Promise<FundsAllocation>{
     const account=await client.query('SELECT balance_cents FROM cod_users WHERE tenant_id=$1 AND user_id=$2 FOR UPDATE',[p.tenantId,p.userId]);
     if(!account.rows[0])throw new HttpError('Account not found',404,'account_not_found');

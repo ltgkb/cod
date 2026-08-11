@@ -48,6 +48,7 @@ import {
   getCreditPacks,
   getPaymentOrder,
   getReferralSummary,
+  getTaskExecutionLease,
   heartbeatDevice,
   listDevices,
   listComputeOffers,
@@ -106,7 +107,7 @@ type AuthState = 'loading' | 'signed-out' | 'signed-in';
 type ColorMode = 'light' | 'dark';
 interface ComparisonResult { sourceId: string; sourceLabel: string; model: string; modelId?: string; content: string; inputTokens?: number; outputTokens?: number; durationMs: number; error?: string }
 interface ChatMessage { id: string; role: 'user' | 'assistant' | 'comparison'; content: string; mode?: 'live' | 'demo'; sourceLabel?: string; model?: string; inputTokens?: number; outputTokens?: number; usageEstimated?: boolean; fallbackUsed?: boolean; failed?: boolean; cancelled?: boolean; retryPrompt?: string; comparisonResults?: ComparisonResult[]; selectedComparisonKey?: string; createdAt: string }
-interface ActiveRun { taskId:string; controller:AbortController; cancelled:boolean; mode:WorkspaceMode }
+interface ActiveRun { taskId:string; controller:AbortController; cancelled:boolean; leaseAcquired:boolean; finalizing:boolean; terminalCommitted:boolean; mode:WorkspaceMode }
 interface ComputeDraft {
   tab: ComputeRequestInput['kind']; offerId: string; company: string; contactName: string; contactPhone: string;
   city: string; gpuModel: string; quantity: number; durationHours: number; termMonths: number; requirements: string;
@@ -474,8 +475,10 @@ export function App() {
     const token = sessionToken;
     let stopped=false;
     const sync = async () => {
-      if (!hasDesktopBridge() && document.visibilityState === 'hidden') return;
+      if (!hasDesktopBridge() && document.visibilityState === 'hidden' && !activeRunRef.current?.leaseAcquired) return;
       try {
+        const currentDeviceId = storageGet('cod.device.id');const activeRun=activeRunRef.current;
+        if(currentDeviceId&&!stopped){try{await heartbeatDevice(token,currentDeviceId,activeRun?.leaseAcquired?activeRun.taskId:undefined);}catch(error){if(activeRun?.leaseAcquired&&error instanceof ApiError&&['task_lease_expired','task_lease_required','invalid_task_lease'].includes(error.code)&&!activeRun.cancelled&&!activeRun.finalizing&&!activeRun.terminalCommitted){activeRun.cancelled=true;activeRun.controller.abort(new DOMException('Task execution lease expired','AbortError'));setNotice('任务执行租约已失效，本机 Agent 已停止。请检查项目状态后重新执行。');if(hasDesktopBridge())void window.codDesktop?.stopGoose();}}}
         const [tasksResult, devicesResult, accountResult, creditPacksResult] = await Promise.allSettled([
           listTasks(token), listDevices(token), refreshAccount(token), getCreditPacks(token),
         ]);
@@ -484,8 +487,6 @@ export function App() {
         if(devicesResult.status==='fulfilled')setDevices(devicesResult.value);
         if(creditPacksResult.status==='fulfilled')setCreditPacks(creditPacksResult.value);
         if(accountResult.status==='fulfilled')setSession((current) => current?.token === token ? { ...current, account:accountResult.value } : current);
-        const currentDeviceId = storageGet('cod.device.id');
-        if (currentDeviceId&&!stopped) await heartbeatDevice(token, currentDeviceId);
       } catch { /* Keep the last synchronized snapshot and retry. */ }
     };
     const interval = window.setInterval(sync, 15_000);
@@ -519,7 +520,7 @@ export function App() {
 
   useEffect(()=>{
     const run=activeRunRef.current;if(!run||run.cancelled)return;
-    const task=tasks.find((item)=>item.id===run.taskId);if(task?.status!=='cancelled')return;
+    const task=tasks.find((item)=>item.id===run.taskId);if(task?.status!=='cancelled'&&task?.status!=='failed')return;
     run.cancelled=true;run.controller.abort(new DOMException('Task cancelled','AbortError'));
     permissionResolver.current?.(null);permissionResolver.current=null;setPendingPermission(null);setAgentStatus('已终止');
     if(hasDesktopBridge())void window.codDesktop?.stopGoose();
@@ -669,19 +670,21 @@ export function App() {
     let task = requestedTask;
     let promptAppended = false;
     let responseAppended = false;
-    const run:ActiveRun={taskId:task?.id??'',controller:new AbortController(),cancelled:false,mode:requestedMode};
+    const run:ActiveRun={taskId:task?.id??'',controller:new AbortController(),cancelled:false,leaseAcquired:false,finalizing:false,terminalCommitted:false,mode:requestedMode};
     const assertActive=()=>{if(run.cancelled||run.controller.signal.aborted||sessionTokenRef.current!==token)throw new DOMException('Task cancelled','AbortError');};
     let projectBeforeRun:ProjectSnapshot|null=null;
     if (task && task.deviceId !== currentDeviceId) { setNotice(`该任务应在 ${devices.find((device) => device.id === task!.deviceId)?.name ?? '目标设备'} 上执行`); return; }
     sendingRef.current=true;activeRunRef.current=run;setIsSending(true);setAgentStatus('正在执行');setNotice('');
     try {
+      if(currentDeviceId){await heartbeatDevice(token,currentDeviceId);assertActive();}
       if (!task) {
         if (!currentDeviceId) throw new Error('当前设备尚未完成注册');
         task = await createRemoteTask(token, promptText.slice(0, 80), currentDeviceId);
         assertActive();run.taskId=task.id;
         setTasks((current) => [task!, ...current]); setActiveTaskId(task.id);
       }
-      if (task.status !== 'running') {task = await changeTaskStatus(task, 'running');assertActive();}
+      if (task.status !== 'running'||!getTaskExecutionLease(task.id)) {task = await changeTaskStatus(task, 'running');assertActive();}
+      run.leaseAcquired=Boolean(getTaskExecutionLease(task.id));if(!run.leaseAcquired)throw new Error('未取得任务执行租约，本次任务未启动。');
       run.taskId=task.id;
       const submittedPrompt = promptText;
       const taskMessages = messagesByTask[task.id] ?? [];
@@ -710,7 +713,8 @@ export function App() {
         assertActive();
         if(!projectBeforeRun)throw new Error('无法读取项目运行前状态，本次代码任务未执行。');
       }
-      const acpUrl = requestedMode === 'code' && selectedSource && selectedModelInfo ? await window.codDesktop?.getGooseAcpUrl({ token, sourceId: selectedSource.id, modelId: selectedModelInfo.id, taskId:task.id }) : null;
+      const executionLease=getTaskExecutionLease(task.id);
+      const acpUrl = requestedMode === 'code' && selectedSource && selectedModelInfo && executionLease ? await window.codDesktop?.getGooseAcpUrl({ token, sourceId: selectedSource.id, modelId: selectedModelInfo.id, taskId:task.id, executionId:executionLease.executionId, leaseToken:executionLease.leaseToken }) : null;
       assertActive();
       if(comparisonRequest){
         setAgentStatus(`正在并行请求 ${compareTargets.length} 个模型`);
@@ -741,7 +745,7 @@ export function App() {
         responseAppended = true;
       }
       if (!comparisonRequest&&requestedMode === 'code'&&selectedSource&&selectedModelInfo) { appendMessage(task.id, { id: createClientId(), role: 'assistant', content: reply, mode: replyMode, sourceLabel: selectedSource.label, model: selectedModelInfo.id, createdAt: new Date().toISOString() }); responseAppended = true; }
-      if (task.status === 'running' || task.status === 'waiting') {task = await changeTaskStatus(task, 'complete', { result: reply, error: null });assertActive();}
+      if (task.status === 'running' || task.status === 'waiting') {run.finalizing=true;try{task = await changeTaskStatus(task, 'complete', { result: reply, error: null });run.terminalCommitted=true;run.leaseAcquired=false;}catch(error){run.finalizing=false;throw error;}assertActive();}
       setAgentStatus('已完成');
       const [walletRefresh,projectRefresh]=await Promise.allSettled([refreshWallet(true),requestedMode!=='code'&&hasDesktopBridge()&&project.root?loadProject(project.root):Promise.resolve(null)]);
       assertActive();
@@ -753,7 +757,7 @@ export function App() {
       const failure = chatFailureMessage(error);
       setAgentStatus('等待重试'); setNotice(failure);
       if (task && promptAppended && !responseAppended) appendMessage(task.id, { id: createClientId(), role: 'assistant', content: failure, failed: true, retryPrompt: promptText, createdAt: new Date().toISOString() });
-      if (task && session && (task.status === 'draft' || task.status === 'running' || task.status === 'waiting')) { try { await changeTaskStatus(task, 'failed', { error: failure }); } catch { /* Preserve the original error. */ } }
+      if (task && session && (task.status === 'draft' || task.status === 'running' || task.status === 'waiting')) { run.finalizing=true;try { await changeTaskStatus(task, 'failed', { error: failure });run.terminalCommitted=true;run.leaseAcquired=false; } catch { run.finalizing=false;/* Preserve the original error. */ } }
     } finally { if(activeRunRef.current===run){activeRunRef.current=null;sendingRef.current=false;setIsSending(false);} }
   };
   pendingSendRunner.current = (nextPrompt, nextMode) => { void handleSend(nextPrompt, null, nextMode); };
@@ -784,7 +788,7 @@ export function App() {
     try{
       const [result]=await Promise.all([cancelRemoteTask(token,task),hasDesktopBridge()&&run?.taskId===task.id?window.codDesktop?.stopGoose():Promise.resolve()]);
       if(sessionTokenRef.current!==token)return;
-      replaceTask(result.task);appendMessage(task.id,{id:createClientId(),role:'assistant',content:hasDesktopBridge()?'任务已由用户终止。本机 Agent 已停止。未结算请求不扣费，已完成或结算中的请求按实际用量计费。':'任务已由用户终止。未结算请求不扣费，已完成或结算中的请求按实际用量计费。',cancelled:true,createdAt:new Date().toISOString()});
+      if(run?.taskId===task.id)run.leaseAcquired=false;replaceTask(result.task);appendMessage(task.id,{id:createClientId(),role:'assistant',content:hasDesktopBridge()?'任务已由用户终止。本机 Agent 已停止。未结算请求不扣费，已完成或结算中的请求按实际用量计费。':'任务已由用户终止。未结算请求不扣费，已完成或结算中的请求按实际用量计费。',cancelled:true,createdAt:new Date().toISOString()});
       setAgentStatus('已终止');setNotice(result.cancelledRequests>0?`任务已终止，已取消 ${result.cancelledRequests} 个模型请求并释放预占额度。`:'任务已终止，当前没有仍在运行的模型请求。');await refreshWallet();
     }catch(error){
       if(sessionTokenRef.current!==token)return;

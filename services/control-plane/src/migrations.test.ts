@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { chatRequestSchemaMigration, ledgerAllocationBackfillMigration, ledgerTypeConstraintMigration, legacyInviteCodeBackfillMigration, walletOpeningBalanceMigration } from './database.js';
+import { chatRequestSchemaMigration, ledgerAllocationBackfillMigration, ledgerTypeConstraintMigration, legacyInviteCodeBackfillMigration, taskExecutionLeaseSchemaMigration, walletOpeningBalanceMigration } from './database.js';
 
 describe('production-safe migrations and rate limits', () => {
   it('backfills only legacy unallocated ledger rows and enforces the accounting invariant', () => {
@@ -53,6 +53,22 @@ describe('production-safe migrations and rate limits', () => {
     expect(databaseSource).toContain('SELECT ctid FROM cod_chat_requests WHERE expires_at<=now() ORDER BY expires_at LIMIT 1000');
   });
 
+  it('adds execution fencing without exposing or storing reusable lease secrets',()=>{
+    const databaseSource=readFileSync(new URL('./database.ts',import.meta.url),'utf8');
+    expect(databaseSource).toContain('ALTER TABLE cod_tasks ADD COLUMN IF NOT EXISTS claim_id_hash text');
+    expect(databaseSource).toContain('ALTER TABLE cod_tasks ADD COLUMN IF NOT EXISTS lease_token_hash text');
+    expect(databaseSource).toContain('cod_tasks_active_lease_idx');
+    expect(taskExecutionLeaseSchemaMigration).toContain("status IN ('running','waiting')");
+    expect(taskExecutionLeaseSchemaMigration).toContain('claim_id_hash IS NOT NULL');
+    expect(taskExecutionLeaseSchemaMigration).toContain("claim_id_hash ~ '^[a-f0-9]{64}$'");
+    expect(taskExecutionLeaseSchemaMigration).toContain('lease_token_hash IS NOT NULL');
+    expect(taskExecutionLeaseSchemaMigration).toContain("lease_token_hash ~ '^[a-f0-9]{64}$'");
+    expect(taskExecutionLeaseSchemaMigration).toContain('NOT VALID');
+    expect(databaseSource).not.toMatch(/SET\s+lease_token_hash=\$\d[^\n]*claim\.leaseToken/);
+    expect(databaseSource).toContain("status NOT IN ('running','waiting') AND (execution_id IS NOT NULL");
+    expect(databaseSource).toContain('ALTER TABLE cod_tasks VALIDATE CONSTRAINT cod_tasks_execution_lease_check');
+  });
+
   it('trusts only the observed ALB subnet and isolates heartbeat bursts', () => {
     const httpConfig = readFileSync(new URL('../../../deploy/nginx-http.conf', import.meta.url), 'utf8');
     const siteConfig = readFileSync(new URL('../../../deploy/cod.nginx.conf', import.meta.url), 'utf8');
@@ -61,10 +77,14 @@ describe('production-safe migrations and rate limits', () => {
     expect(httpConfig).toContain('real_ip_header X-Forwarded-For;');
     expect(httpConfig).toContain('real_ip_recursive on;');
     expect(httpConfig).not.toMatch(/set_real_ip_from\s+(?:0\.0\.0\.0\/0|10\.0\.0\.0\/8|172\.16\.0\.0\/12)/);
-    expect(httpConfig).toContain('zone=cod_heartbeat:10m rate=2r/s');
-    expect(siteConfig).toContain('limit_req zone=cod_heartbeat burst=5 nodelay;');
+    expect(httpConfig).toContain('limit_req_zone $binary_remote_addr zone=cod_heartbeat_ip:10m rate=50r/s');
+    expect(httpConfig).toContain('limit_req_zone $binary_remote_addr$uri zone=cod_heartbeat_device:10m rate=2r/s');
+    expect(siteConfig).toContain('limit_req zone=cod_heartbeat_ip burst=100 nodelay;');
+    expect(siteConfig).toContain('limit_req zone=cod_heartbeat_device burst=5 nodelay;');
+    expect(siteConfig.match(/limit_req zone=cod_api burst=40 nodelay;/g)).toHaveLength(1);
     expect(siteConfig).toContain('error_page 429 = @cod_rate_limited;');
     expect(siteConfig).toContain('return 429 \'{"error":"rate_limited"');
+    expect(siteConfig).toContain('add_header Retry-After 1 always;');
     expect(httpConfig).toContain('map $http_x_request_id $cod_request_id');
     expect(httpConfig).toContain('default $http_x_request_id;');
     expect(httpConfig).toContain('"" $request_id;');

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { AGENT_SESSION_TTL_MS, createAgentSessionToken, createSessionToken, verifyAgentSessionToken, verifySessionToken } from './auth.js';
 
 const principal = { sub: 'usr_test', tenantId: 'tenant_test', email: 'user@kai.com', role: 'member' as const };
-const scope = { taskId: '11111111-1111-4111-8111-111111111111', sourceId: 'ai-kai', model: 'glm-5.2' };
+const scope = { taskId: '11111111-1111-4111-8111-111111111111', executionId: '22222222-2222-4222-8222-222222222222', sourceId: 'ai-kai', model: 'glm-5.2' };
 const secret = 's'.repeat(32);
 
 describe('scoped agent sessions', () => {

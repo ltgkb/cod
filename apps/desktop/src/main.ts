@@ -12,6 +12,7 @@ import { mintAgentSession } from './agent-session.js';
 import { commandPathCandidates, commandPolicyViolation, isWithinRoot, parseCommand, validateCommandPath } from './command-policy.js';
 import { collectUntrackedDiff } from './git-diff.js';
 import { minimalGooseEnvironment } from './goose-environment.js';
+import { GooseLaunchCoordinator } from './goose-lifecycle.js';
 import { loadApprovedProjectRoots, maximumApprovedProjectRoots, saveApprovedProjectRoots } from './project-roots.js';
 import { collectWorkspaceFiles } from './workspace-files.js';
 
@@ -23,6 +24,7 @@ let gooseSidecar: ChildProcess | null = null;
 let gooseAcpUrl: string | null = null;
 let gooseConfigurationKey: string | null = null;
 let gooseAgentTokenExpiresAt = 0;
+const gooseLaunchCoordinator=new GooseLaunchCoordinator();
 
 function isTrustedExternalUrl(rawUrl: string): boolean {
   try {
@@ -104,38 +106,46 @@ function validateAgentGatewayConfig(config: AgentGatewayConfig): void {
   }
   if (typeof config.sourceId !== 'string' || !/^[a-z0-9-]{2,40}$/.test(config.sourceId)) throw new Error('Invalid model source');
   if (typeof config.modelId !== 'string' || !config.modelId || config.modelId.length > 200 || /[\0\r\n]/.test(config.modelId)) throw new Error('Invalid model');
-  if (typeof config.taskId !== 'string' || !/^[a-f0-9-]{36}$/i.test(config.taskId)) throw new Error('Invalid task');
+  if (typeof config.taskId !== 'string' || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(config.taskId)) throw new Error('Invalid task');
+  if (typeof config.executionId !== 'string' || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(config.executionId)) throw new Error('Invalid task execution');
+  if (typeof config.leaseToken !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(config.leaseToken)) throw new Error('Invalid task lease');
 }
 
-async function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | null> {
+async function ensureGooseSidecarSerialized(config: AgentGatewayConfig,assertCurrent:()=>void): Promise<string | null> {
   validateAgentGatewayConfig(config);
   const configuredBase = process.env.COD_GOOSE_ACP_URL;
   const configuredToken = process.env.COD_GOOSE_ACP_TOKEN;
   if (configuredBase && configuredToken) {
     const configured = new URL(configuredBase);
     configured.searchParams.set('token', configuredToken);
+    assertCurrent();
     gooseAcpUrl = configured.toString();
     return gooseAcpUrl;
   }
 
-  const configurationKey = createHash('sha256').update(`${config.token}\0${config.sourceId}\0${config.modelId}\0${config.taskId}`).digest('hex');
+  const configurationKey = createHash('sha256').update(`${config.token}\0${config.sourceId}\0${config.modelId}\0${config.taskId}\0${config.executionId}`).digest('hex');
   if (gooseAcpUrl && gooseConfigurationKey === configurationKey && gooseAgentTokenExpiresAt > Date.now() + 60_000) return gooseAcpUrl;
-  if (gooseSidecar) await stopGooseSidecar();
+  if (gooseSidecar) {await stopGooseSidecar();assertCurrent();}
 
   const packagedBinary = path.join(process.resourcesPath, 'bin', process.platform === 'win32' ? 'goose.exe' : 'goose');
   const binary = process.env.COD_GOOSE_BINARY ?? packagedBinary;
   try {
     await fs.access(binary);
   } catch {
+    assertCurrent();
     return null;
   }
+  assertCurrent();
   const controlPlane = new URL(process.env.COD_CONTROL_PLANE_URL ?? 'https://cod.kai.com');
   if (controlPlane.protocol !== 'https:' && process.env.NODE_ENV === 'production') {
     throw new Error('COD_CONTROL_PLANE_URL must use HTTPS in production');
   }
   const agentSession = await mintAgentSession(controlPlane, config);
+  assertCurrent();
   const gooseStateHome = await prepareGooseStateHome();
+  assertCurrent();
   const port = await availablePort();
+  assertCurrent();
   const secret = randomBytes(24).toString('hex');
   controlPlane.pathname = `${controlPlane.pathname.replace(/\/$/, '')}/v1/tasks/${encodeURIComponent(config.taskId)}/sources/${encodeURIComponent(config.sourceId)}`;
   controlPlane.search = '';
@@ -166,6 +176,7 @@ async function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | 
   spawnedSidecar.once('error', clearSpawnedSidecar);
   try {
     await waitForGoose(port, spawnedSidecar);
+    assertCurrent();
   } catch (error) {
     if (spawnedSidecar.exitCode === null && !spawnedSidecar.killed) spawnedSidecar.kill();
     clearSpawnedSidecar();
@@ -175,6 +186,14 @@ async function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | 
   gooseConfigurationKey = configurationKey;
   gooseAgentTokenExpiresAt = agentSession.expiresAt;
   return gooseAcpUrl;
+}
+
+function ensureGooseSidecar(config:AgentGatewayConfig):Promise<string|null>{
+  return gooseLaunchCoordinator.run((assertCurrent)=>ensureGooseSidecarSerialized(config,assertCurrent));
+}
+
+function invalidateAndStopGooseSidecar():Promise<void>{
+  return gooseLaunchCoordinator.invalidate(stopGooseSidecar);
 }
 
 async function resolveProjectRoot(root: string): Promise<string> {
@@ -240,6 +259,7 @@ async function createWindow() {
       sandbox: true,
       webSecurity: true,
       allowRunningInsecureContent: false,
+      backgroundThrottling: false,
       spellcheck: true,
     },
   });
@@ -255,6 +275,9 @@ async function createWindow() {
     if (isTrustedExternalUrl(url)) void shell.openExternal(url);
   });
   window.webContents.on('will-attach-webview', (event) => event.preventDefault());
+  window.webContents.on('did-start-navigation', (_event, _url, _isInPlace, isMainFrame) => { if (isMainFrame) void invalidateAndStopGooseSidecar(); });
+  window.webContents.on('render-process-gone', () => { void invalidateAndStopGooseSidecar(); });
+  window.webContents.on('destroyed', () => { void invalidateAndStopGooseSidecar(); });
 
   if (!app.isPackaged) {
     await window.loadURL(developmentUrl);
@@ -310,7 +333,7 @@ ipcMain.handle('cod:git-diff', async (_event, root: string) => {
 });
 
 ipcMain.handle('cod:get-goose-acp-url', (_event, config: AgentGatewayConfig) => ensureGooseSidecar(config));
-ipcMain.handle('cod:stop-goose', () => stopGooseSidecar());
+ipcMain.handle('cod:stop-goose', () => invalidateAndStopGooseSidecar());
 
 ipcMain.handle('cod:run-command', async (_event, root: string, rawCommand: string): Promise<TerminalResult> => {
   if (typeof rawCommand !== 'string' || rawCommand.length > 32 * 1024) {
@@ -345,6 +368,6 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
-  void stopGooseSidecar();
+  void invalidateAndStopGooseSidecar();
   if (process.platform !== 'darwin') app.quit();
 });

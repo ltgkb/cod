@@ -22,9 +22,17 @@ export interface ControlPlaneOptions {
 }
 
 const validStatuses = new Set<TaskStatus>(['draft', 'running', 'waiting', 'complete', 'failed', 'cancelled']);
+const uuidPattern=/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i;
 const userIdFor = (email: string) => `usr_${createHash('sha256').update(email).digest('hex').slice(0, 20)}`;
 const tenantIdFor = (email: string) => `tenant_${email.split('@')[1]?.replace(/[^a-z0-9]+/g, '_') ?? 'unknown'}`;
 const principalFromSession = (session: { sub: string; tenantId: string; email: string; role: Principal['role'] }): Principal => ({ userId: session.sub, tenantId: session.tenantId, email: session.email, role: session.role });
+
+function pathUuid(raw:string,message:string,code:string):string{
+  let value:string;
+  try{value=decodeURIComponent(raw);}catch{throw new HttpError(message,400,code);}
+  if(!uuidPattern.test(value))throw new HttpError(message,400,code);
+  return value;
+}
 
 type PublicModelSourceInfo = Pick<ModelSourceInfo, 'id' | 'label' | 'upstreamSourceId' | 'status' | 'callable' | 'paymentDirection' | 'models' | 'note'>;
 function publicModelCatalog(sources: ModelSourceInfo[]): PublicModelSourceInfo[] {
@@ -228,7 +236,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         response.setHeader('access-control-allow-origin', origin);
         response.setHeader('vary', 'Origin');
       }
-      response.setHeader('access-control-allow-headers', 'authorization,content-type,idempotency-key,x-request-id');
+      response.setHeader('access-control-allow-headers', 'authorization,content-type,idempotency-key,x-request-id,x-cod-task-execution,x-cod-task-lease');
       response.setHeader('access-control-allow-methods', 'GET,POST,OPTIONS');
       if (request.method === 'OPTIONS') return sendJson(response, 204, null);
       if (request.method === 'GET' && url.pathname === '/health') return sendJson(response, 200, { status: 'ok', service: 'cod-control-plane' });
@@ -356,18 +364,19 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       const principal=principalFromSession(session??agentSession!);
       if(request.method==='POST'&&url.pathname==='/api/agent-sessions'){
         if(!session)throw new HttpError('A full account session is required',403,'agent_scope_forbidden');
-        const body=await readJson<{taskId?:unknown;sourceId?:unknown;model?:unknown}>(request);
+        const body=await readJson<{taskId?:unknown;executionId?:unknown;leaseToken?:unknown;sourceId?:unknown;model?:unknown}>(request);
         const taskId=typeof body.taskId==='string'?body.taskId.trim():'';
+        const executionId=typeof body.executionId==='string'?body.executionId.trim():'';
+        const leaseToken=typeof body.leaseToken==='string'?body.leaseToken.trim():'';
         const sourceId=typeof body.sourceId==='string'?body.sourceId.trim():'';
         const model=typeof body.model==='string'?body.model.trim():'';
-        if(!/^[a-f0-9-]{36}$/i.test(taskId))throw new HttpError('Task ID is invalid',400,'invalid_task_id');
+        if(!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(taskId))throw new HttpError('Task ID is invalid',400,'invalid_task_id');
         if(!/^[a-z0-9-]{2,40}$/.test(sourceId))throw new HttpError('Model source is invalid',400,'invalid_source');
         if(!model||model.length>200)throw new HttpError('Model is invalid',400,'invalid_model');
-        const task=await database.getTask(principal,taskId);
-        if(task.status!=='running'&&task.status!=='waiting')throw new HttpError('Task is not running',409,task.status==='cancelled'?'task_cancelled':'task_not_running');
+        await database.assertTaskLease(principal,taskId,{executionId,leaseToken});
         await gateway.getModel(sourceId,model);
-        const issuedAt=Date.now();const scope={taskId,sourceId,model};const token=createAgentSessionToken(session,scope,config.sessionSecret,issuedAt);
-        await database.audit(principal,'agent_session.issue','task',taskId,{sourceId,model,expiresAt:new Date(issuedAt+AGENT_SESSION_TTL_MS).toISOString()});
+        const issuedAt=Date.now();const scope={taskId,executionId,sourceId,model};const token=createAgentSessionToken(session,scope,config.sessionSecret,issuedAt);
+        await database.audit(principal,'agent_session.issue','task',taskId,{executionId,sourceId,model,expiresAt:new Date(issuedAt+AGENT_SESSION_TTL_MS).toISOString()});
         return sendJson(response,201,{token,expiresAt:new Date(issuedAt+AGENT_SESSION_TTL_MS).toISOString(),scope});
       }
       if(request.method==='GET'&&url.pathname==='/api/referrals')return sendJson(response,200,await database.getReferralSummary(principal));
@@ -398,7 +407,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         if (!officialChannel) return sendJson(response,201,order);
         return sendJson(response,201,{order,checkout:await officialPayments.createCheckout(order)});
       }
-      if (request.method === 'GET' && url.pathname.match(/^\/api\/payment-orders\/[^/]+$/)) return sendJson(response,200,await database.getPaymentOrder(principal,url.pathname.split('/')[3]));
+      if (request.method === 'GET' && url.pathname.match(/^\/api\/payment-orders\/[^/]+$/)) return sendJson(response,200,await database.getPaymentOrder(principal,pathUuid(url.pathname.split('/')[3],'Payment order ID is invalid','invalid_payment_order_id')));
       if (request.method === 'GET' && url.pathname === '/api/audit') return sendJson(response, 200, await database.listAudit(principal, queryInteger(url.searchParams.get('limit'), 50, 200)));
       if (request.method === 'GET' && url.pathname === '/api/model-sources') return sendJson(response, 200, await gateway.listSources());
       if (request.method === 'GET' && url.pathname === '/api/models') return sendJson(response, 200, (await gateway.listSources()).flatMap((source) => source.models.map((model) => ({ ...model, sourceId: source.id }))));
@@ -412,11 +421,11 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       if (request.method === 'GET' && url.pathname === '/api/knowledge/search') return sendJson(response, 200, await knowledge.search(url.searchParams.get('q') ?? '', principal));
       if (request.method === 'GET' && url.pathname === '/api/devices') return sendJson(response, 200, await database.listDevices(principal));
       if (request.method === 'POST' && url.pathname === '/api/devices') { const device=await database.registerDevice(principal,await readJson(request)); await database.audit(principal,'device.register','device',device.id); return sendJson(response,201,device); }
-      if (request.method === 'POST' && url.pathname.match(/^\/api\/devices\/[^/]+\/heartbeat$/)) return sendJson(response, 200, await database.heartbeat(principal, url.pathname.split('/')[3]));
+      if (request.method === 'POST' && url.pathname.match(/^\/api\/devices\/[^/]+\/heartbeat$/)) {const deviceId=pathUuid(url.pathname.split('/')[3],'Device ID is invalid','invalid_device_id');const body=await readJson<{taskId?:unknown;executionId?:unknown;leaseToken?:unknown}>(request);const hasLease=body.taskId!==undefined||body.executionId!==undefined||body.leaseToken!==undefined;const taskLease=hasLease?{taskId:typeof body.taskId==='string'?body.taskId:'',executionId:typeof body.executionId==='string'?body.executionId:'',leaseToken:typeof body.leaseToken==='string'?body.leaseToken:''}:undefined;return sendJson(response,200,await database.heartbeat(principal,deviceId,taskLease));}
       if (request.method === 'GET' && url.pathname === '/api/tasks') return sendJson(response, 200, await database.listTasks(principal));
-      if (request.method === 'POST' && url.pathname === '/api/tasks') { const task=await database.createTask(principal,await readJson(request)); await database.audit(principal,'task.create','task',task.id); return sendJson(response,201,task); }
+      if (request.method === 'POST' && url.pathname === '/api/tasks') {const body=await readJson<{title:string;deviceId:string}>(request);if(typeof body.deviceId!=='string'||!uuidPattern.test(body.deviceId))throw new HttpError('Device ID is invalid',400,'invalid_device_id');const task=await database.createTask(principal,body);await database.audit(principal,'task.create','task',task.id);return sendJson(response,201,task);}
       if (request.method === 'POST' && url.pathname.match(/^\/api\/tasks\/[^/]+\/cancel$/)) {
-        const taskId=decodeURIComponent(url.pathname.split('/')[3]);
+        const taskId=pathUuid(url.pathname.split('/')[3],'Task ID is invalid','invalid_task_id');
         const body=await readJson<{expectedVersion?:number}>(request);
         if(!Number.isInteger(body.expectedVersion)||Number(body.expectedVersion)<1)throw new HttpError('Expected task version is required',400,'invalid_task_version');
         const task=await database.updateTask(principal,taskId,'cancelled',Number(body.expectedVersion),{result:null,error:null});
@@ -424,7 +433,11 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         await database.audit(principal,'task.cancel','task',task.id,{cancelledRequests});
         return sendJson(response,200,{task,cancelledRequests});
       }
-      if (request.method === 'POST' && url.pathname.match(/^\/api\/tasks\/[^/]+\/status$/)) { const body=await readJson<{status:TaskStatus;expectedVersion:number;result?:string|null;error?:string|null}>(request); if(!validStatuses.has(body.status)) throw new HttpError('Invalid task status',400,'invalid_status'); const task=await database.updateTask(principal,url.pathname.split('/')[3],body.status,body.expectedVersion,{result:body.result,error:body.error}); await database.audit(principal,'task.status','task',task.id,{status:body.status,hasResult:Boolean(body.result),hasError:Boolean(body.error)}); return sendJson(response,200,task); }
+      if (request.method === 'POST' && url.pathname.match(/^\/api\/tasks\/[^/]+\/status$/)) {
+        const body=await readJson<{status:TaskStatus;expectedVersion:number;result?:string|null;error?:string|null;claimId?:string;executionId?:string;leaseToken?:string}>(request);if(!validStatuses.has(body.status))throw new HttpError('Invalid task status',400,'invalid_status');if(!Number.isInteger(body.expectedVersion)||body.expectedVersion<1)throw new HttpError('Expected task version is required',400,'invalid_task_version');const taskId=pathUuid(url.pathname.split('/')[3],'Task ID is invalid','invalid_task_id');
+        if(body.status==='running'){const current=await database.getTask(principal,taskId);const isClaim=body.claimId!==undefined||(current.status!=='running'&&current.status!=='waiting');if(isClaim){const claim=await database.claimTask(principal,taskId,body.expectedVersion,{claimId:typeof body.claimId==='string'?body.claimId:'',leaseToken:typeof body.leaseToken==='string'?body.leaseToken:''});if(!claim.replayed)await database.audit(principal,'task.status','task',claim.task.id,{status:'running'});return sendJson(response,200,{...claim.task,execution:{executionId:claim.executionId,leaseToken:claim.leaseToken,leaseExpiresAt:claim.leaseExpiresAt}});}const execution=body.executionId||body.leaseToken?{executionId:body.executionId??'',leaseToken:body.leaseToken??''}:undefined;const task=await database.updateTask(principal,taskId,'running',body.expectedVersion,{result:body.result,error:body.error},execution);await database.audit(principal,'task.status','task',task.id,{status:'running'});return sendJson(response,200,task);}
+        const execution=body.executionId||body.leaseToken?{executionId:body.executionId??'',leaseToken:body.leaseToken??''}:undefined;const task=await database.updateTask(principal,taskId,body.status,body.expectedVersion,{result:body.result,error:body.error},execution);await database.audit(principal,'task.status','task',task.id,{status:body.status,hasResult:Boolean(body.result),hasError:Boolean(body.error)});return sendJson(response,200,task);
+      }
       if (request.method === 'GET' && url.pathname === '/api/events') return sendJson(response, 200, await database.eventsAfter(principal, queryInteger(url.searchParams.get('cursor'), 0)));
       if (request.method === 'POST' && url.pathname === '/api/topups') {
         if (!config.developmentTopupEnabled) throw new HttpError('Direct top-up is disabled; use a verified payment callback', 403, 'topup_disabled');
@@ -442,35 +455,37 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         if(!Array.isArray(body.messages) || body.messages.length === 0 || body.messages.length > 40)throw new HttpError('Chat must contain between 1 and 40 messages',400,'invalid_messages');
         const validMessages = body.messages.every(isValidChatMessage);
         if (!validMessages) throw new HttpError('Chat messages are invalid',400,'invalid_messages');
-        const routeTaskId=chatRoute[1]?decodeURIComponent(chatRoute[1]):null;
+        const routeTaskId=chatRoute[1]?pathUuid(chatRoute[1],'Task ID is invalid','invalid_task_id'):null;
         const bodyTaskId=body.task_id===undefined?null:typeof body.task_id==='string'?body.task_id.trim():'';
         if(body.task_id!==undefined&&!bodyTaskId)throw new HttpError('Task ID is invalid',400,'invalid_task_id');
         if(routeTaskId&&bodyTaskId&&routeTaskId!==bodyTaskId)throw new HttpError('Task conflicts with the gateway route',400,'task_conflict');
         const taskId=routeTaskId??bodyTaskId;
-        if(taskId&&(!/^[a-f0-9-]{36}$/i.test(taskId)))throw new HttpError('Task ID is invalid',400,'invalid_task_id');
-        if(taskId){const task=await database.getTask(principal,taskId);if(task.status!=='running'&&task.status!=='waiting')throw new HttpError('Task is not running',409,task.status==='cancelled'?'task_cancelled':'task_not_running');}
+        if(taskId&&!uuidPattern.test(taskId))throw new HttpError('Task ID is invalid',400,'invalid_task_id');
+        let taskExecutionId:string|undefined;
+        if(taskId){if(agentSession){taskExecutionId=agentSession.executionId;await database.assertTaskExecution(principal,taskId,taskExecutionId);}else{const executionId=typeof request.headers['x-cod-task-execution']==='string'?request.headers['x-cod-task-execution']:'';const leaseToken=typeof request.headers['x-cod-task-lease']==='string'?request.headers['x-cod-task-lease']:'';await database.assertTaskLease(principal,taskId,{executionId,leaseToken});taskExecutionId=executionId;}}
         const routeSource = chatRoute[2];
         if (routeSource && body.source && routeSource !== body.source) throw new HttpError('Model source conflicts with the gateway route', 400, 'source_conflict');
         const sourceId=routeSource??body.source??(config.modelSources.some((source)=>source.apiKey)?config.modelSources.find((source)=>source.apiKey)!.id:'demo');
         const model=typeof body.model==='string'?body.model.trim():'';
         if(!model)throw new HttpError('Model is required',400,'model_required');
-        if(agentSession&&(taskId!==agentSession.taskId||sourceId!==agentSession.sourceId||model!==agentSession.model))throw new HttpError('Agent session does not permit this chat request',403,'agent_scope_forbidden');
+        if(agentSession&&(taskId!==agentSession.taskId||taskExecutionId!==agentSession.executionId||sourceId!==agentSession.sourceId||model!==agentSession.model))throw new HttpError('Agent session does not permit this chat request',403,'agent_scope_forbidden');
         const selection=await gateway.getModel(sourceId,model);const fallbackCandidate=sourceId==='demo'?null:await gateway.getFallbackModel(sourceId,model);
         const maxOutput=Number(body.max_completion_tokens??body.max_tokens??4096);if(!Number.isInteger(maxOutput)||maxOutput<1||maxOutput>20_000)throw new HttpError('Invalid max output tokens; COD allows at most 20000',400,'invalid_max_tokens');
         const {source: _source,task_id: _taskId, ...rawProviderBody}=body;const providerMaxOutput=Math.max(512,maxOutput);const providerBody={...rawProviderBody,stream:false,...(body.max_completion_tokens!==undefined?{max_completion_tokens:providerMaxOutput}:{max_tokens:providerMaxOutput})};
-        const requestFingerprint=createHash('sha256').update(canonicalJson({taskId:taskId??null,sourceId,providerBody})).digest('hex');
+        const requestFingerprint=createHash('sha256').update(canonicalJson({taskId:taskId??null,taskExecutionId:taskExecutionId??null,sourceId,providerBody})).digest('hex');
         const requestKey=agentSession?`agent:${agentSession.jti}:${requestFingerprint}`:requestId;
         const upstreamRequestKey=`cod-${createHash('sha256').update(canonicalJson({tenantId:principal.tenantId,userId:principal.userId,requestKey,requestFingerprint})).digest('hex').slice(0,48)}`;
-        const claim=await database.claimChatRequest(principal,requestKey,requestFingerprint);
+        const claim=await database.claimChatRequest(principal,requestKey,requestFingerprint,taskExecutionId);
         if(claim.state==='pending')throw new HttpError('An identical chat request is still in progress',409,'chat_request_in_progress');
         if(claim.state==='complete'){sendChatResult(response,claim.responsePayload,clientRequestedStream,requestId);return;}
         const reservationId=randomUUID();const estimatedInput=estimatedInputTokens(providerBody);const reservedCost=Math.max(gateway.costCents(selection.model,estimatedInput,providerMaxOutput),fallbackCandidate?gateway.costCents(fallbackCandidate,estimatedInput,providerMaxOutput):0);
         const controller=new AbortController();let markReservationReady:()=>void=()=>undefined;const reservationReady=new Promise<void>((resolve)=>{markReservationReady=resolve;});const activeChat:ActiveChatRequest={controller,reservationId,reservationReady,state:'active'};const unregisterActiveChat=taskId?registerActiveChat(principal,taskId,activeChat):()=>undefined;
+        const leaseKeepalive=taskId&&taskExecutionId?setInterval(()=>{void database.renewTaskExecution(principal,taskId,taskExecutionId).catch((error)=>controller.abort(error));},30_000):null;leaseKeepalive?.unref();
         const cancelOnDisconnect=()=>{if(!response.writableEnded&&!controller.signal.aborted)controller.abort(new HttpError('Client disconnected',409,'client_disconnected'));};response.once('close',cancelOnDisconnect);
         let chatSettled=false;
-        const failChatClaim=async()=>{try{await database.failChatRequest(principal,requestKey,requestFingerprint);}catch(failure){console.error(JSON.stringify({level:'error',event:'chat.claim.fail_failed',requestId,taskId:taskId??null,sourceId,error:failure instanceof Error?failure.message:String(failure)}));}};
+        const failChatClaim=async()=>{try{await database.failChatRequest(principal,requestKey,requestFingerprint,taskExecutionId);}catch(failure){console.error(JSON.stringify({level:'error',event:'chat.claim.fail_failed',requestId,taskId:taskId??null,sourceId,error:failure instanceof Error?failure.message:String(failure)}));}};
         try {
-          await database.reserveUsage(principal,reservationId,reservedCost);markReservationReady();if(controller.signal.aborted)throw controller.signal.reason;
+          await database.reserveUsage(principal,reservationId,reservedCost,taskId&&taskExecutionId?{taskId,executionId:taskExecutionId}:undefined);markReservationReady();if(controller.signal.aborted)throw controller.signal.reason;
           let actualModel=model;let actualSelection=selection;let actualProviderBody=providerBody;let fallbackReason:'empty'|'length'|null=null;let upstream=await gateway.proxyChat(sourceId,actualProviderBody,upstreamRequestKey,controller.signal);let raw=await readResponseBuffer(upstream);if(controller.signal.aborted)throw controller.signal.reason;
           if(!upstream.ok){await database.releaseUsage(principal,reservationId);await failChatClaim();response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}
           let parsed:unknown;try{parsed=JSON.parse(raw.toString('utf8')) as unknown;}catch{throw new HttpError('Model returned an invalid response',502,'invalid_model_response');}let content=assistantContentFromResponse(parsed);let toolCalls=assistantToolCallsFromResponse(parsed);
@@ -482,10 +497,10 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
           if(Buffer.byteLength(JSON.stringify(result),'utf8')>CHAT_RESPONSE_CACHE_MAX_BYTES)throw new HttpError('Model response is too large to cache safely',502,'chat_response_cache_too_large');
           if(controller.signal.aborted)throw controller.signal.reason;
           activeChat.state='settling';
-          await database.settleUsage(principal,reservationId,{idempotencyKey:`chat:${requestKey}:${requestFingerprint}`,taskId:taskId??'chat',sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection,model:actualModel,inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,costCents,commissionRateBps,commissionCents},{requestKey,fingerprint:requestFingerprint,responsePayload:result,audit:{entityId:actualModel,data:{taskId:taskId??null,requestedModel:model,fallbackUsed:actualModel!==model,fallbackReason,sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection,...usage,costCents,commissionRateBps,commissionCents}}});activeChat.state='settled';chatSettled=true;
+          await database.settleUsage(principal,reservationId,{idempotencyKey:`chat:${requestKey}:${requestFingerprint}`,taskId:taskId??'chat',sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection,model:actualModel,inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,costCents,commissionRateBps,commissionCents},{requestKey,fingerprint:requestFingerprint,executionId:taskExecutionId,responsePayload:result,audit:{entityId:actualModel,data:{taskId:taskId??null,executionId:taskExecutionId??null,requestedModel:model,fallbackUsed:actualModel!==model,fallbackReason,sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection,...usage,costCents,commissionRateBps,commissionCents}}},taskExecutionId);activeChat.state='settled';chatSettled=true;
           sendChatResult(response,result,clientRequestedStream,requestId);return;
         } catch(error) { markReservationReady();if(!chatSettled)await failChatClaim();await database.releaseUsage(principal,reservationId);if(controller.signal.aborted)throw controller.signal.reason instanceof HttpError?controller.signal.reason:new HttpError('Task was cancelled',409,'task_cancelled');throw error; }
-        finally { response.removeListener('close',cancelOnDisconnect);unregisterActiveChat(); }
+        finally { if(leaseKeepalive)clearInterval(leaseKeepalive);response.removeListener('close',cancelOnDisconnect);unregisterActiveChat(); }
       }
       return sendJson(response, 404, { error: 'not_found' });
     } catch (error) {
