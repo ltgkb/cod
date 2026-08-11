@@ -499,7 +499,7 @@ button:active { transform: translateY(1px); }
 .model-library-intro { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; }
 .model-library-intro h2 { margin: 7px 0 6px; color: var(--ink); font-size: 21px; letter-spacing: -.03em; }
 .model-library-intro p, .model-library-footer p { margin: 0; color: var(--muted-foreground); font-size: 10px; line-height: 1.65; }
-.model-library-summary { display: grid; grid-template-columns: repeat(2, 92px); flex: 0 0 auto; border: 1px solid var(--border-subtle); }
+.model-library-summary { display: grid; grid-template-columns: repeat(3, 78px); flex: 0 0 auto; border: 1px solid var(--border-subtle); }
 .model-library-summary span { display: grid; gap: 4px; padding: 10px 12px; background: var(--field-01); border-right: 1px solid var(--border-subtle); }
 .model-library-summary span:last-child { border-right: 0; }
 .model-library-summary small { color: var(--muted-foreground); font-size: 8px; }
@@ -529,6 +529,7 @@ button:active { transform: translateY(1px); }
 .model-price { color: var(--ink) !important; font: 10px var(--mono) !important; }
 .model-row i { padding: 3px 5px; color: var(--warning); background: var(--warning-soft); font-size: 8px; font-style: normal; white-space: nowrap; }
 .model-row i.available { color: var(--success); background: var(--success-soft); }
+.model-row .source-preview { display: block; overflow: hidden; margin-top: 4px; color: var(--muted-foreground); font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
 .model-library-empty { display: flex; align-items: center; justify-content: center; gap: 7px; min-height: 100px; color: var(--muted-foreground); background: var(--field-01); border: 1px dashed var(--border-strong); font-size: 10px; }
 .model-library-footer { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding-top: 2px; }
 .model-library-footer .primary-button { flex: 0 0 auto; }
@@ -671,7 +672,7 @@ button:active { transform: translateY(1px); }
   .modal { max-height: calc(100dvh - 16px); }
   .model-library { padding: 14px; }
   .model-library-intro { align-items: stretch; flex-direction: column; gap: 12px; }
-  .model-library-summary { grid-template-columns: repeat(2, 1fr); }
+  .model-library-summary { grid-template-columns: repeat(3, 1fr); }
   .model-library-footer { align-items: stretch; flex-direction: column; }
   .compute-market { padding: 12px; }
   .compute-hero { align-items: stretch; flex-direction: column; }

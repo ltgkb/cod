@@ -85,6 +85,7 @@ import {
 } from './api';
 import { hasDesktopBridge, loadProject, openProject, readProjectFile } from './desktop';
 import { chatFailureMessage } from './chat-errors';
+import { filterModelCatalog, groupModelCatalog } from './model-catalog';
 import { permissionOptionLabel, presentPermissionOptions } from './permissions';
 import { MarkdownContent } from './presentation';
 import type { InspectorTab, ProjectSnapshot, WorkspaceMode } from './types';
@@ -218,23 +219,19 @@ function LoginForm({ capabilities, capabilityError, resumeConversation, onLogin,
 
 function ModelLibrary({ sources, error, signedIn, onLogin }: { sources: PublicModelSourceInfo[]; error: string; signedIn: boolean; onLogin: () => void }) {
   const [query, setQuery] = useState('');
-  const normalizedQuery = query.trim().toLowerCase();
-  const visibleSources = sources.map((source) => ({
-    ...source,
-    models: source.models.filter((model) => !normalizedQuery || `${source.label} ${model.label} ${model.id}`.toLowerCase().includes(normalizedQuery)),
-  })).filter((source) => source.models.length > 0);
-  const availableModels = sources.filter((source) => source.callable).reduce((total, source) => total + source.models.length, 0);
-  const catalogModels = sources.reduce((total, source) => total + source.models.length, 0);
-  const statusLabel = (source: PublicModelSourceInfo) => source.callable ? '当前可用' : source.status === 'catalog' ? '价格目录' : source.status === 'demo' ? '演示可用' : '暂不可用';
+  const groupedModels = useMemo(() => groupModelCatalog(sources), [sources]);
+  const visibleModels = useMemo(() => filterModelCatalog(groupedModels, query), [groupedModels, query]);
+  const availableModels = groupedModels.filter((group) => group.callable).length;
+  const availableSources = sources.filter((source) => source.callable).length;
   const price = (cents: number) => `¥ ${(cents / 100).toFixed(2)}`;
   return <div className="model-library">
-    <div className="model-library-intro"><div><span className="eyebrow">MODEL CATALOG</span><h2>模型与参考价格</h2><p>所有价格均为人民币，每百万 Token 计价。输入与输出价格分别展示，方便调用前预估成本。</p></div><div className="model-library-summary"><span><small>当前可用</small><strong>{availableModels}</strong></span><span><small>目录模型</small><strong>{catalogModels}</strong></span></div></div>
+    <div className="model-library-intro"><div><span className="eyebrow">MODEL CATALOG</span><h2>模型与参考价格</h2><p>所有价格均为人民币，每百万 Token 计价。相同模型与价格合并展示，来源仍可搜索。</p></div><div className="model-library-summary"><span><small>可用模型</small><strong>{availableModels}</strong></span><span><small>价格条目</small><strong>{groupedModels.length}</strong></span><span><small>服务来源</small><strong>{sources.length}</strong></span></div></div>
     <label className="model-search"><MagnifyingGlass /><input aria-label="搜索模型" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索模型或模型源" /></label>
     {error && <div className="notice error">{error}</div>}
     {!error && !sources.length && <div className="model-library-empty"><CircleNotch className="spin" /> 正在读取模型目录…</div>}
-    {sources.length > 0 && !visibleSources.length && <div className="model-library-empty">没有匹配的模型</div>}
-    <div className="model-source-list">{visibleSources.map((source) => <section className="model-source-card" key={source.id}><header><div><strong>{source.label}</strong><small>{source.note}</small></div><span className={source.callable ? 'available' : source.status}>{statusLabel(source)}</span></header><div className="model-table" role="table" aria-label={`${source.label} 模型价格`}><div className="model-row model-table-head" role="row"><span role="columnheader">模型</span><span role="columnheader">上下文</span><span role="columnheader">输入 / 百万</span><span role="columnheader">输出 / 百万</span><span role="columnheader">状态</span></div>{source.models.map((model) => <div className="model-row" role="row" key={model.id}><span role="cell"><strong>{model.label}</strong><small>{model.id}</small></span><span role="cell">{model.contextWindow > 0 ? model.contextWindow.toLocaleString('zh-CN') : '暂无'}</span><span role="cell" className="model-price">{price(model.inputPricePerMillionCents)}</span><span role="cell" className="model-price">{price(model.outputPricePerMillionCents)}</span><span role="cell"><i className={source.callable ? 'available' : 'unavailable'}>{source.callable ? '可调用' : '仅参考'}</i></span></div>)}</div></section>)}</div>
-    <footer className="model-library-footer"><p>所有展示来源统一由 ai.kai.com 实际调用；来源只用于界面选择、业务归因和后续分成。价格按实际 Token 用量结算。</p>{!signedIn && <button className="primary-button" onClick={onLogin}><Key /> 登录后使用模型</button>}</footer>
+    {sources.length > 0 && !visibleModels.length && <div className="model-library-empty">没有匹配的模型</div>}
+    {visibleModels.length > 0 && <div className="model-source-list"><section className="model-source-card"><header><div><strong>统一价格目录</strong><small>{sources.length} 个服务来源；重复模型已合并，价格差异会保留为独立条目。</small></div><span className={availableSources ? 'available' : 'unavailable'}>{availableSources ? `${availableSources} 个来源可用` : '暂不可用'}</span></header><div className="model-table" role="table" aria-label="COD 模型价格"><div className="model-row model-table-head" role="row"><span role="columnheader">模型</span><span role="columnheader">上下文</span><span role="columnheader">输入 / 百万</span><span role="columnheader">输出 / 百万</span><span role="columnheader">可用来源</span></div>{visibleModels.map((group) => { const callableSources = group.sources.filter((source) => source.callable); const sourcePreview = callableSources.slice(0, 2).map((source) => source.label).join(' / '); return <div className="model-row" role="row" key={group.key}><span role="cell"><strong>{group.model.label}</strong><small>{group.model.id}</small></span><span role="cell">{group.model.contextWindow > 0 ? group.model.contextWindow.toLocaleString('zh-CN') : '暂无'}</span><span role="cell" className="model-price">{price(group.model.inputPricePerMillionCents)}</span><span role="cell" className="model-price">{price(group.model.outputPricePerMillionCents)}</span><span role="cell"><i className={group.callable ? 'available' : 'unavailable'}>{group.callable ? '可调用' : '仅参考'}</i>{sourcePreview && <small className="source-preview">{callableSources.length} 个来源 · {sourcePreview}{callableSources.length > 2 ? ' 等' : ''}</small>}</span></div>; })}</div></section></div>}
+    <footer className="model-library-footer"><p>当前所有展示来源统一由 ai.kai.com 实际调用；来源用于界面选择和业务归因。价格按实际 Token 用量结算。</p>{!signedIn && <button className="primary-button" onClick={onLogin}><Key /> 登录后使用模型</button>}</footer>
   </div>;
 }
 
