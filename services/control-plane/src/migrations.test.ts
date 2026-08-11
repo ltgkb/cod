@@ -69,16 +69,18 @@ describe('production-safe migrations and rate limits', () => {
     expect(databaseSource).toContain('ALTER TABLE cod_tasks VALIDATE CONSTRAINT cod_tasks_execution_lease_check');
   });
 
-  it('trusts only the observed ALB subnet and isolates heartbeat bursts', () => {
+  it('trusts only the observed multi-AZ ALB subnets and isolates heartbeat bursts', () => {
     const httpConfig = readFileSync(new URL('../../../deploy/nginx-http.conf', import.meta.url), 'utf8');
     const siteConfig = readFileSync(new URL('../../../deploy/cod.nginx.conf', import.meta.url), 'utf8');
 
-    expect(httpConfig).toContain('set_real_ip_from 172.31.0.0/20;');
+    for (const subnet of ['172.31.0.0/20', '172.31.16.0/20', '172.31.32.0/20']) {
+      expect(httpConfig).toContain(`set_real_ip_from ${subnet};`);
+      expect(httpConfig).toContain(`${subnet} 1;`);
+    }
     expect(httpConfig).toContain('real_ip_header X-Forwarded-For;');
     expect(httpConfig).toContain('real_ip_recursive on;');
-    expect(httpConfig).not.toMatch(/set_real_ip_from\s+(?:0\.0\.0\.0\/0|10\.0\.0\.0\/8|172\.16\.0\.0\/12)/);
+    expect(httpConfig).not.toMatch(/set_real_ip_from\s+(?:0\.0\.0\.0\/0|10\.0\.0\.0\/8|172\.16\.0\.0\/12|172\.31\.0\.0\/16)/);
     expect(httpConfig).toContain('geo $realip_remote_addr $cod_trusted_origin_peer');
-    expect(httpConfig).toContain('172.31.0.0/20 1;');
     expect(httpConfig).not.toMatch(/geo\s+\$remote_addr\s+\$cod_trusted_origin_peer/);
     expect(siteConfig.match(/if \(\$cod_trusted_origin_peer = 0\)/g)).toHaveLength(3);
     expect(siteConfig).toContain('return 308 https://cod.kai.com$request_uri;');
