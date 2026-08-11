@@ -8,6 +8,8 @@ interface MetricKey {
 
 const requests = new Map<string, { key: MetricKey; count: number; durationSeconds: number }>();
 let inflight = 0;
+let usageReservationLeaseFailures = 0;
+let usageReservationsReaped = 0;
 
 function normalizedRoute(pathname: string): string {
   return pathname
@@ -35,6 +37,14 @@ export function recordRequest(method: string, pathname: string, status: number, 
   requests.set(serialized, current);
 }
 
+export function recordUsageReservationLeaseFailure(): void {
+  usageReservationLeaseFailures += 1;
+}
+
+export function recordUsageReservationsReaped(count: number): void {
+  if (Number.isSafeInteger(count) && count > 0) usageReservationsReaped += count;
+}
+
 export function renderMetrics(databaseReady: boolean): string {
   const lines = [
     '# HELP cod_process_uptime_seconds Control-plane process uptime.',
@@ -48,6 +58,12 @@ export function renderMetrics(databaseReady: boolean): string {
     `cod_database_ready ${databaseReady ? 1 : 0}`,
     '# HELP cod_http_requests_total Completed HTTP requests.',
     '# TYPE cod_http_requests_total counter',
+    '# HELP cod_usage_reservation_lease_failures_total Usage calls aborted after reservation lease renewal failed.',
+    '# TYPE cod_usage_reservation_lease_failures_total counter',
+    `cod_usage_reservation_lease_failures_total ${usageReservationLeaseFailures}`,
+    '# HELP cod_usage_reservations_reaped_total Expired usage reservations released and refunded.',
+    '# TYPE cod_usage_reservations_reaped_total counter',
+    `cod_usage_reservations_reaped_total ${usageReservationsReaped}`,
   ];
   for (const metric of requests.values()) {
     const labels = `method="${escapeLabel(metric.key.method)}",route="${escapeLabel(metric.key.route)}",status="${metric.key.status}"`;

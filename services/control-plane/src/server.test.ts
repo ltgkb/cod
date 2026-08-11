@@ -4,17 +4,17 @@ import { assistantContentFromResponse, assistantFinishReasonFromResponse, assist
 import { loadConfig } from './config.js';
 import { AiGateway } from './gateway.js';
 import { MemoryDatabase } from './memory-database.js';
+import { USAGE_RESERVATION_LEASE_DURATION_MS } from './database.js';
 
 const servers: Array<ReturnType<typeof createControlPlane>> = [];
 const taskClaim=(expectedVersion:number,marker='A')=>({status:'running' as const,expectedVersion,claimId:marker.repeat(43),leaseToken:(marker==='Z'?'Y':'Z').repeat(43)});
 afterEach(async () => Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve())))));
 
-async function start(overrides: Record<string, string> = {}, gatewayFetcher?:typeof fetch) {
-  const database = new MemoryDatabase();
+async function start(overrides: Record<string, string> = {}, gatewayFetcher?:typeof fetch, database=new MemoryDatabase(), reservationKeepaliveIntervalMs?:number) {
   const email='developer@kai.com';
   await database.registerIdentity({userId:`usr_${createHash('sha256').update(email).digest('hex').slice(0,20)}`,tenantId:'tenant_kai_com',email,role:'member'},'scrypt$16384$8$1$dGVzdC1hdXRoLXNhbHQtMQ$OkZEwwvTyk_BXs8umIBKldU3L-Oit-AkHANDBB81kdN0CCW6-5kqg9cGUwmetGRwxs9g_NiohCkGSni7NtcayQ',null,false);
   const config = loadConfig({ NODE_ENV: 'test', COD_DEVELOPMENT_LOGIN_ENABLED: 'true', COD_DEVELOPMENT_LOGIN_EMAIL: 'developer@kai.com', COD_DEVELOPMENT_TOPUP_ENABLED: 'false', ...overrides });
-  const server = createControlPlane({ config, database, ...(gatewayFetcher?{gateway:new AiGateway(config,gatewayFetcher)}:{}) }); servers.push(server);
+  const server = createControlPlane({ config, database, ...(gatewayFetcher?{gateway:new AiGateway(config,gatewayFetcher)}:{}), ...(reservationKeepaliveIntervalMs?{reservationKeepaliveIntervalMs}:{}) }); servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address(); if (!address || typeof address === 'string') throw new Error('missing address');
   return { base: `http://127.0.0.1:${address.port}`, database };
@@ -351,6 +351,36 @@ describe('control-plane production rules', () => {
     expect((await database.getCreditSummary(principal)).availableCents).toBe(999);
   });
 
+  it('renews a reservation during a slow upstream call and stops renewing before settlement',async()=>{
+    const database=new MemoryDatabase();const originalRenew=database.renewUsageReservation.bind(database);const originalSettle=database.settleUsage.bind(database);let renewals=0;let leaseRemainingAtSettlement=0;
+    vi.spyOn(database,'renewUsageReservation').mockImplementation(async(...args)=>{renewals+=1;await originalRenew(...args);});
+    vi.spyOn(database,'settleUsage').mockImplementation(async(...args)=>{const states=(database as unknown as {users:Map<string,{reservations:Map<string,{leaseExpiresAt:number}>}>}).users;const reservation=[...states.values()].flatMap((state)=>[...state.reservations.entries()]).find(([id])=>id===args[1])?.[1];leaseRemainingAtSettlement=(reservation?.leaseExpiresAt??0)-Date.now();return originalSettle(...args);});
+    let markProviderStarted:()=>void=()=>undefined;const providerStarted=new Promise<void>((resolve)=>{markProviderStarted=resolve;});let releaseProvider:()=>void=()=>undefined;
+    const fetcher=vi.fn(async(input:RequestInfo|URL):Promise<Response>=>{const url=String(input);if(url.endsWith('/api/pricing'))return Response.json({data:[{model_name:'lease-model',quota_type:0,model_ratio:1,completion_ratio:1,supported_endpoint_types:['openai']}]});if(url.endsWith('/api/status'))return Response.json({data:{quota_per_unit:500000,price:7}});if(url.endsWith('/models'))return Response.json({data:[{id:'lease-model'}]});if(url.endsWith('/chat/completions')){markProviderStarted();return new Promise<Response>((resolve)=>{releaseProvider=()=>resolve(Response.json({choices:[{message:{role:'assistant',content:'lease kept alive'},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1}}));});}throw new Error(`Unexpected provider request: ${url}`);});
+    const {base}=await start({KAI_API_KEY:'test-key',KAI_AI_BASE_URL:'https://lease.example/v1',KAI_AI_CATALOG_URL:'https://lease.example/api/pricing',KAI_AI_STATUS_URL:'https://lease.example/api/status'},fetcher as typeof fetch,database,5);
+    const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com',password:'Password123'})});const {token,user}=await login.json() as {token:string;user:{id:string;email:string}};
+    const chat=fetch(`${base}/v1/chat/completions`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','x-request-id':'lease-success'},body:JSON.stringify({source:'ai-kai',model:'lease-model',messages:[{role:'user',content:'wait'}]})});
+    await providerStarted;await vi.waitFor(()=>expect(renewals).toBeGreaterThan(0));releaseProvider();const response=await chat;expect(response.status).toBe(200);
+    expect(leaseRemainingAtSettlement).toBeGreaterThan(USAGE_RESERVATION_LEASE_DURATION_MS-1000);
+    const renewalsAfterSettlement=renewals;await new Promise((resolve)=>setTimeout(resolve,20));expect(renewals).toBe(renewalsAfterSettlement);
+    const principal={userId:user.id,tenantId:'tenant_kai_com',email:user.email,role:'member' as const};expect(await database.getLedger(principal)).toHaveLength(2);expect((await database.getCreditSummary(principal)).availableCents).toBe(999);
+  });
+
+  it('aborts and refunds an in-flight model call when reservation renewal fails',async()=>{
+    const database=new MemoryDatabase();let renewalAttempts=0;
+    vi.spyOn(database,'renewUsageReservation').mockImplementation(async()=>{renewalAttempts+=1;throw new Error('database password=do-not-expose');});
+    let markProviderStarted:()=>void=()=>undefined;const providerStarted=new Promise<void>((resolve)=>{markProviderStarted=resolve;});let providerAborted=false;
+    const fetcher=vi.fn(async(input:RequestInfo|URL,init?:RequestInit):Promise<Response>=>{const url=String(input);if(url.endsWith('/api/pricing'))return Response.json({data:[{model_name:'lease-fail-model',quota_type:0,model_ratio:1,completion_ratio:1,supported_endpoint_types:['openai']}]});if(url.endsWith('/api/status'))return Response.json({data:{quota_per_unit:500000,price:7}});if(url.endsWith('/models'))return Response.json({data:[{id:'lease-fail-model'}]});if(url.endsWith('/chat/completions')){markProviderStarted();return new Promise<Response>((_resolve,reject)=>{const signal=init?.signal;if(signal?.aborted){providerAborted=true;reject(signal.reason);return;}signal?.addEventListener('abort',()=>{providerAborted=true;reject(signal.reason);},{once:true});});}throw new Error(`Unexpected provider request: ${url}`);});
+    const errorLog=vi.spyOn(console,'error').mockImplementation(()=>undefined);
+    const {base}=await start({KAI_API_KEY:'test-key',KAI_AI_BASE_URL:'https://lease-fail.example/v1',KAI_AI_CATALOG_URL:'https://lease-fail.example/api/pricing',KAI_AI_STATUS_URL:'https://lease-fail.example/api/status'},fetcher as typeof fetch,database,5);
+    const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com',password:'Password123'})});const {token,user}=await login.json() as {token:string;user:{id:string;email:string}};
+    const chat=fetch(`${base}/v1/chat/completions`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','x-request-id':'lease-failure'},body:JSON.stringify({source:'ai-kai',model:'lease-fail-model',messages:[{role:'user',content:'wait'}]})});
+    await providerStarted;const response=await chat;expect(response.status).toBe(503);const failure=await response.json() as {error:string;message:string};expect(failure).toEqual({error:'reservation_lease_renewal_failed',message:'Usage reservation lease renewal failed'});expect(JSON.stringify(failure)).not.toContain('do-not-expose');expect(providerAborted).toBe(true);expect(renewalAttempts).toBe(1);
+    await new Promise((resolve)=>setTimeout(resolve,20));expect(renewalAttempts).toBe(1);
+    const principal={userId:user.id,tenantId:'tenant_kai_com',email:user.email,role:'member' as const};expect(await database.getLedger(principal)).toHaveLength(1);expect((await database.getCreditSummary(principal)).availableCents).toBe(1000);
+    const metrics=await (await fetch(`${base}/metrics`)).text();expect(metrics).toMatch(/cod_usage_reservation_lease_failures_total [1-9]\d*/);expect(errorLog).toHaveBeenCalledWith(expect.stringContaining('"event":"usage.reservation.renew_failed"'));errorLog.mockRestore();
+  });
+
   it('cancels an in-flight task, aborts its provider request, and restores the full reservation',async()=>{
     let markProviderStarted:()=>void=()=>undefined;const providerStarted=new Promise<void>((resolve)=>{markProviderStarted=resolve;});let providerAborted=false;
     const fetcher=vi.fn(async(input:RequestInfo|URL,init?:RequestInit):Promise<Response>=>{
@@ -472,5 +502,6 @@ describe('control-plane production rules', () => {
     const metrics = await (await fetch(`${base}/metrics`)).text();
     expect(metrics).toContain('cod_database_ready 1');
     expect(metrics).toContain('cod_http_requests_total');
+    expect(metrics).toContain('cod_usage_reservations_reaped_total');
   });
 });

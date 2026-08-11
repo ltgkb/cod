@@ -3,6 +3,7 @@ import { Pool, type PoolClient } from 'pg';
 import type { AccountSummary, DeviceRecord, TaskStatus, UsageEvent } from '@cod/contracts';
 import { HttpError } from './errors.js';
 import type { ComputeRequest, ComputeRequestInput } from './compute-market.js';
+import { recordUsageReservationsReaped } from './metrics.js';
 
 export interface Principal {
   userId: string;
@@ -201,6 +202,8 @@ export interface CodDatabase {
   claimChatRequest(principal: Principal, requestKey: string, fingerprint: string, executionId?: string): Promise<ChatRequestClaim>;
   failChatRequest(principal: Principal, requestKey: string, fingerprint: string, executionId?: string): Promise<void>;
   reserveUsage(principal: Principal, reservationId: string, amountCents: number, taskExecution?: { taskId: string; executionId: string }): Promise<void>;
+  renewUsageReservation(principal: Principal, reservationId: string): Promise<void>;
+  reapExpiredUsageReservations(limit?: number): Promise<number>;
   settleUsage(principal: Principal, reservationId: string, event: UsageEvent, completion?: ChatRequestCompletion, executionId?: string): Promise<LedgerEntry>;
   releaseUsage(principal: Principal, reservationId: string): Promise<void>;
   createComputeRequest(principal: Principal, input: ComputeRequestInput, idempotencyKey: string): Promise<ComputeRequest>;
@@ -225,6 +228,10 @@ export interface CodDatabase {
 const devicePlatforms = new Set<DeviceRecord['platform']>(['macos', 'windows', 'linux', 'web', 'mobile']);
 export const DEVICE_OFFLINE_AFTER_MS = 45_000;
 export const TASK_LEASE_DURATION_MS = 90_000;
+export const USAGE_RESERVATION_LEASE_DURATION_MS = 90_000;
+export const USAGE_RESERVATION_KEEPALIVE_INTERVAL_MS = 30_000;
+export const USAGE_RESERVATION_REAP_BATCH_SIZE = 100;
+export const USAGE_RESERVATION_REAP_INTERVAL_MS = 60_000;
 export const TASK_LEASE_EXPIRED_ERROR = '执行设备已断开，任务租约过期，本次执行已中断。请检查项目状态后重新执行。';
 export const LEGACY_TASK_INTERRUPTED_ERROR = '服务升级后无法确认原执行会话仍在运行，任务已安全中断。请检查项目状态后重新执行。';
 const taskExecutionIdPattern = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i;
@@ -392,6 +399,35 @@ END
 $task_execution_lease$;
 `;
 
+export const usageReservationLeaseSchemaMigration = `
+ALTER TABLE cod_usage_reservations ADD COLUMN IF NOT EXISTS lease_expires_at timestamptz;
+UPDATE cod_usage_reservations
+SET lease_expires_at=CASE WHEN status='reserved' THEN now()+interval '15 minutes' ELSE updated_at END
+WHERE lease_expires_at IS NULL;
+ALTER TABLE cod_usage_reservations ALTER COLUMN lease_expires_at SET DEFAULT (now()+interval '90 seconds');
+ALTER TABLE cod_usage_reservations ALTER COLUMN lease_expires_at SET NOT NULL;
+CREATE INDEX IF NOT EXISTS cod_usage_reservations_expired_lease_idx
+  ON cod_usage_reservations(lease_expires_at,id) WHERE status='reserved';
+`;
+
+export const usageReservationReapSql = `
+WITH candidates AS (
+  SELECT id
+  FROM cod_usage_reservations
+  WHERE status='reserved' AND lease_expires_at<=statement_timestamp()
+  ORDER BY lease_expires_at,id
+  LIMIT $1
+  FOR UPDATE SKIP LOCKED
+), released AS (
+  UPDATE cod_usage_reservations r
+  SET status='released',updated_at=now()
+  FROM candidates c
+  WHERE r.id=c.id AND r.status='reserved' AND r.lease_expires_at<=statement_timestamp()
+  RETURNING r.id,r.tenant_id,r.user_id,r.wallet_cents,r.grant_allocations
+)
+SELECT * FROM released;
+`;
+
 const schema = `
 CREATE TABLE IF NOT EXISTS cod_users (
   tenant_id text NOT NULL, user_id text NOT NULL, email text NOT NULL, display_name text NOT NULL,
@@ -436,6 +472,7 @@ ALTER TABLE cod_credit_grants ADD CONSTRAINT cod_credit_grants_purchase_price_ce
 CREATE TABLE IF NOT EXISTS cod_usage_reservations (
   id uuid PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL, amount_cents bigint NOT NULL CHECK (amount_cents >= 0),
   status text NOT NULL CHECK (status IN ('reserved','settled','released')), task_id uuid, task_execution_id uuid,
+  lease_expires_at timestamptz NOT NULL DEFAULT (now()+interval '90 seconds'),
   created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
 );
 ALTER TABLE cod_usage_reservations ADD COLUMN IF NOT EXISTS task_id uuid;
@@ -445,6 +482,7 @@ UPDATE cod_usage_reservations SET wallet_cents=amount_cents WHERE wallet_cents I
 ALTER TABLE cod_usage_reservations ALTER COLUMN wallet_cents SET DEFAULT 0;
 ALTER TABLE cod_usage_reservations ALTER COLUMN wallet_cents SET NOT NULL;
 ALTER TABLE cod_usage_reservations ADD COLUMN IF NOT EXISTS grant_allocations jsonb NOT NULL DEFAULT '[]';
+${usageReservationLeaseSchemaMigration}
 ${chatRequestSchemaMigration}
 ${walletOpeningBalanceMigration}
 CREATE TABLE IF NOT EXISTS cod_payment_orders (
@@ -542,6 +580,8 @@ const taskFromRow = (row: Record<string, unknown>): SyncedTask => ({ id: String(
 
 export class PostgresDatabase implements CodDatabase {
   private readonly pool: Pool;
+  private reservationReaperTimer: NodeJS.Timeout | null = null;
+  private reservationReaperRun: Promise<number> | null = null;
   constructor(databaseUrl: string) {
     this.pool = new Pool({ connectionString: databaseUrl, max: 10, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 5_000 });
     // PostgreSQL can report an error on an idle pooled client after a restart or
@@ -554,21 +594,15 @@ export class PostgresDatabase implements CodDatabase {
   async initialize() {
     await this.pool.query(schema);
     await this.transaction(async (client) => {
-      const orphaned = await client.query(`UPDATE cod_usage_reservations SET status='released',updated_at=now() WHERE status='reserved' RETURNING tenant_id,user_id,wallet_cents,grant_allocations`);
-      const refunds = new Map<string, { tenantId: string; userId: string; amountCents: number }>();
-      for (const row of orphaned.rows) {
-        const tenantId=String(row.tenant_id); const userId=String(row.user_id); const key=`${tenantId}:${userId}`;
-        const current=refunds.get(key); refunds.set(key,{tenantId,userId,amountCents:(current?.amountCents??0)+Number(row.wallet_cents)});
-        await this.restoreGrants(client, parseGrantAllocations(row.grant_allocations));
-      }
-      for (const refund of refunds.values()) await client.query('UPDATE cod_users SET balance_cents=balance_cents+$3,updated_at=now() WHERE tenant_id=$1 AND user_id=$2',[refund.tenantId,refund.userId,refund.amountCents]);
       await client.query(`UPDATE cod_tasks SET execution_id=NULL,claim_id_hash=NULL,lease_token_hash=NULL,lease_expires_at=NULL
         WHERE status NOT IN ('running','waiting') AND (execution_id IS NOT NULL OR claim_id_hash IS NOT NULL OR lease_token_hash IS NOT NULL OR lease_expires_at IS NOT NULL)`);
       await this.expireTaskLeases(client);
       await client.query('ALTER TABLE cod_tasks VALIDATE CONSTRAINT cod_tasks_execution_lease_check');
     });
+    await this.reapExpiredUsageReservations();
+    this.startUsageReservationReaper();
   }
-  async close() { await this.pool.end(); }
+  async close() { if(this.reservationReaperTimer){clearInterval(this.reservationReaperTimer);this.reservationReaperTimer=null;}if(this.reservationReaperRun)await this.reservationReaperRun.catch(()=>undefined);await this.pool.end(); }
   async health() { try { await this.pool.query('SELECT 1'); return true; } catch { return false; } }
   async ensurePrincipal(p: Principal) {
     await this.transaction(async(client)=>{
@@ -761,15 +795,36 @@ export class PostgresDatabase implements CodDatabase {
   async reserveUsage(p: Principal,reservationId:string,amountCents:number,taskExecution?:{taskId:string;executionId:string}) {
     if(!Number.isInteger(amountCents)||amountCents<0) throw new HttpError('Reservation amount is invalid',400,'invalid_reservation');
     if(taskExecution&&(!taskExecutionIdPattern.test(taskExecution.taskId)||!taskExecutionIdPattern.test(taskExecution.executionId)))throw new HttpError('Task execution is invalid',400,'invalid_task_execution');
+    await this.reapExpiredUsageReservations();
     if(taskExecution)await this.reapTaskLeases(p,taskExecution.taskId);
     const reservableAmount=p.role==='admin'?0:amountCents;
     await this.transaction(async(client)=>{
-      const existing=await client.query('SELECT status,task_id,task_execution_id FROM cod_usage_reservations WHERE id=$1 AND tenant_id=$2 AND user_id=$3',[reservationId,p.tenantId,p.userId]);
-      if(existing.rows[0]){if((existing.rows[0].task_id?String(existing.rows[0].task_id):null)!==(taskExecution?.taskId??null)||(existing.rows[0].task_execution_id?String(existing.rows[0].task_execution_id):null)!==(taskExecution?.executionId??null))throw new HttpError('Reservation belongs to another task execution',409,'reservation_execution_conflict');return;}
+      const existing=await client.query('SELECT status,task_id,task_execution_id,lease_expires_at>clock_timestamp() AS lease_active FROM cod_usage_reservations WHERE id=$1 AND tenant_id=$2 AND user_id=$3',[reservationId,p.tenantId,p.userId]);
+      if(existing.rows[0]){if((existing.rows[0].task_id?String(existing.rows[0].task_id):null)!==(taskExecution?.taskId??null)||(existing.rows[0].task_execution_id?String(existing.rows[0].task_execution_id):null)!==(taskExecution?.executionId??null))throw new HttpError('Reservation belongs to another task execution',409,'reservation_execution_conflict');if(existing.rows[0].status!=='reserved'||existing.rows[0].lease_active!==true)throw new HttpError('Usage reservation lease is no longer active',409,'reservation_lease_expired');return;}
       if(taskExecution){const task=await client.query(`SELECT 1 FROM cod_tasks WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND execution_id=$4 AND status IN ('running','waiting') AND lease_expires_at>now() FOR UPDATE`,[taskExecution.taskId,p.tenantId,p.userId,taskExecution.executionId]);if(!task.rows[0])throw new HttpError('Task execution lease is no longer active',409,'task_lease_expired');}
       const allocation=await this.allocateFunds(client,p,reservableAmount);
-      await client.query(`INSERT INTO cod_usage_reservations (id,tenant_id,user_id,amount_cents,wallet_cents,grant_allocations,task_id,task_execution_id,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'reserved')`,[reservationId,p.tenantId,p.userId,reservableAmount,allocation.walletCents,JSON.stringify(allocation.grantAllocations),taskExecution?.taskId??null,taskExecution?.executionId??null]);
+      await client.query(`INSERT INTO cod_usage_reservations (id,tenant_id,user_id,amount_cents,wallet_cents,grant_allocations,task_id,task_execution_id,status,lease_expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'reserved',clock_timestamp()+$9::double precision*interval '1 millisecond')`,[reservationId,p.tenantId,p.userId,reservableAmount,allocation.walletCents,JSON.stringify(allocation.grantAllocations),taskExecution?.taskId??null,taskExecution?.executionId??null,USAGE_RESERVATION_LEASE_DURATION_MS]);
     });
+  }
+  async renewUsageReservation(p:Principal,reservationId:string):Promise<void>{
+    const renewed=await this.pool.query(`UPDATE cod_usage_reservations SET lease_expires_at=clock_timestamp()+$4::double precision*interval '1 millisecond',updated_at=now() WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND status='reserved' AND lease_expires_at>clock_timestamp()`,[reservationId,p.tenantId,p.userId,USAGE_RESERVATION_LEASE_DURATION_MS]);
+    if(renewed.rowCount!==1)throw new HttpError('Usage reservation lease is no longer active',409,'reservation_lease_expired');
+  }
+  async reapExpiredUsageReservations(limit:number=USAGE_RESERVATION_REAP_BATCH_SIZE):Promise<number>{
+    const boundedLimit=Math.min(Math.max(Number.isFinite(limit)?Math.trunc(limit):USAGE_RESERVATION_REAP_BATCH_SIZE,1),USAGE_RESERVATION_REAP_BATCH_SIZE);
+    const count=await this.transaction(async(client)=>{
+      const released=await client.query(usageReservationReapSql,[boundedLimit]);
+      const refunds=new Map<string,{tenantId:string;userId:string;amountCents:number}>();
+      for(const row of released.rows){
+        const tenantId=String(row.tenant_id);const userId=String(row.user_id);const key=`${tenantId}:${userId}`;const current=refunds.get(key);
+        refunds.set(key,{tenantId,userId,amountCents:(current?.amountCents??0)+Number(row.wallet_cents)});
+        await this.restoreGrants(client,parseGrantAllocations(row.grant_allocations));
+      }
+      for(const refund of refunds.values())if(refund.amountCents>0)await client.query('UPDATE cod_users SET balance_cents=balance_cents+$3,updated_at=now() WHERE tenant_id=$1 AND user_id=$2',[refund.tenantId,refund.userId,refund.amountCents]);
+      return released.rowCount??released.rows.length;
+    });
+    if(count>0){recordUsageReservationsReaped(count);console.info(JSON.stringify({level:'info',event:'usage.reservations.reaped',count,limit:boundedLimit}));}
+    return count;
   }
   async settleUsage(p:Principal,reservationId:string,event:UsageEvent,completion?:ChatRequestCompletion,executionId?:string) {
     if(!Number.isInteger(event.costCents)||event.costCents<0)throw new HttpError('Usage cost is invalid',400,'invalid_usage');
@@ -794,7 +849,7 @@ export class PostgresDatabase implements CodDatabase {
         if((row.task_execution_id?String(row.task_execution_id):null)!==(completion.executionId??null))throw new HttpError('Chat request belongs to another task execution',409,'chat_request_not_claimed');
         if(row.status==='failed')throw new HttpError('Chat request is no longer pending',409,'chat_request_not_pending');
       }
-      const reservation=await client.query(`SELECT * FROM cod_usage_reservations WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE`,[reservationId,p.tenantId,p.userId]);
+      const reservation=await client.query(`SELECT *,lease_expires_at>clock_timestamp() AS lease_active FROM cod_usage_reservations WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE`,[reservationId,p.tenantId,p.userId]);
       const existing=await client.query('SELECT * FROM cod_ledger WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3',[p.tenantId,p.userId,event.idempotencyKey]);
       if(existing.rows[0]){
         if(event.taskId!=='chat'&&((reservation.rows[0]?.task_id?String(reservation.rows[0].task_id):null)!==event.taskId||(reservation.rows[0]?.task_execution_id?String(reservation.rows[0].task_execution_id):null)!==executionId))throw new HttpError('Reservation belongs to another task execution',409,'reservation_execution_conflict');
@@ -812,7 +867,7 @@ export class PostgresDatabase implements CodDatabase {
         if(!task.rows[0])throw new HttpError('Task execution lease is no longer active',409,'task_lease_expired');
       }
       if(completion&&chatRequest?.rows[0]?.status==='complete')throw new HttpError('Completed chat request is missing its billing record',500,'chat_billing_inconsistent');
-      if(!reservation.rows[0]||reservation.rows[0].status!=='reserved')throw new HttpError('Usage reservation not found',409,'reservation_not_found');
+      if(!reservation.rows[0]||reservation.rows[0].status!=='reserved'||reservation.rows[0].lease_active!==true)throw new HttpError('Usage reservation lease is no longer active',409,'reservation_lease_expired');
       const billedEvent=p.role==='admin'?{...event,costCents:0,paymentDirection:'管理员测试免计费',commissionRateBps:0,commissionCents:0}:event;
       const reservedGrants=parseGrantAllocations(reservation.rows[0].grant_allocations);const reservedWallet=Number(reservation.rows[0].wallet_cents);let remaining=billedEvent.costCents;let creditConsumed=0;
       for(const allocation of reservedGrants){const consumed=Math.min(allocation.amountCents,remaining);creditConsumed+=consumed;remaining-=consumed;const refund=allocation.amountCents-consumed;if(refund>0)await this.restoreGrants(client,[{grantId:allocation.grantId,amountCents:refund}]);}
@@ -1014,6 +1069,15 @@ export class PostgresDatabase implements CodDatabase {
   private async insertUsageLedger(client:PoolClient,p:Principal,event:UsageEvent,walletCents:number,creditCents:number):Promise<LedgerEntry>{
     const inserted=await client.query(`INSERT INTO cod_ledger (id,tenant_id,user_id,type,amount_cents,wallet_amount_cents,credit_amount_cents,reference,idempotency_key,source_id,upstream_source_id,model_id,payment_direction,commission_rate_bps,commission_cents) VALUES ($1,$2,$3,'usage',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,[randomUUID(),p.tenantId,p.userId,-event.costCents,-walletCents,-creditCents,`${event.sourceId}:${event.model}:${event.taskId}`,event.idempotencyKey,event.sourceId,event.upstreamSourceId??'ai-kai',event.model,event.paymentDirection,event.commissionRateBps??0,event.commissionCents??0]);
     return ledgerFromRow(inserted.rows[0]);
+  }
+  private startUsageReservationReaper():void{
+    if(this.reservationReaperTimer)return;
+    this.reservationReaperTimer=setInterval(()=>{
+      if(this.reservationReaperRun)return;
+      const run=this.reapExpiredUsageReservations();this.reservationReaperRun=run;
+      void run.catch((error:unknown)=>console.error(JSON.stringify({level:'error',event:'usage.reservations.reap_failed',error:error instanceof Error?error.message:String(error)}))).finally(()=>{if(this.reservationReaperRun===run)this.reservationReaperRun=null;});
+    },USAGE_RESERVATION_REAP_INTERVAL_MS);
+    this.reservationReaperTimer.unref();
   }
   private async append(p:Principal,type:TaskEvent['type'],entityId:string,data:unknown) { await this.pool.query('INSERT INTO cod_events (tenant_id,user_id,type,entity_id,data) VALUES ($1,$2,$3,$4,$5)',[p.tenantId,p.userId,type,entityId,JSON.stringify(data)]); }
   private async transaction<T>(run:(client:PoolClient)=>Promise<T>):Promise<T> { const client=await this.pool.connect(); try { await client.query('BEGIN'); const value=await run(client); await client.query('COMMIT'); return value; } catch(error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); } }

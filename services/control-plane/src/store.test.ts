@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest';
-import type { Principal } from './database.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { USAGE_RESERVATION_LEASE_DURATION_MS, USAGE_RESERVATION_REAP_INTERVAL_MS, type Principal } from './database.js';
 import { MemoryDatabase } from './memory-database.js';
 
 const principal: Principal = { userId: 'user_demo', tenantId: 'tenant_kai_com', email: 'developer@kai.com', role: 'member' };
+afterEach(()=>vi.useRealTimers());
 
 describe('wallet database contract', () => {
   it('applies top-ups and usage exactly once', async () => {
@@ -33,6 +34,62 @@ describe('wallet database contract', () => {
     await database.reserveUsage(principal, 'reserve-2', 100);
     await database.releaseUsage(principal, 'reserve-2');
     expect((await database.getCreditSummary(principal)).availableCents).toBe(960);
+  });
+
+  it('renews active reservation leases and reaps an expired multi-grant hold exactly once',async()=>{
+    vi.useFakeTimers();vi.setSystemTime(new Date('2026-08-11T00:00:00Z'));
+    const database=new MemoryDatabase();
+    await database.topup(principal,{idempotencyKey:'lease-wallet',amountCents:3000,channel:'pilot'});
+    await database.purchaseCreditPack(principal,'starter','lease-pack');
+    expect(await database.getCreditSummary(principal)).toMatchObject({availableCents:3000});
+    expect(await database.getAccount(principal)).toMatchObject({balanceCents:1000});
+    await database.reserveUsage(principal,'lease-multi-grant',2500);
+    expect(await database.getCreditSummary(principal)).toMatchObject({availableCents:500});
+    vi.advanceTimersByTime(USAGE_RESERVATION_LEASE_DURATION_MS-10_000);
+    await database.renewUsageReservation(principal,'lease-multi-grant');
+    vi.advanceTimersByTime(20_000);
+    expect(await database.reapExpiredUsageReservations()).toBe(0);
+    vi.advanceTimersByTime(USAGE_RESERVATION_LEASE_DURATION_MS-20_000);
+    const concurrent=await Promise.all([database.reapExpiredUsageReservations(1),database.reapExpiredUsageReservations(1)]);
+    expect(concurrent).toEqual([1,0]);
+    expect(await database.getCreditSummary(principal)).toMatchObject({availableCents:3000});
+    expect(await database.getAccount(principal)).toMatchObject({balanceCents:1000});
+    expect(await database.reapExpiredUsageReservations()).toBe(0);
+    await database.releaseUsage(principal,'lease-multi-grant');
+    expect(await database.getCreditSummary(principal)).toMatchObject({availableCents:3000});
+    await expect(database.settleUsage(principal,'lease-multi-grant',{idempotencyKey:'late-settle',taskId:'chat',sourceId:'ai-kai',paymentDirection:'钱包 → ai.kai.com',model:'coder-pro',inputTokens:1,outputTokens:1,costCents:1})).rejects.toMatchObject({status:409,code:'reservation_lease_expired'});
+  });
+
+  it('bounds each reservation reaper pass',async()=>{
+    vi.useFakeTimers();vi.setSystemTime(new Date('2026-08-11T00:00:00Z'));
+    const database=new MemoryDatabase();
+    await database.reserveUsage(principal,'bounded-1',100);
+    await database.reserveUsage(principal,'bounded-2',100);
+    vi.advanceTimersByTime(USAGE_RESERVATION_LEASE_DURATION_MS);
+    expect(await database.reapExpiredUsageReservations(1)).toBe(1);
+    expect(await database.getCreditSummary(principal)).toMatchObject({availableCents:900});
+    expect(await database.reapExpiredUsageReservations(1)).toBe(1);
+    expect(await database.getCreditSummary(principal)).toMatchObject({availableCents:1000});
+  });
+
+  it('fences renew-versus-reaper races at the lease boundary',async()=>{
+    vi.useFakeTimers();vi.setSystemTime(new Date('2026-08-11T00:00:00Z'));
+    const database=new MemoryDatabase();await database.reserveUsage(principal,'lease-race',100);
+    vi.advanceTimersByTime(USAGE_RESERVATION_LEASE_DURATION_MS-1);
+    const activeRace=await Promise.allSettled([database.renewUsageReservation(principal,'lease-race'),database.reapExpiredUsageReservations(1)]);
+    expect(activeRace[0]).toMatchObject({status:'fulfilled'});expect(activeRace[1]).toMatchObject({status:'fulfilled',value:0});
+    vi.advanceTimersByTime(USAGE_RESERVATION_LEASE_DURATION_MS);
+    const expiredRace=await Promise.allSettled([database.reapExpiredUsageReservations(1),database.renewUsageReservation(principal,'lease-race')]);
+    expect(expiredRace[0]).toMatchObject({status:'fulfilled',value:1});expect(expiredRace[1]).toMatchObject({status:'rejected',reason:expect.objectContaining({code:'reservation_lease_expired'})});
+    expect(await database.getCreditSummary(principal)).toMatchObject({availableCents:1000});expect(await database.reapExpiredUsageReservations()).toBe(0);
+  });
+
+  it('runs a bounded background reaper after initialization and stops it on close',async()=>{
+    vi.useFakeTimers();vi.setSystemTime(new Date('2026-08-11T00:00:00Z'));
+    const database=new MemoryDatabase();await database.reserveUsage(principal,'background-reap',100);const reap=vi.spyOn(database,'reapExpiredUsageReservations');await database.initialize();
+    await vi.advanceTimersByTimeAsync(USAGE_RESERVATION_LEASE_DURATION_MS+USAGE_RESERVATION_REAP_INTERVAL_MS);
+    expect(await database.getCreditSummary(principal)).toMatchObject({availableCents:1000});expect(reap.mock.calls.length).toBeGreaterThan(1);
+    await database.close();const callsAfterClose=reap.mock.calls.length;await vi.advanceTimersByTimeAsync(USAGE_RESERVATION_REAP_INTERVAL_MS*2);expect(reap).toHaveBeenCalledTimes(callsAfterClose);
   });
 
   it('commits a cached chat response and its completion audit once with usage',async()=>{

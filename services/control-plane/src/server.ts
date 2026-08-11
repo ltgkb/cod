@@ -4,14 +4,14 @@ import type { TaskStatus, UsageEvent } from '@cod/contracts';
 import { AGENT_SESSION_TTL_MS, createAgentSessionToken, createSessionToken, hashPassword, validatePassword, verifyAgentSessionToken, verifyPassword, verifySessionToken } from './auth.js';
 import { BotService, parseBotCommand, parseFeishuWebhook, replyFeishuMessage, verifyWebhookSignature, type BotPlatform } from './bots.js';
 import { loadConfig, type ControlPlaneConfig } from './config.js';
-import { CHAT_RESPONSE_CACHE_MAX_BYTES, creditPackCatalog, type CodDatabase, type Principal, PostgresDatabase, type TopupRequest } from './database.js';
+import { CHAT_RESPONSE_CACHE_MAX_BYTES, USAGE_RESERVATION_KEEPALIVE_INTERVAL_MS, creditPackCatalog, type CodDatabase, type Principal, PostgresDatabase, type TopupRequest } from './database.js';
 import { errorResponse, HttpError } from './errors.js';
 import { AiGateway, type ModelSourceInfo } from './gateway.js';
 import { bearerToken, readJson, readText, sendJson, sendText } from './http.js';
 import { KnowledgeAdapter } from './knowledge.js';
 import { MemoryDatabase } from './memory-database.js';
 import { ProductRegistry } from './products.js';
-import { beginRequest, recordRequest, renderMetrics } from './metrics.js';
+import { beginRequest, recordRequest, recordUsageReservationLeaseFailure, renderMetrics } from './metrics.js';
 import { computeOfferCatalog, validateComputeRequest } from './compute-market.js';
 import { OfficialPaymentService } from './payments.js';
 
@@ -19,6 +19,7 @@ export interface ControlPlaneOptions {
   config?: ControlPlaneConfig;
   database?: CodDatabase;
   gateway?: AiGateway;
+  reservationKeepaliveIntervalMs?: number;
 }
 
 const validStatuses = new Set<TaskStatus>(['draft', 'running', 'waiting', 'complete', 'failed', 'cancelled']);
@@ -193,6 +194,50 @@ function queryInteger(raw: string | null, fallback: number, maximum = Number.MAX
   return value;
 }
 
+function startUsageReservationKeepalive(
+  database: CodDatabase,
+  principal: Principal,
+  reservationId: string,
+  controller: AbortController,
+  intervalMs: number,
+  context: { requestId: string; taskId: string | null; sourceId: string },
+): () => Promise<void> {
+  let stopped = false;
+  let renewal: Promise<void> | null = null;
+  let renewalFailure: HttpError | null = null;
+  let failureReported = false;
+  const reportFailure = () => {
+    if (!renewalFailure || failureReported) return;
+    failureReported = true;
+    recordUsageReservationLeaseFailure();
+    console.error(JSON.stringify({ level: 'error', event: 'usage.reservation.renew_failed', requestId: context.requestId, taskId: context.taskId, sourceId: context.sourceId, error: renewalFailure.message }));
+    if (!controller.signal.aborted) controller.abort(renewalFailure);
+  };
+  const timer = setInterval(() => {
+    if (stopped || renewal) return;
+    renewal = database.renewUsageReservation(principal, reservationId)
+      .catch((error: unknown) => {
+        renewalFailure = error instanceof HttpError ? error : new HttpError('Usage reservation lease renewal failed', 503, 'reservation_lease_renewal_failed');
+        if (!stopped) {
+          stopped = true;
+          clearInterval(timer);
+        }
+        reportFailure();
+      })
+      .finally(() => { renewal = null; });
+  }, intervalMs);
+  timer.unref();
+  return async () => {
+    if (!stopped) {
+      stopped = true;
+      clearInterval(timer);
+    }
+    const activeRenewal = renewal;
+    if (activeRenewal) await activeRenewal;
+    reportFailure();
+  };
+}
+
 export function createControlPlane(options: ControlPlaneOptions = {}) {
   const config = options.config ?? loadConfig();
   const database = options.database ?? (config.databaseUrl ? new PostgresDatabase(config.databaseUrl) : new MemoryDatabase());
@@ -200,6 +245,9 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
   const knowledge = new KnowledgeAdapter(config);
   const products = new ProductRegistry(config);
   const officialPayments = new OfficialPaymentService(config);
+  const reservationKeepaliveIntervalMs = Number.isFinite(options.reservationKeepaliveIntervalMs)
+    ? Math.max(1, Math.trunc(options.reservationKeepaliveIntervalMs!))
+    : USAGE_RESERVATION_KEEPALIVE_INTERVAL_MS;
   const seenFeishuMessages = new Set<string>();
   interface ActiveChatRequest { controller: AbortController; reservationId: string; reservationReady: Promise<void>; state: 'active' | 'settling' | 'settled' }
   const activeChats = new Map<string, Set<ActiveChatRequest>>();
@@ -483,24 +531,29 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         const leaseKeepalive=taskId&&taskExecutionId?setInterval(()=>{void database.renewTaskExecution(principal,taskId,taskExecutionId).catch((error)=>controller.abort(error));},30_000):null;leaseKeepalive?.unref();
         const cancelOnDisconnect=()=>{if(!response.writableEnded&&!controller.signal.aborted)controller.abort(new HttpError('Client disconnected',409,'client_disconnected'));};response.once('close',cancelOnDisconnect);
         let chatSettled=false;
+        let stopReservationKeepalive:(()=>Promise<void>)|null=null;
+        const stopReservationLease=async()=>{const stop=stopReservationKeepalive;stopReservationKeepalive=null;if(stop)await stop();};
         const failChatClaim=async()=>{try{await database.failChatRequest(principal,requestKey,requestFingerprint,taskExecutionId);}catch(failure){console.error(JSON.stringify({level:'error',event:'chat.claim.fail_failed',requestId,taskId:taskId??null,sourceId,error:failure instanceof Error?failure.message:String(failure)}));}};
         try {
           await database.reserveUsage(principal,reservationId,reservedCost,taskId&&taskExecutionId?{taskId,executionId:taskExecutionId}:undefined);markReservationReady();if(controller.signal.aborted)throw controller.signal.reason;
+          stopReservationKeepalive=startUsageReservationKeepalive(database,principal,reservationId,controller,reservationKeepaliveIntervalMs,{requestId,taskId:taskId??null,sourceId});
           let actualModel=model;let actualSelection=selection;let actualProviderBody=providerBody;let fallbackReason:'empty'|'length'|null=null;let upstream=await gateway.proxyChat(sourceId,actualProviderBody,upstreamRequestKey,controller.signal);let raw=await readResponseBuffer(upstream);if(controller.signal.aborted)throw controller.signal.reason;
-          if(!upstream.ok){await database.releaseUsage(principal,reservationId);await failChatClaim();response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}
+          if(!upstream.ok){await stopReservationLease();if(controller.signal.aborted)throw controller.signal.reason;await database.releaseUsage(principal,reservationId);await failChatClaim();response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}
           let parsed:unknown;try{parsed=JSON.parse(raw.toString('utf8')) as unknown;}catch{throw new HttpError('Model returned an invalid response',502,'invalid_model_response');}let content=assistantContentFromResponse(parsed);let toolCalls=assistantToolCallsFromResponse(parsed);
           const primaryHasAction=assistantHasAction(parsed);const primaryIncomplete=assistantResponseIsIncomplete(parsed);
-          if((!primaryHasAction||primaryIncomplete)&&fallbackCandidate){fallbackReason=primaryIncomplete?'length':'empty';actualModel=fallbackCandidate.id;actualSelection={source:selection.source,model:fallbackCandidate};actualProviderBody={...providerBody,model:actualModel};upstream=await gateway.proxyChat(sourceId,actualProviderBody,`${upstreamRequestKey}-fallback`,controller.signal);raw=await readResponseBuffer(upstream);if(controller.signal.aborted)throw controller.signal.reason;if(!upstream.ok){await database.releaseUsage(principal,reservationId);await failChatClaim();response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}try{parsed=JSON.parse(raw.toString('utf8')) as unknown;}catch{throw new HttpError('Fallback model returned an invalid response',502,'invalid_model_response');}content=assistantContentFromResponse(parsed);toolCalls=assistantToolCallsFromResponse(parsed);}
+          if((!primaryHasAction||primaryIncomplete)&&fallbackCandidate){fallbackReason=primaryIncomplete?'length':'empty';actualModel=fallbackCandidate.id;actualSelection={source:selection.source,model:fallbackCandidate};actualProviderBody={...providerBody,model:actualModel};upstream=await gateway.proxyChat(sourceId,actualProviderBody,`${upstreamRequestKey}-fallback`,controller.signal);raw=await readResponseBuffer(upstream);if(controller.signal.aborted)throw controller.signal.reason;if(!upstream.ok){await stopReservationLease();if(controller.signal.aborted)throw controller.signal.reason;await database.releaseUsage(principal,reservationId);await failChatClaim();response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}try{parsed=JSON.parse(raw.toString('utf8')) as unknown;}catch{throw new HttpError('Fallback model returned an invalid response',502,'invalid_model_response');}content=assistantContentFromResponse(parsed);toolCalls=assistantToolCallsFromResponse(parsed);}
           if(!assistantHasAction(parsed))throw new HttpError('Model returned an empty response after retry and fallback',502,'empty_model_response');if(assistantResponseIsIncomplete(parsed))throw new HttpError('Model output reached its token limit after fallback',502,'incomplete_model_response');const usage=usageFromResponse(parsed,actualProviderBody,content??JSON.stringify(toolCalls));
           const calculatedCostCents=gateway.costCents(actualSelection.model,usage.inputTokens,usage.outputTokens);const billingExempt=principal.role==='admin';const costCents=billingExempt?0:calculatedCostCents;const commissionRateBps=billingExempt?0:actualSelection.source.commissionRateBps;const commissionCents=billingExempt?0:Math.round(costCents*commissionRateBps/10_000);const paymentDirection=billingExempt?'管理员测试免计费':actualSelection.source.paymentDirection;
           const result={...(parsed as Record<string,unknown>),model:actualModel,usage:{...((parsed as {usage?:Record<string,unknown>}).usage??{}),prompt_tokens:usage.inputTokens,completion_tokens:usage.outputTokens,total_tokens:usage.inputTokens+usage.outputTokens},cod_source:sourceId,cod_upstream_source:actualSelection.source.upstreamSourceId,cod_payment_direction:paymentDirection,cod_charge_cents:costCents,cod_commission_rate_bps:commissionRateBps,cod_usage_estimated:usage.estimated,cod_requested_model:model,cod_fallback_used:actualModel!==model,cod_fallback_reason:fallbackReason};
           if(Buffer.byteLength(JSON.stringify(result),'utf8')>CHAT_RESPONSE_CACHE_MAX_BYTES)throw new HttpError('Model response is too large to cache safely',502,'chat_response_cache_too_large');
           if(controller.signal.aborted)throw controller.signal.reason;
+          await stopReservationLease();
+          if(controller.signal.aborted)throw controller.signal.reason;
           activeChat.state='settling';
           await database.settleUsage(principal,reservationId,{idempotencyKey:`chat:${requestKey}:${requestFingerprint}`,taskId:taskId??'chat',sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection,model:actualModel,inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,costCents,commissionRateBps,commissionCents},{requestKey,fingerprint:requestFingerprint,executionId:taskExecutionId,responsePayload:result,audit:{entityId:actualModel,data:{taskId:taskId??null,executionId:taskExecutionId??null,requestedModel:model,fallbackUsed:actualModel!==model,fallbackReason,sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection,...usage,costCents,commissionRateBps,commissionCents}}},taskExecutionId);activeChat.state='settled';chatSettled=true;
           sendChatResult(response,result,clientRequestedStream,requestId);return;
-        } catch(error) { markReservationReady();if(!chatSettled)await failChatClaim();await database.releaseUsage(principal,reservationId);if(controller.signal.aborted)throw controller.signal.reason instanceof HttpError?controller.signal.reason:new HttpError('Task was cancelled',409,'task_cancelled');throw error; }
-        finally { if(leaseKeepalive)clearInterval(leaseKeepalive);response.removeListener('close',cancelOnDisconnect);unregisterActiveChat(); }
+        } catch(error) { await stopReservationLease();markReservationReady();if(!chatSettled)await failChatClaim();await database.releaseUsage(principal,reservationId);if(controller.signal.aborted)throw controller.signal.reason instanceof HttpError?controller.signal.reason:new HttpError('Task was cancelled',409,'task_cancelled');throw error; }
+        finally { await stopReservationLease();if(leaseKeepalive)clearInterval(leaseKeepalive);response.removeListener('close',cancelOnDisconnect);unregisterActiveChat(); }
       }
       return sendJson(response, 404, { error: 'not_found' });
     } catch (error) {

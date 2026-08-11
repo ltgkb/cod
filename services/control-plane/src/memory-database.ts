@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { AccountSummary, DeviceRecord, TaskStatus, UsageEvent } from '@cod/contracts';
-import { CHAT_RESPONSE_CACHE_MAX_BYTES, DEVICE_OFFLINE_AFTER_MS, LEGACY_TASK_INTERRUPTED_ERROR, TASK_LEASE_DURATION_MS, TASK_LEASE_EXPIRED_ERROR, creditPackCatalog, hashTaskLeaseToken, validateDeviceInput, validateTaskExecutionClaimCredential, validateTaskExecutionCredential, validateTaskOutcome, validateTaskTransition, type AuditEntry, type ChatRequestClaim, type ChatRequestCompletion, type CodDatabase, type CreditGrant, type CreditSummary, type IdentityRecord, type LedgerEntry, type PaymentCompletion, type PaymentOrder, type PaymentOrderRequest, type Principal, type SyncedTask, type TaskEvent, type TaskExecutionClaim, type TaskExecutionClaimCredential, type TaskExecutionCredential, type TaskLeaseHeartbeat, type TaskOutcome, type TopupRequest } from './database.js';
+import { CHAT_RESPONSE_CACHE_MAX_BYTES, DEVICE_OFFLINE_AFTER_MS, LEGACY_TASK_INTERRUPTED_ERROR, TASK_LEASE_DURATION_MS, TASK_LEASE_EXPIRED_ERROR, USAGE_RESERVATION_LEASE_DURATION_MS, USAGE_RESERVATION_REAP_BATCH_SIZE, USAGE_RESERVATION_REAP_INTERVAL_MS, creditPackCatalog, hashTaskLeaseToken, validateDeviceInput, validateTaskExecutionClaimCredential, validateTaskExecutionCredential, validateTaskOutcome, validateTaskTransition, type AuditEntry, type ChatRequestClaim, type ChatRequestCompletion, type CodDatabase, type CreditGrant, type CreditSummary, type IdentityRecord, type LedgerEntry, type PaymentCompletion, type PaymentOrder, type PaymentOrderRequest, type Principal, type SyncedTask, type TaskEvent, type TaskExecutionClaim, type TaskExecutionClaimCredential, type TaskExecutionCredential, type TaskLeaseHeartbeat, type TaskOutcome, type TopupRequest } from './database.js';
 import { HttpError } from './errors.js';
 import type { ComputeRequest, ComputeRequestInput } from './compute-market.js';
+import { recordUsageReservationsReaped } from './metrics.js';
 
 interface UserState {
   account: AccountSummary;
@@ -12,7 +13,7 @@ interface UserState {
   tasks: Map<string, SyncedTask>;
   events: TaskEvent[];
   audit: AuditEntry[];
-  reservations: Map<string, { amountCents: number; walletCents: number; grantAllocations: Array<{grantId:string;amountCents:number}>; taskId: string | null; executionId: string | null; status: 'reserved' | 'settled' | 'released' }>;
+  reservations: Map<string, { amountCents: number; walletCents: number; grantAllocations: Array<{grantId:string;amountCents:number}>; taskId: string | null; executionId: string | null; status: 'reserved' | 'settled' | 'released'; leaseExpiresAt: number }>;
   chatRequests: Map<string, { fingerprint: string; executionId: string | null; status: 'pending' | 'complete' | 'failed'; responsePayload: Record<string,unknown> | null; expiresAt: number }>;
   taskExecutions: Map<string, { executionId: string; claimIdHash: string; leaseTokenHash: string; leaseExpiresAt: number }>;
   creditGrants: Map<string,CreditGrant>;
@@ -27,8 +28,10 @@ export class MemoryDatabase implements CodDatabase {
   private readonly users = new Map<string, UserState>();
   private readonly identities = new Map<string, IdentityRecord>();
   private readonly providerEvents = new Map<string, string>();
-  async initialize() {}
-  async close() {}
+  private reservationReaperTimer:NodeJS.Timeout|null=null;
+  private reservationReaperRun:Promise<number>|null=null;
+  async initialize() { await this.reapExpiredUsageReservations();if(!this.reservationReaperTimer){this.reservationReaperTimer=setInterval(()=>{if(this.reservationReaperRun)return;const run=this.reapExpiredUsageReservations();this.reservationReaperRun=run;void run.catch((error:unknown)=>console.error(JSON.stringify({level:'error',event:'usage.reservations.reap_failed',error:error instanceof Error?error.message:String(error)}))).finally(()=>{if(this.reservationReaperRun===run)this.reservationReaperRun=null;});},USAGE_RESERVATION_REAP_INTERVAL_MS);this.reservationReaperTimer.unref();} }
+  async close() { if(this.reservationReaperTimer){clearInterval(this.reservationReaperTimer);this.reservationReaperTimer=null;}if(this.reservationReaperRun)await this.reservationReaperRun.catch(()=>undefined); }
   async health() { return true; }
   async ensurePrincipal(p: Principal) { this.state(p);this.ensureLegacyIdentity(p); }
   async findIdentityByEmail(email:string){return this.identities.get(email.toLowerCase())??null;}
@@ -102,12 +105,20 @@ export class MemoryDatabase implements CodDatabase {
     state.chatRequests.set(requestKey,{...existing,status:'failed',responsePayload:null,expiresAt:Date.now()+60*60*1000});
   }
   async reserveUsage(p:Principal,id:string,amountCents:number,taskExecution?:{taskId:string;executionId:string}){
-    const state=this.state(p);const existing=state.reservations.get(id);
-    if(existing){if(existing.taskId!==(taskExecution?.taskId??null)||existing.executionId!==(taskExecution?.executionId??null))throw new HttpError('Reservation belongs to another task execution',409,'reservation_execution_conflict');return;}
     if(!Number.isInteger(amountCents)||amountCents<0)throw new HttpError('Reservation amount is invalid',400,'invalid_reservation');
+    await this.reapExpiredUsageReservations();
+    const state=this.state(p);const existing=state.reservations.get(id);
+    if(existing){if(existing.taskId!==(taskExecution?.taskId??null)||existing.executionId!==(taskExecution?.executionId??null))throw new HttpError('Reservation belongs to another task execution',409,'reservation_execution_conflict');if(existing.status!=='reserved'||existing.leaseExpiresAt<=Date.now())throw new HttpError('Usage reservation lease is no longer active',409,'reservation_lease_expired');return;}
     if(taskExecution)this.assertExecutionState(state,taskExecution.taskId,taskExecution.executionId);
     const reservableAmount=p.role==='admin'?0:amountCents;const allocation=this.allocateFunds(state,reservableAmount);
-    state.reservations.set(id,{amountCents:reservableAmount,...allocation,taskId:taskExecution?.taskId??null,executionId:taskExecution?.executionId??null,status:'reserved'});
+    state.reservations.set(id,{amountCents:reservableAmount,...allocation,taskId:taskExecution?.taskId??null,executionId:taskExecution?.executionId??null,status:'reserved',leaseExpiresAt:Date.now()+USAGE_RESERVATION_LEASE_DURATION_MS});
+  }
+  async renewUsageReservation(p:Principal,id:string){const reservation=this.state(p).reservations.get(id);if(!reservation||reservation.status!=='reserved'||reservation.leaseExpiresAt<=Date.now())throw new HttpError('Usage reservation lease is no longer active',409,'reservation_lease_expired');reservation.leaseExpiresAt=Date.now()+USAGE_RESERVATION_LEASE_DURATION_MS;}
+  async reapExpiredUsageReservations(limit:number=USAGE_RESERVATION_REAP_BATCH_SIZE){
+    const boundedLimit=Math.min(Math.max(Number.isFinite(limit)?Math.trunc(limit):USAGE_RESERVATION_REAP_BATCH_SIZE,1),USAGE_RESERVATION_REAP_BATCH_SIZE);let released=0;
+    const candidates=[...this.users.values()].flatMap((state)=>[...state.reservations.values()].map((reservation)=>({state,reservation}))).filter(({reservation})=>reservation.status==='reserved'&&reservation.leaseExpiresAt<=Date.now()).sort((a,b)=>a.reservation.leaseExpiresAt-b.reservation.leaseExpiresAt).slice(0,boundedLimit);
+    for(const {state,reservation} of candidates){if(reservation.status!=='reserved'||reservation.leaseExpiresAt>Date.now())continue;this.releaseReservation(state,reservation);released+=1;}
+    if(released>0)recordUsageReservationsReaped(released);return released;
   }
   async settleUsage(p:Principal,id:string,event:UsageEvent,completion?:ChatRequestCompletion,executionId?:string){
     const state=this.state(p);const reservation=state.reservations.get(id);const chatRequest=completion?state.chatRequests.get(completion.requestKey):null;const cachedResponse=completion?structuredClone(completion.responsePayload):null;const auditData=completion?structuredClone(completion.audit.data):null;
@@ -115,7 +126,7 @@ export class MemoryDatabase implements CodDatabase {
     if(event.taskId!=='chat'&&(!executionId||reservation?.taskId!==event.taskId||reservation.executionId!==executionId))throw new HttpError('Reservation belongs to another task execution',409,'reservation_execution_conflict');
     const existing=state.idempotency.get(event.idempotencyKey);if(existing){if(reservation?.status==='reserved')this.releaseReservation(state,reservation);if(completion&&chatRequest?.status==='pending')state.chatRequests.set(completion.requestKey,{fingerprint:completion.fingerprint,executionId:completion.executionId??null,status:'complete',responsePayload:cachedResponse!,expiresAt:Date.now()+24*60*60*1000});return existing;}
     if(event.taskId!=='chat')this.assertExecutionState(state,event.taskId,executionId!);
-    if(completion&&chatRequest?.status==='complete')throw new HttpError('Completed chat request is missing its billing record',500,'chat_billing_inconsistent');if(!reservation||reservation.status!=='reserved')throw new HttpError('Usage reservation not found',409,'reservation_not_found');
+    if(completion&&chatRequest?.status==='complete')throw new HttpError('Completed chat request is missing its billing record',500,'chat_billing_inconsistent');if(!reservation||reservation.status!=='reserved'||reservation.leaseExpiresAt<=Date.now())throw new HttpError('Usage reservation lease is no longer active',409,'reservation_lease_expired');
     const billedEvent=p.role==='admin'?{...event,costCents:0,paymentDirection:'管理员测试免计费',commissionRateBps:0,commissionCents:0}:event;let remaining=billedEvent.costCents;let creditConsumed=0;for(const allocation of reservation.grantAllocations){const consumed=Math.min(allocation.amountCents,remaining);creditConsumed+=consumed;remaining-=consumed;this.restoreGrant(state,allocation.grantId,allocation.amountCents-consumed);}const walletConsumed=Math.min(reservation.walletCents,remaining);remaining-=walletConsumed;state.account={...state.account,balanceCents:state.account.balanceCents+reservation.walletCents-walletConsumed};let totalWallet=walletConsumed;if(remaining>0){const extra=this.allocateFunds(state,remaining);totalWallet+=extra.walletCents;creditConsumed+=extra.grantAllocations.reduce((total,item)=>total+item.amountCents,0);}const entry=this.usageEntry(billedEvent,totalWallet,creditConsumed);state.ledger.unshift(entry);state.idempotency.set(event.idempotencyKey,entry);reservation.status='settled';
     if(completion){state.chatRequests.set(completion.requestKey,{fingerprint:completion.fingerprint,executionId:completion.executionId??null,status:'complete',responsePayload:cachedResponse!,expiresAt:Date.now()+24*60*60*1000});state.audit.unshift({id:randomUUID(),action:'chat.complete',entityType:'model',entityId:completion.audit.entityId,data:auditData,createdAt:new Date().toISOString()});}return entry;
   }
