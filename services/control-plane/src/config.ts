@@ -1,3 +1,6 @@
+import { existsSync } from 'node:fs';
+import { tokenRetailDomains, tokenRetailSourceId } from './token-retail-directory.js';
+
 export interface ModelSourceConfig {
   id: string;
   label: string;
@@ -69,15 +72,16 @@ function defaultModelSources(environment: NodeJS.ProcessEnv): ModelSourceConfig[
     if (!Number.isInteger(value) || value < 0 || value > 10_000) throw new Error('Source commission rate must be between 0 and 10000 basis points');
     return value;
   };
+  const retailCommissionRateBps = commissionRate(environment.TOKEN_RETAIL_COMMISSION_RATE_BPS ?? environment.CHASE_COMMISSION_RATE_BPS);
   return [
     {
       id: 'ai-kai', label: 'AI.KAI.COM', upstreamSourceId: 'ai-kai', baseUrl: aiBaseUrl, catalogUrl,
       statusUrl, paymentDirection: '钱包/额度 → ai.kai.com · 归因 AI.KAI.COM', commissionRateBps: 0, apiKey,
     },
-    {
-      id: 'chase-kai', label: 'CHASE.KAI.COM', upstreamSourceId: 'ai-kai', baseUrl: aiBaseUrl, catalogUrl,
-      statusUrl, paymentDirection: '钱包/额度 → ai.kai.com · 归因 CHASE.KAI.COM', commissionRateBps: commissionRate(environment.CHASE_COMMISSION_RATE_BPS), apiKey,
-    },
+    ...tokenRetailDomains.map((domain) => ({
+      id: tokenRetailSourceId(domain), label: domain.toUpperCase(), upstreamSourceId: 'ai-kai' as const, baseUrl: aiBaseUrl, catalogUrl,
+      statusUrl, paymentDirection: `钱包/额度 → ai.kai.com · 归因 ${domain.toUpperCase()}`, commissionRateBps: retailCommissionRateBps, apiKey,
+    })),
   ];
 }
 
@@ -200,4 +204,3 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     hongkongSsoSecret: environment.KAI_HONGKONG_SSO_SECRET ?? null,
   };
 }
-import { existsSync } from 'node:fs';

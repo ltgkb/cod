@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { loadConfig } from './config.js';
 import { AiGateway } from './gateway.js';
+import { tokenRetailDomains, tokenRetailSourceId } from './token-retail-directory.js';
 
 describe('model source gateway', () => {
   it('routes every display source through ai.kai.com and retries an empty answer', async () => {
@@ -29,9 +30,14 @@ describe('model source gateway', () => {
       KAI_API_KEY: 'test-key',
     }), fetcher as typeof fetch);
     const sources = await gateway.listSources();
-    expect(sources).toHaveLength(2);
+    expect(tokenRetailDomains).toHaveLength(88);
+    expect(sources).toHaveLength(tokenRetailDomains.length + 1);
+    expect(new Set(sources.map((source) => source.id)).size).toBe(sources.length);
+    expect(sources.every((source) => /^[a-z0-9-]{2,40}$/.test(source.id))).toBe(true);
     expect(sources[0]).toMatchObject({ id: 'ai-kai', upstreamSourceId: 'ai-kai', status: 'live', callable: true, models: [{ id: 'glm-5.2', inputPricePerMillionCents: 836, outputPricePerMillionCents: 2926 }] });
-    expect(sources[1]).toMatchObject({ id: 'chase-kai', upstreamSourceId: 'ai-kai', status: 'live', callable: true, models: [{ id: 'glm-5.2' }] });
+    expect(sources.slice(1).map((source) => source.id)).toEqual(tokenRetailDomains.map(tokenRetailSourceId));
+    expect(sources.find((source) => source.id === 'chase-kai')).toMatchObject({ label: 'CHASE.KAI.COM', upstreamSourceId: 'ai-kai', status: 'live', callable: true, models: [{ id: 'glm-5.2' }] });
+    expect(fetcher).toHaveBeenCalledTimes(3);
     const response = await gateway.proxyChat('chase-kai', { model: 'glm-5.2', messages: [] }, 'request-1');
     expect(response.status).toBe(200);
     expect(chatAttempts).toBe(2);
@@ -87,7 +93,7 @@ describe('model source gateway', () => {
     });
     const gateway = new AiGateway(loadConfig({ NODE_ENV: 'production', COD_SESSION_SECRET: 's'.repeat(32), DATABASE_URL: 'postgresql://cod:test@127.0.0.1:5432/cod', COD_DEVELOPMENT_LOGIN_ENABLED: 'false', KAI_API_KEY: 'test-key' }), fetcher as typeof fetch);
     const sources = await gateway.listSources();
-    expect(sources).toHaveLength(2);
+    expect(sources).toHaveLength(tokenRetailDomains.length + 1);
     expect(sources.every((source) => source.status === 'unavailable' && !source.callable && source.models.length === 0)).toBe(true);
     expect(sources[0]?.note).toContain('定价状态暂时无法验证');
     await expect(gateway.getModel('ai-kai', 'glm-5.2')).rejects.toMatchObject({ status: 503, code: 'source_unavailable' });

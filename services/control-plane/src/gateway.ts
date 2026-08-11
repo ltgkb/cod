@@ -179,7 +179,27 @@ export class AiGateway {
       this.cache = { expiresAt: Date.now() + 60_000, value };
       return value;
     }
-    const value = await Promise.all(this.config.modelSources.map((source) => this.loadSource(source)));
+    const upstreamLoads = new Map<string, Promise<ModelSourceInfo>>();
+    const value = await Promise.all(this.config.modelSources.map(async (source) => {
+      const upstreamKey = [source.baseUrl, source.catalogUrl, source.statusUrl, source.apiKey ?? ''].join('\u0000');
+      let upstreamLoad = upstreamLoads.get(upstreamKey);
+      if (!upstreamLoad) {
+        upstreamLoad = this.loadSource(source);
+        upstreamLoads.set(upstreamKey, upstreamLoad);
+      }
+      const upstream = await upstreamLoad;
+      return {
+        ...upstream,
+        id: source.id,
+        label: source.label,
+        upstreamSourceId: source.upstreamSourceId,
+        paymentDirection: source.paymentDirection,
+        commissionRateBps: source.commissionRateBps,
+        note: upstream.status === 'unavailable'
+          ? `${source.label} 定价状态暂时无法验证，已停止调用和计费`
+          : sourceNote(source, upstream.callable),
+      };
+    }));
     this.cache = { expiresAt: Date.now() + 300_000, value };
     return value;
   }
