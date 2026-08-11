@@ -78,6 +78,7 @@ sudo install -o root -g root -m 644 deploy/cod-backup.service /etc/systemd/syste
 sudo install -o root -g root -m 644 deploy/cod-backup.timer /etc/systemd/system/cod-backup.timer
 sudo install -o root -g root -m 644 deploy/cod-healthcheck.service /etc/systemd/system/cod-healthcheck.service
 sudo install -o root -g root -m 644 deploy/cod-healthcheck.timer /etc/systemd/system/cod-healthcheck.timer
+sudo install -o root -g root -m 600 deploy/runtime.env /etc/cod/runtime.env
 sudo install -o root -g root -m 644 deploy/cod.nginx.conf /etc/nginx/sites-available/cod
 sudo install -o root -g root -m 644 deploy/nginx-http.conf /etc/nginx/conf.d/cod-limits.conf
 sudo install -d -o postgres -g postgres -m 700 /var/lib/cod/backups

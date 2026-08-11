@@ -12,6 +12,8 @@ Server files:
 
 `control-plane.env` contains secrets, including `DATABASE_URL`. `runtime.env` contains only versioned non-secret settings such as the restricted pilot login account.
 
+Start from `deploy/control-plane.env.example` and populate it only on the server. The model provider key, Wiki key, payment webhook secret, Feishu credentials/bindings, and Hong Kong SSO secret must never enter a desktop package, Web bundle, or Git commit.
+
 `cod.kai.com` must have an A record pointing to `95.41.23.60` before issuing a public TLS certificate.
 
 ## Release and reliability

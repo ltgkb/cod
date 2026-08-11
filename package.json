@@ -16,6 +16,12 @@
     "lint": "npm run lint -w @cod/web",
     "desktop": "npm run dev -w @cod/desktop",
     "package:linux": "npm run package:linux -w @cod/desktop",
+    "package:mac": "npm run package:mac -w @cod/desktop",
+    "package:mac:signed": "npm run package:mac:signed -w @cod/desktop",
+    "package:win": "npm run package:win -w @cod/desktop",
+    "package:android": "npm run build:android -w @cod/mobile",
+    "package:ios": "npm run build:ios:simulator -w @cod/mobile",
+    "sync:mobile": "npm run sync -w @cod/mobile",
     "prepare:goose": "node scripts/prepare-goose-sidecar.mjs",
     "control-plane": "npm run dev -w @cod/control-plane"
   },

@@ -3,12 +3,14 @@ import type { DesktopBridge } from '@cod/contracts';
 
 const bridge: DesktopBridge = {
   platform: process.platform,
+  controlPlaneUrl: process.env.COD_CONTROL_PLANE_URL ?? 'https://cod.kai.com',
   selectProject: () => ipcRenderer.invoke('cod:select-project'),
   listFiles: (root) => ipcRenderer.invoke('cod:list-files', root),
   readTextFile: (root, relativePath) => ipcRenderer.invoke('cod:read-text-file', root, relativePath),
   gitDiff: (root) => ipcRenderer.invoke('cod:git-diff', root),
   runCommand: (root, command) => ipcRenderer.invoke('cod:run-command', root, command),
-  getGooseAcpUrl: () => ipcRenderer.invoke('cod:get-goose-acp-url'),
+  getGooseAcpUrl: (config) => ipcRenderer.invoke('cod:get-goose-acp-url', config),
+  stopGoose: () => ipcRenderer.invoke('cod:stop-goose'),
 };
 
 contextBridge.exposeInMainWorld('codDesktop', bridge);

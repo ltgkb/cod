@@ -21,8 +21,19 @@ RestartSec=3
 TimeoutStopSec=15
 NoNewPrivileges=true
 PrivateTmp=true
+PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+InaccessiblePaths=/home/ubuntu/.ssh /root
+UMask=0077
 ReadOnlyPaths=/opt/cod/current
 
 [Install]

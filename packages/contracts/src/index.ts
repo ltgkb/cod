@@ -1,4 +1,4 @@
-export type TaskStatus = 'draft' | 'running' | 'waiting' | 'complete' | 'failed';
+export type TaskStatus = 'draft' | 'running' | 'waiting' | 'complete' | 'failed' | 'cancelled';
 
 export interface CodTask {
   id: string;
@@ -32,10 +32,15 @@ export interface AccountSummary {
 export interface UsageEvent {
   idempotencyKey: string;
   taskId: string;
+  sourceId: string;
+  upstreamSourceId?: string;
+  paymentDirection: string;
   model: string;
   inputTokens: number;
   outputTokens: number;
   costCents: number;
+  commissionRateBps?: number;
+  commissionCents?: number;
 }
 
 export interface DeviceRecord {
@@ -60,16 +65,26 @@ export interface ProductManifest {
   launchUrl: string;
   embedUrl: string | null;
   allowedOrigins: string[];
+  launchMode: 'external' | 'signed-sso';
+}
+
+export interface AgentGatewayConfig {
+  token: string;
+  sourceId: string;
+  modelId: string;
+  taskId: string;
 }
 
 export interface DesktopBridge {
   platform: string;
+  controlPlaneUrl: string;
   selectProject(): Promise<string | null>;
   listFiles(root: string): Promise<WorkspaceFile[]>;
   readTextFile(root: string, relativePath: string): Promise<string>;
   gitDiff(root: string): Promise<string>;
   runCommand(root: string, command: string): Promise<TerminalResult>;
-  getGooseAcpUrl(): Promise<string | null>;
+  getGooseAcpUrl(config: AgentGatewayConfig): Promise<string | null>;
+  stopGoose(): Promise<void>;
 }
 
 declare global {

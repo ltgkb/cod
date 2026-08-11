@@ -13,6 +13,23 @@ describe('synchronization database contract', () => {
     expect(updated.version).toBe(2);
     expect(await database.eventsAfter(principal, 1)).toHaveLength(2);
     await expect(database.updateTask(principal, task.id, 'complete', 1)).rejects.toMatchObject({ status: 409 });
+    await expect(database.updateTask(principal, task.id, 'complete', 2)).rejects.toMatchObject({ code: 'task_result_required' });
+    await expect(database.updateTask(principal, task.id, 'failed', 2)).rejects.toMatchObject({ code: 'task_error_required' });
+    const completed = await database.updateTask(principal, task.id, 'complete', 2, { result: '构建通过', error: null });
+    expect(completed.result).toBe('构建通过');
+    await expect(database.updateTask(principal, completed.id, 'draft', completed.version)).rejects.toMatchObject({ code: 'invalid_task_transition' });
+  });
+
+  it('validates device platforms', async () => {
+    const database = new MemoryDatabase();
+    await expect(database.registerDevice(principal, { name: 'Unknown', platform: 'watch' as 'linux' })).rejects.toMatchObject({ code: 'invalid_device_platform' });
+  });
+
+  it('records cancellation as a terminal state and allows an explicit restart',async()=>{
+    const database=new MemoryDatabase();const device=await database.registerDevice(principal,{name:'Windows PC',platform:'windows'});const task=await database.createTask(principal,{title:'长任务',deviceId:device.id});const running=await database.updateTask(principal,task.id,'running',task.version);const cancelled=await database.updateTask(principal,task.id,'cancelled',running.version,{result:'partial',error:'ignored'});
+    expect(cancelled).toMatchObject({status:'cancelled',result:null,error:null});
+    await expect(database.updateTask(principal,cancelled.id,'complete',cancelled.version,{result:'不应完成'})).rejects.toMatchObject({code:'invalid_task_transition'});
+    const restarted=await database.updateTask(principal,cancelled.id,'running',cancelled.version);expect(restarted).toMatchObject({status:'running',result:null,error:null});
   });
 
   it('does not expose devices and tasks across users', async () => {
