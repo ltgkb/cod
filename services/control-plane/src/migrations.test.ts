@@ -71,4 +71,14 @@ describe('production-safe migrations and rate limits', () => {
     expect(siteConfig.match(/proxy_set_header X-Request-ID \$cod_request_id;/g)).toHaveLength(5);
     expect(siteConfig).not.toContain('proxy_set_header X-Request-ID $request_id;');
   });
+
+  it('compresses large JSON catalogs and static text assets at the Nginx boundary', () => {
+    const httpConfig = readFileSync(new URL('../../../deploy/nginx-http.conf', import.meta.url), 'utf8');
+
+    expect(httpConfig).toContain('gzip on;');
+    expect(httpConfig).toContain('gzip_vary on;');
+    expect(httpConfig).toContain('gzip_min_length 1024;');
+    expect(httpConfig).toContain('gzip_proxied any;');
+    expect(httpConfig).toMatch(/gzip_types[\s\S]*?application\/json[\s\S]*?application\/javascript[\s\S]*?text\/javascript[\s\S]*?text\/css[\s\S]*?image\/svg\+xml;/);
+  });
 });

@@ -62,10 +62,37 @@ export interface ControlPlaneConfig {
   hongkongSsoSecret: string | null;
 }
 
-function defaultModelSources(environment: NodeJS.ProcessEnv): ModelSourceConfig[] {
-  const aiBaseUrl = environment.KAI_AI_BASE_URL ?? 'https://ai.kai.com/v1';
-  const catalogUrl = environment.KAI_AI_CATALOG_URL ?? 'https://ai.kai.com/api/pricing';
-  const statusUrl = environment.KAI_AI_STATUS_URL ?? 'https://ai.kai.com/api/status';
+function modelSourceEndpoints(environment: NodeJS.ProcessEnv): Pick<ModelSourceConfig, 'baseUrl' | 'catalogUrl' | 'statusUrl'> {
+  const endpoints = {
+    baseUrl: environment.KAI_AI_BASE_URL ?? 'https://ai.kai.com/v1',
+    catalogUrl: environment.KAI_AI_CATALOG_URL ?? 'https://ai.kai.com/api/pricing',
+    statusUrl: environment.KAI_AI_STATUS_URL ?? 'https://ai.kai.com/api/status',
+  };
+  if (environment.NODE_ENV !== 'production') return endpoints;
+
+  const allowedHosts = new Set((environment.KAI_AI_ALLOWED_HOSTS ?? 'ai.kai.com')
+    .split(',')
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean));
+  if (allowedHosts.size === 0) throw new Error('KAI_AI_ALLOWED_HOSTS must contain at least one hostname');
+  const configuredEndpoints = [
+    ['KAI_AI_BASE_URL', endpoints.baseUrl],
+    ['KAI_AI_CATALOG_URL', endpoints.catalogUrl],
+    ['KAI_AI_STATUS_URL', endpoints.statusUrl],
+  ] as const;
+  for (const [name, value] of configuredEndpoints) {
+    let parsed: URL;
+    try { parsed = new URL(value); }
+    catch { throw new Error(`${name} must be a valid URL`); }
+    if (parsed.protocol !== 'https:') throw new Error(`${name} must use HTTPS in production`);
+    if (parsed.username || parsed.password) throw new Error(`${name} must not contain URL credentials`);
+    if (!allowedHosts.has(parsed.hostname.toLowerCase())) throw new Error(`${name} host is not allowed by KAI_AI_ALLOWED_HOSTS`);
+  }
+  return endpoints;
+}
+
+function defaultModelSources(environment: NodeJS.ProcessEnv, endpoints: Pick<ModelSourceConfig, 'baseUrl' | 'catalogUrl' | 'statusUrl'>): ModelSourceConfig[] {
+  const { baseUrl: aiBaseUrl, catalogUrl, statusUrl } = endpoints;
   const apiKey = environment.KAI_API_KEY ?? null;
   const commissionRate = (raw: string | undefined): number => {
     const value = Number(raw ?? 0);
@@ -86,10 +113,9 @@ function defaultModelSources(environment: NodeJS.ProcessEnv): ModelSourceConfig[
 }
 
 function loadModelSources(environment: NodeJS.ProcessEnv): ModelSourceConfig[] {
-  if (!environment.COD_MODEL_SOURCES_JSON) return defaultModelSources(environment);
-  const aiBaseUrl = environment.KAI_AI_BASE_URL ?? 'https://ai.kai.com/v1';
-  const catalogUrl = environment.KAI_AI_CATALOG_URL ?? 'https://ai.kai.com/api/pricing';
-  const statusUrl = environment.KAI_AI_STATUS_URL ?? 'https://ai.kai.com/api/status';
+  const endpoints = modelSourceEndpoints(environment);
+  if (!environment.COD_MODEL_SOURCES_JSON) return defaultModelSources(environment, endpoints);
+  const { baseUrl: aiBaseUrl, catalogUrl, statusUrl } = endpoints;
   let raw: unknown;
   try { raw = JSON.parse(environment.COD_MODEL_SOURCES_JSON); }
   catch { throw new Error('COD_MODEL_SOURCES_JSON must be valid JSON'); }

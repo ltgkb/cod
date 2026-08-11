@@ -22,6 +22,7 @@ export interface ModelSourceInfo {
   models: ModelInfo[];
   note: string;
 }
+export type PublicModelSourceInfo = Omit<ModelSourceInfo, 'commissionRateBps'>;
 
 export interface CodSession {
   token: string;
@@ -193,10 +194,10 @@ export async function getCapabilities(): Promise<CapabilityReport> {
   return request('/api/capabilities');
 }
 
-export async function listModelCatalog(): Promise<ModelSourceInfo[]> {
+export async function listModelCatalog(): Promise<PublicModelSourceInfo[]> {
   const catalog = await request<unknown>('/api/model-catalog');
   if (!Array.isArray(catalog)) throw new ApiError('模型目录返回格式无效', 502, 'invalid_model_catalog');
-  return catalog as ModelSourceInfo[];
+  return catalog as PublicModelSourceInfo[];
 }
 
 export async function resumeCodSession(): Promise<CodSession | null> {

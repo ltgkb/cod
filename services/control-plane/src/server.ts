@@ -6,7 +6,7 @@ import { BotService, parseBotCommand, parseFeishuWebhook, replyFeishuMessage, ve
 import { loadConfig, type ControlPlaneConfig } from './config.js';
 import { CHAT_RESPONSE_CACHE_MAX_BYTES, creditPackCatalog, type CodDatabase, type Principal, PostgresDatabase, type TopupRequest } from './database.js';
 import { errorResponse, HttpError } from './errors.js';
-import { AiGateway } from './gateway.js';
+import { AiGateway, type ModelSourceInfo } from './gateway.js';
 import { bearerToken, readJson, readText, sendJson, sendText } from './http.js';
 import { KnowledgeAdapter } from './knowledge.js';
 import { MemoryDatabase } from './memory-database.js';
@@ -25,6 +25,13 @@ const validStatuses = new Set<TaskStatus>(['draft', 'running', 'waiting', 'compl
 const userIdFor = (email: string) => `usr_${createHash('sha256').update(email).digest('hex').slice(0, 20)}`;
 const tenantIdFor = (email: string) => `tenant_${email.split('@')[1]?.replace(/[^a-z0-9]+/g, '_') ?? 'unknown'}`;
 const principalFromSession = (session: { sub: string; tenantId: string; email: string; role: Principal['role'] }): Principal => ({ userId: session.sub, tenantId: session.tenantId, email: session.email, role: session.role });
+
+type PublicModelSourceInfo = Pick<ModelSourceInfo, 'id' | 'label' | 'upstreamSourceId' | 'status' | 'callable' | 'paymentDirection' | 'models' | 'note'>;
+function publicModelCatalog(sources: ModelSourceInfo[]): PublicModelSourceInfo[] {
+  return sources.map(({ id, label, upstreamSourceId, status, callable, paymentDirection, models, note }) => ({
+    id, label, upstreamSourceId, status, callable, paymentDirection, models, note,
+  }));
+}
 
 const dummyPasswordHash='scrypt$16384$8$1$MDEyMzQ1Njc4OWFiY2RlZg$vNLqtxxHxO9XlDJYZk-T6OzryI7HSubiscMSJDaWZtd0bu3h2vmmdlKsAZpCn3V20q-R_KOLJgJl9mHX32LDiA';
 
@@ -244,7 +251,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
           wecom: process.env.COD_BOT_WEBHOOK_SECRET ? 'adapter' : 'unavailable',
         },
       });
-      if (request.method === 'GET' && url.pathname === '/api/model-catalog') return sendJson(response, 200, await gateway.listSources());
+      if (request.method === 'GET' && url.pathname === '/api/model-catalog') return sendJson(response, 200, publicModelCatalog(await gateway.listSources()));
       if (request.method === 'GET' && url.pathname === '/api/compute/offers') return sendJson(response, 200, computeOfferCatalog);
       if (request.method === 'POST' && url.pathname === '/api/auth/login') {
         const body = await readJson<{ email?: string; password?: string }>(request);

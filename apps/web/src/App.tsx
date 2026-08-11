@@ -77,9 +77,9 @@ import {
   type ComputeRequestInput,
   type CreditPackState,
   type LedgerEntry,
-  type ModelSourceInfo,
   type PaymentCheckout,
   type PaymentOrder,
+  type PublicModelSourceInfo,
   type RemoteTask,
   type ReferralSummary,
 } from './api';
@@ -216,7 +216,7 @@ function LoginForm({ capabilities, capabilityError, resumeConversation, onLogin,
   return <div className="login-form"><div className={`auth-tabs${registrationAvailable?'':' single'}`} role="tablist"><button type="button" role="tab" aria-selected={mode==='login'} className={mode==='login'?'active':''} onClick={()=>switchMode('login')}>密码登录</button>{registrationAvailable&&<button type="button" role="tab" aria-selected={mode==='register'} className={mode==='register'?'active':''} onClick={()=>switchMode('register')}>注册账号</button>}</div><div className="login-copy"><span className="eyebrow">KAI ACCOUNT</span><h2>{resumeConversation ? `${mode==='login'?'登录':'注册'}后继续对话` : mode==='login'?'登录 COD':'注册 COD'}</h2><p>{resumeConversation ? '你的消息已保留，认证成功后会自动发送。' : mode==='login'?(registrationAvailable?'使用邮箱和密码登录。':'当前仅开放已有账号登录。'):`注册即获 ¥10 试用金，有效期 30 天。${inviteRequired?'需要有效邀请码。':'邀请码选填，用于绑定邀请人与后续返佣。'}`}</p></div>{capabilityError && <div className="notice error">{capabilityError}</div>}<form onSubmit={submit}><label>邮箱<input aria-label="邮箱" name="email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" required autoFocus /></label><label>密码<input key={`password-${mode}`} aria-label="密码" name={mode==='login'?'loginPassword':'newPassword'} type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode==='login'?'current-password':'new-password'} minLength={10} maxLength={128} required /></label>{mode==='register'&&<><label>确认密码<input key="confirm-register-password" aria-label="确认密码" name="confirmPassword" type="password" value={confirmPassword} onChange={(event)=>setConfirmPassword(event.target.value)} autoComplete="new-password" minLength={10} maxLength={128} required /></label><label>邀请码 <small>{inviteRequired?'必填':'选填'}</small><input aria-label="邀请码" name="inviteCode" value={inviteCode} onChange={(event)=>setInviteCode(event.target.value.toUpperCase())} autoComplete="off" maxLength={32} placeholder="例如 KAI-XXXXXXXXXX" required={inviteRequired} /></label>{showLegacyMigration&&<label>旧试点访问码 <small>仅迁移一次</small><input key="legacy-access-code" aria-label="旧试点访问码" name="legacyAccessCode" type="password" value={legacyAccessCode} onChange={(event)=>setLegacyAccessCode(event.target.value)} autoComplete="off" required /></label>}<p className="password-hint">密码须为 10-128 位，并同时包含字母和数字。邀请关系注册后不可自行更改。</p></>}{error && <div className="notice error" role="alert">{error}</div>}<button type="submit" className="primary-button" disabled={submitting}>{submitting ? <CircleNotch className="spin" /> : <Key />} {resumeConversation ? `${mode==='login'?'登录':'注册'}并继续` : mode==='login'?'登录':'注册并领取试用金'}</button></form><div className="capability-summary"><span className={capabilities?.ai.mode === 'live' ? 'live' : 'demo'}>模型：{capabilities?.ai.mode === 'live' ? '已连接' : capabilities?.ai.mode === 'demo' ? '演示模式' : '待检测'}</span><span>认证：邮箱密码</span></div></div>;
 }
 
-function ModelLibrary({ sources, error, signedIn, onLogin }: { sources: ModelSourceInfo[]; error: string; signedIn: boolean; onLogin: () => void }) {
+function ModelLibrary({ sources, error, signedIn, onLogin }: { sources: PublicModelSourceInfo[]; error: string; signedIn: boolean; onLogin: () => void }) {
   const [query, setQuery] = useState('');
   const normalizedQuery = query.trim().toLowerCase();
   const visibleSources = sources.map((source) => ({
@@ -225,7 +225,7 @@ function ModelLibrary({ sources, error, signedIn, onLogin }: { sources: ModelSou
   })).filter((source) => source.models.length > 0);
   const availableModels = sources.filter((source) => source.callable).reduce((total, source) => total + source.models.length, 0);
   const catalogModels = sources.reduce((total, source) => total + source.models.length, 0);
-  const statusLabel = (source: ModelSourceInfo) => source.callable ? '当前可用' : source.status === 'catalog' ? '价格目录' : source.status === 'demo' ? '演示可用' : '暂不可用';
+  const statusLabel = (source: PublicModelSourceInfo) => source.callable ? '当前可用' : source.status === 'catalog' ? '价格目录' : source.status === 'demo' ? '演示可用' : '暂不可用';
   const price = (cents: number) => `¥ ${(cents / 100).toFixed(2)}`;
   return <div className="model-library">
     <div className="model-library-intro"><div><span className="eyebrow">MODEL CATALOG</span><h2>模型与参考价格</h2><p>所有价格均为人民币，每百万 Token 计价。输入与输出价格分别展示，方便调用前预估成本。</p></div><div className="model-library-summary"><span><small>当前可用</small><strong>{availableModels}</strong></span><span><small>目录模型</small><strong>{catalogModels}</strong></span></div></div>
@@ -277,7 +277,7 @@ export function App() {
   const [authState, setAuthState] = useState<AuthState>('loading');
   const [capabilities, setCapabilities] = useState<CapabilityReport | null>(null);
   const [capabilityError, setCapabilityError] = useState('');
-  const [modelCatalog, setModelCatalog] = useState<ModelSourceInfo[]>([]);
+  const [modelCatalog, setModelCatalog] = useState<PublicModelSourceInfo[]>([]);
   const [modelCatalogError, setModelCatalogError] = useState('');
   const [session, setSession] = useState<CodSession | null>(null);
   const [tasks, setTasks] = useState<RemoteTask[]>([]);

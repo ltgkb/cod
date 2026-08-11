@@ -66,8 +66,7 @@ function responseData<T>(value: unknown): T {
 }
 
 function sourceNote(source: ModelSourceConfig, callable: boolean): string {
-  const attribution = source.commissionRateBps > 0 ? `，按 ${(source.commissionRateBps / 100).toFixed(2)}% 记录渠道分成` : '，分成比例待商务配置';
-  if (callable) return `界面按 ${source.label} 展示和归因；真实调用与主结算统一走 ${new URL(source.baseUrl).host}${attribution}`;
+  if (callable) return `界面按 ${source.label} 展示和归因；真实调用与主结算统一走 ${new URL(source.baseUrl).host}`;
   return `模型目录来自 ${new URL(source.catalogUrl).host}；配置 ai.kai.com 密钥后即可调用`;
 }
 

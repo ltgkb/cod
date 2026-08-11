@@ -22,7 +22,7 @@ async function start(overrides: Record<string, string> = {}, gatewayFetcher?:typ
 describe('control-plane production rules', () => {
   it('fails closed on incomplete production secrets and never enables direct production topups', () => {
     expect(() => loadConfig({ NODE_ENV: 'production' })).toThrow('COD_SESSION_SECRET');
-    const config = loadConfig({
+    const productionEnvironment: Record<string, string> = {
       NODE_ENV: 'production',
       COD_SESSION_SECRET: 's'.repeat(32),
       DATABASE_URL: 'postgresql://cod:test@127.0.0.1:5432/cod',
@@ -30,10 +30,24 @@ describe('control-plane production rules', () => {
       COD_DEVELOPMENT_LOGIN_ENABLED: 'true',
       COD_PILOT_ACCESS_CODE_HASH: 'a'.repeat(64),
       COD_DEVELOPMENT_TOPUP_ENABLED: 'true',
-    });
+    };
+    const config = loadConfig(productionEnvironment);
     expect(config.developmentTopupEnabled).toBe(false);
     expect(config.registrationEnabled).toBe(false);
     expect(config.inviteCodeRequired).toBe(true);
+
+    for (const name of ['KAI_AI_BASE_URL', 'KAI_AI_CATALOG_URL', 'KAI_AI_STATUS_URL']) {
+      expect(() => loadConfig({ ...productionEnvironment, [name]: 'http://ai.kai.com/insecure' })).toThrow(`${name} must use HTTPS in production`);
+      expect(() => loadConfig({ ...productionEnvironment, [name]: 'https://unapproved.example/resource' })).toThrow(`${name} host is not allowed`);
+    }
+    expect(() => loadConfig({
+      ...productionEnvironment,
+      KAI_AI_ALLOWED_HOSTS: 'provider.example',
+      KAI_AI_BASE_URL: 'https://provider.example/v1',
+      KAI_AI_CATALOG_URL: 'https://provider.example/api/pricing',
+      KAI_AI_STATUS_URL: 'https://provider.example/api/status',
+    })).not.toThrow();
+    expect(loadConfig({ NODE_ENV: 'test', KAI_AI_BASE_URL: 'http://127.0.0.1:9000/v1' }).modelSources[0]?.baseUrl).toBe('http://127.0.0.1:9000/v1');
   });
 
   it('rejects empty assistant content before it can be settled as a successful reply', () => {
@@ -105,13 +119,27 @@ describe('control-plane production rules', () => {
   });
 
   it('publishes a read-only model price catalog without requiring a session', async () => {
-    const { base } = await start();
+    const fetcher=vi.fn(async(input:string|URL|Request):Promise<Response>=>{
+      const url=String(input);
+      if(url.endsWith('/api/pricing'))return Response.json({data:[{model_name:'glm-5.2',quota_type:0,model_ratio:1,completion_ratio:2,supported_endpoint_types:['openai']}]});
+      if(url.endsWith('/api/status'))return Response.json({data:{quota_per_unit:500_000,price:7}});
+      if(url.endsWith('/models'))return Response.json({data:[{id:'glm-5.2'}]});
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const { base } = await start({KAI_API_KEY:'test-key',TOKEN_RETAIL_COMMISSION_RATE_BPS:'375'},fetcher as typeof fetch);
     const response = await fetch(`${base}/api/model-catalog`);
     expect(response.status).toBe(200);
-    const catalog = await response.json() as Array<{ id: string; callable: boolean; models: Array<{ id: string; inputPricePerMillionCents: number; outputPricePerMillionCents: number }> }>;
-    expect(catalog).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'demo', callable: true })]));
+    const catalog = await response.json() as Array<{ id: string; callable: boolean; note:string; models: Array<{ id: string; inputPricePerMillionCents: number; outputPricePerMillionCents: number }> }>;
+    expect(catalog).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'ai-kai', callable: true }),expect.objectContaining({id:'chase-kai',callable:true})]));
     expect(catalog[0]?.models[0]).toEqual(expect.objectContaining({ id: expect.any(String), inputPricePerMillionCents: expect.any(Number), outputPricePerMillionCents: expect.any(Number) }));
-    expect(JSON.stringify(catalog)).not.toMatch(/api[_-]?key|authorization|secret/i);
+    expect(catalog.some((source)=>Object.prototype.hasOwnProperty.call(source,'commissionRateBps'))).toBe(false);
+    expect(JSON.stringify(catalog)).not.toMatch(/api[_-]?key|authorization|secret|3\.75%|渠道分成|分成比例/i);
+
+    const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com',password:'Password123'})});
+    const {token}=await login.json() as {token:string};
+    const internalSources=await (await fetch(`${base}/api/model-sources`,{headers:{authorization:`Bearer ${token}`}})).json() as Array<{id:string;commissionRateBps:number;note:string}>;
+    expect(internalSources.find((source)=>source.id==='chase-kai')).toMatchObject({commissionRateBps:375});
+    expect(internalSources.find((source)=>source.id==='chase-kai')?.note).not.toContain('3.75%');
   });
 
   it('issues idempotent pilot wallet credit when the pilot preload is enabled', async () => {
