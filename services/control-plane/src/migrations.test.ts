@@ -110,4 +110,19 @@ describe('production-safe migrations and rate limits', () => {
     expect(siteConfig).toMatch(/gzip_types[\s\S]*?application\/json[\s\S]*?application\/javascript[\s\S]*?text\/javascript[\s\S]*?text\/css[\s\S]*?image\/svg\+xml;/);
     expect(siteConfig).toContain('proxy_hide_header X-Content-Type-Options;');
   });
+
+  it('runs the control plane without Linux capabilities or namespace creation', () => {
+    const service = readFileSync(new URL('../../../deploy/cod-control-plane.service', import.meta.url), 'utf8');
+
+    expect(service).toMatch(/^User=ubuntu$/m);
+    expect(service).toMatch(/^NoNewPrivileges=true$/m);
+    expect(service).toMatch(/^CapabilityBoundingSet=$/m);
+    expect(service).toMatch(/^AmbientCapabilities=$/m);
+    expect(service).toMatch(/^PrivateIPC=true$/m);
+    expect(service).toMatch(/^ProtectClock=true$/m);
+    expect(service).toMatch(/^ProtectHostname=true$/m);
+    expect(service).toMatch(/^ProtectKernelLogs=true$/m);
+    expect(service).toMatch(/^ProtectProc=invisible$/m);
+    expect(service).toMatch(/^RestrictNamespaces=true$/m);
+  });
 });
