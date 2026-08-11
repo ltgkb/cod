@@ -191,6 +191,7 @@ button:active { transform: translateY(1px); }
 .live-permission div { display: flex; flex-wrap: wrap; gap: 6px; }
 .live-permission button { min-height: 30px; padding: 6px 9px; color: var(--foreground); background: var(--layer-01); border: 1px solid var(--border-subtle); border-radius: 0; font-size: 9px; }
 .live-permission button.approve { color: var(--text-on-color); background: var(--brand); border-color: var(--brand); }
+.live-permission button.persistent { border-style: dashed; opacity: .82; }
 .live-chip { display: flex; align-items: center; gap: 5px; margin-left: auto; padding: 5px 7px; color: var(--success); background: var(--success-soft); border-left: 2px solid var(--success); border-radius: 0; font: 9px var(--mono); }
 .live-chip svg { width: 10px; }
 .timeline { margin-top: 18px; }
