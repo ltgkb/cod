@@ -11,6 +11,7 @@ on:
 permissions:
   actions: write
   contents: read
+  issues: write
 
 concurrency:
   group: one-shot-actions-storage-cleanup
@@ -39,24 +40,31 @@ jobs:
           done
 
       - name: Delete all repository Actions artifacts and caches
+        id: cleanup
+        continue-on-error: true
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          RESULT_FILE: /tmp/actions-storage-cleanup-result.txt
         run: |
-          set -euo pipefail
+          set -uo pipefail
 
           deleted_artifacts=0
           deleted_artifact_bytes=0
           deleted_caches=0
           deleted_cache_bytes=0
+          list_errors=0
 
           for pass in 1 2 3; do
             echo "Cleanup pass ${pass}"
 
             artifact_list=$(mktemp)
-            gh api --paginate "repos/${REPO}/actions/artifacts?per_page=100" \
-              --jq '.artifacts[] | [.id, .size_in_bytes, .name] | @tsv' > "${artifact_list}"
+            if ! gh api --paginate "repos/${REPO}/actions/artifacts?per_page=100" \
+              --jq '.artifacts[] | [.id, .size_in_bytes, .name] | @tsv' > "${artifact_list}"; then
+              echo "Failed to list artifacts on pass ${pass}"
+              list_errors=$((list_errors + 1))
+            fi
             while IFS=$'\t' read -r artifact_id size name; do
               [[ -z "${artifact_id}" ]] && continue
               echo "Deleting artifact ${name} (${size} bytes, id ${artifact_id})"
@@ -68,8 +76,11 @@ jobs:
             rm -f "${artifact_list}"
 
             cache_list=$(mktemp)
-            gh api --paginate "repos/${REPO}/actions/caches?per_page=100" \
-              --jq '.actions_caches[] | [.id, .size_in_bytes, .key] | @tsv' > "${cache_list}"
+            if ! gh api --paginate "repos/${REPO}/actions/caches?per_page=100" \
+              --jq '.actions_caches[] | [.id, .size_in_bytes, .key] | @tsv' > "${cache_list}"; then
+              echo "Failed to list caches on pass ${pass}"
+              list_errors=$((list_errors + 1))
+            fi
             while IFS=$'\t' read -r cache_id size key; do
               [[ -z "${cache_id}" ]] && continue
               echo "Deleting cache ${key} (${size} bytes, id ${cache_id})"
@@ -80,21 +91,56 @@ jobs:
             done < "${cache_list}"
             rm -f "${cache_list}"
 
-            remaining_artifacts=$(gh api "repos/${REPO}/actions/artifacts?per_page=1" --jq '.total_count')
-            remaining_caches=$(gh api "repos/${REPO}/actions/caches?per_page=1" --jq '.total_count')
+            remaining_artifacts=$(gh api "repos/${REPO}/actions/artifacts?per_page=1" --jq '.total_count' 2>/dev/null || echo unknown)
+            remaining_caches=$(gh api "repos/${REPO}/actions/caches?per_page=1" --jq '.total_count' 2>/dev/null || echo unknown)
             echo "Remaining after pass ${pass}: ${remaining_artifacts} artifacts, ${remaining_caches} caches"
             [[ "${remaining_artifacts}" == "0" && "${remaining_caches}" == "0" ]] && break
             sleep 10
           done
 
-          remaining_artifacts=$(gh api "repos/${REPO}/actions/artifacts?per_page=1" --jq '.total_count')
-          remaining_caches=$(gh api "repos/${REPO}/actions/caches?per_page=1" --jq '.total_count')
+          remaining_artifacts=$(gh api "repos/${REPO}/actions/artifacts?per_page=1" --jq '.total_count' 2>/dev/null || echo unknown)
+          remaining_caches=$(gh api "repos/${REPO}/actions/caches?per_page=1" --jq '.total_count' 2>/dev/null || echo unknown)
+          completed_at=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
 
-          echo "Deleted artifacts: ${deleted_artifacts}"
-          echo "Deleted artifact bytes: ${deleted_artifact_bytes}"
-          echo "Deleted caches: ${deleted_caches}"
-          echo "Deleted cache bytes: ${deleted_cache_bytes}"
-          echo "Remaining artifacts: ${remaining_artifacts}"
-          echo "Remaining caches: ${remaining_caches}"
+          cat > "${RESULT_FILE}" <<EOF
+          # GitHub Actions storage cleanup result
 
-          [[ "${remaining_artifacts}" == "0" && "${remaining_caches}" == "0" ]]
+          - Repository: ${REPO}
+          - Workflow run: ${GITHUB_RUN_ID}
+          - Completed at: ${completed_at}
+          - Deleted artifacts: ${deleted_artifacts}
+          - Deleted artifact bytes: ${deleted_artifact_bytes}
+          - Deleted caches: ${deleted_caches}
+          - Deleted cache bytes: ${deleted_cache_bytes}
+          - Remaining artifacts: ${remaining_artifacts}
+          - Remaining caches: ${remaining_caches}
+          - Listing errors: ${list_errors}
+          EOF
+
+          cat "${RESULT_FILE}"
+          [[ "${remaining_artifacts}" == "0" && "${remaining_caches}" == "0" && "${list_errors}" == "0" ]]
+
+      - name: Publish and close verification issue
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RESULT_FILE: /tmp/actions-storage-cleanup-result.txt
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [[ ! -f "${RESULT_FILE}" ]]; then
+            cat > "${RESULT_FILE}" <<EOF
+          # GitHub Actions storage cleanup result
+
+          - Repository: ${REPO}
+          - Workflow run: ${RUN_ID}
+          - Result file was not produced because the cleanup step stopped unexpectedly.
+          EOF
+          fi
+          issue_url=$(gh issue create --repo "${REPO}" \
+            --title "[maintenance] Actions storage cleanup result ${RUN_ID}" \
+            --body-file "${RESULT_FILE}")
+          gh issue close "${issue_url}" --repo "${REPO}" >/dev/null
+          echo "Published verification issue: ${issue_url}"
