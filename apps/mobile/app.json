@@ -28,6 +28,12 @@
     },
     "android": {
       "package": "com.kai.cod",
+      "allowBackup": false,
+      "blockedPermissions": [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.SYSTEM_ALERT_WINDOW"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#1b7f7f",
         "foregroundImage": "./assets/android-icon-foreground.png"
