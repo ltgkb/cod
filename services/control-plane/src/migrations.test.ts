@@ -137,11 +137,20 @@ describe('production-safe migrations and rate limits', () => {
     expect(service).toMatch(/^ProtectHome=true$/m);
 
     const deployScript = readFileSync(new URL('../../../scripts/deploy-server.sh', import.meta.url), 'utf8');
+    expect(deployScript).toContain("node_binary=\"$(node -p 'process.execPath')\"");
+    expect(deployScript).not.toContain('node_binary="$(command -v node)"');
+    expect(deployScript).toContain('env -i HOME=/nonexistent PATH=/usr/bin:/bin "${node_binary}"');
+    expect(deployScript).toContain('sudo -u cod -- env -i HOME=/nonexistent PATH=/usr/bin:/bin "${release}/bin/node"');
+    expect(deployScript).toContain('sudo -u cod -- env -i HOME=/nonexistent PATH=/usr/bin:/bin "${release_staging}/bin/node"');
+    expect(deployScript).toContain('Resolved Node runtime is not self-contained');
+    expect(deployScript).toContain('Staged Node runtime is not self-contained');
     expect(deployScript).toContain('sudo install -o root -g root -m 755 "${node_binary}" "${release_staging}/bin/node"');
     expect(deployScript).toContain('sudo useradd --system --gid cod --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin cod');
     expect(deployScript).toContain('sudo chown -R root:root "${release_staging}"');
     expect(deployScript).toContain('sudo chmod -R go-w "${release_staging}"');
     expect(deployScript).toContain('! -user root -o ! -group root -o -perm /022');
+    expect(deployScript.indexOf('sudo useradd --system')).toBeLessThan(deployScript.indexOf('sudo -u cod -- env -i'));
+    expect(deployScript.indexOf('sudo -u cod -- env -i')).toBeLessThan(deployScript.indexOf('release=%s (already active)'));
   });
 
   it('keeps production registration closed until email ownership is verified', () => {
