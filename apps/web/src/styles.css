@@ -629,6 +629,7 @@ button:active { transform: translateY(1px); }
   .header-actions { display: grid; grid-template-columns: auto minmax(110px, .9fr) minmax(120px, 1.1fr) auto; flex: none; width: 100%; }
   .header-actions .header-status { grid-column: 1 / -1; justify-self: start; }
   .source-picker, .model-picker { display: block; width: 100%; min-width: 0; max-width: none; }
+  .context-strip { flex-wrap: wrap; overflow-x: visible; }
 }
 
 @media (max-width: 920px) {
