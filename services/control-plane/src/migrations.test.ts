@@ -187,8 +187,12 @@ describe('production-safe migrations and rate limits', () => {
     const service = readFileSync(new URL('../../../deploy/cod-control-plane.service', import.meta.url), 'utf8');
 
     expect(runtime).toMatch(/^COD_REGISTRATION_ENABLED=false$/m);
+    expect(runtime).toMatch(/^NODE_ENV=production$/m);
     expect(example).not.toMatch(/^COD_REGISTRATION_ENABLED=/m);
     expect(example).toContain('secret-file drift cannot reopen features');
     expect(service.indexOf('EnvironmentFile=-/etc/cod/control-plane.env')).toBeLessThan(service.indexOf('EnvironmentFile=/etc/cod/runtime.env'));
+    const deployScript = readFileSync(new URL('../../../scripts/deploy-server.sh', import.meta.url), 'utf8');
+    expect(deployScript).toContain("sudo grep -zqx 'NODE_ENV=production' \"/proc/${main_pid}/environ\"");
+    expect(deployScript.indexOf('if [[ "${ready}" != true ]]')).toBeLessThan(deployScript.indexOf("sudo grep -zqx 'NODE_ENV=production'"));
   });
 });

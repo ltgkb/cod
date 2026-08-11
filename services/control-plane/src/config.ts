@@ -3,6 +3,7 @@ import { nonPublicTokenRetailDomains, tokenRetailDomains, tokenRetailSourceId } 
 
 const nonPublicTokenRetailSourceIds = new Set(nonPublicTokenRetailDomains.map(tokenRetailSourceId));
 const nonPublicTokenRetailLabels = new Set<string>(nonPublicTokenRetailDomains);
+const reservedModelSourceIds = new Set(['demo']);
 
 export interface ModelSourceConfig {
   id: string;
@@ -129,6 +130,7 @@ function loadModelSources(environment: NodeJS.ProcessEnv): ModelSourceConfig[] {
     const id = String(source.id ?? '').trim(); const label = String(source.label ?? '').trim();
     const commissionRateBps = Number(source.commissionRateBps ?? 0);
     if (!/^[a-z0-9-]{2,40}$/.test(id) || !label || !Number.isInteger(commissionRateBps) || commissionRateBps < 0 || commissionRateBps > 10_000) throw new Error(`Model source ${index} is incomplete`);
+    if (reservedModelSourceIds.has(id)) throw new Error(`Model source ${index} uses a reserved ID`);
     if (nonPublicTokenRetailSourceIds.has(id) || nonPublicTokenRetailLabels.has(label.toLowerCase())) throw new Error(`Model source ${index} is non-public`);
     return {
       id, label, upstreamSourceId: 'ai-kai', baseUrl: aiBaseUrl, catalogUrl, statusUrl,

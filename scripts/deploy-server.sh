@@ -191,6 +191,12 @@ if [[ "${ready}" != true ]]; then
   false
 fi
 
+main_pid="$(systemctl show --property=MainPID --value cod-control-plane)"
+if [[ ! "${main_pid}" =~ ^[1-9][0-9]*$ ]] || ! sudo grep -zqx 'NODE_ENV=production' "/proc/${main_pid}/environ"; then
+  echo "Control plane is not running with NODE_ENV=production" >&2
+  false
+fi
+
 sudo systemctl enable --now cod-backup.timer cod-healthcheck.timer
 
 mapfile -t stale_releases < <(find "${release_root}" -mindepth 1 -maxdepth 1 -type d ! -name '*.staging' -printf '%T@ %p\n' | sort -nr | tail -n +6 | cut -d' ' -f2-)

@@ -255,7 +255,11 @@ export class AiGateway {
   }
 
   async proxyChat(sourceId: string, body: unknown, requestId: string = randomUUID(), signal?: AbortSignal): Promise<Response> {
-    if (sourceId === 'demo') return this.demoResponse(body);
+    if (sourceId === 'demo') {
+      const source = await this.getSource(sourceId);
+      if (source.upstreamSourceId !== 'demo' || source.status !== 'demo') throw new HttpError('Unknown model source', 400, 'unknown_source');
+      return this.demoResponse(body);
+    }
     const source = this.config.modelSources.find((item) => item.id === sourceId);
     if (!source?.apiKey) throw new HttpError('Selected model source is not configured', 503, 'source_unavailable');
     let lastError: unknown;

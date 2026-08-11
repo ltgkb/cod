@@ -77,6 +77,35 @@ describe('model source gateway', () => {
         COD_MODEL_SOURCES_JSON: JSON.stringify([{ id: `public-alias-${index}`, label }]),
       })).toThrow('is non-public');
     }
+    expect(() => loadConfig({
+      NODE_ENV: 'production',
+      COD_SESSION_SECRET: 's'.repeat(32),
+      DATABASE_URL: 'postgresql://cod:test@127.0.0.1:5432/cod',
+      COD_DEVELOPMENT_LOGIN_ENABLED: 'false',
+      KAI_API_KEY: 'test-key',
+      COD_MODEL_SOURCES_JSON: JSON.stringify([{ id: 'demo', label: 'Live provider' }]),
+    })).toThrow('uses a reserved ID');
+  });
+
+  it('never routes a configured live source through the reserved demo response', async () => {
+    const config = loadConfig({
+      NODE_ENV: 'production',
+      COD_SESSION_SECRET: 's'.repeat(32),
+      DATABASE_URL: 'postgresql://cod:test@127.0.0.1:5432/cod',
+      COD_DEVELOPMENT_LOGIN_ENABLED: 'false',
+      KAI_API_KEY: 'test-key',
+    });
+    config.modelSources = [{ ...config.modelSources[0]!, id: 'demo', label: 'Malformed live source' }];
+    const fetcher = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+      const url = String(input);
+      if (url.endsWith('/api/pricing')) return Response.json({ data: [{ model_name: 'glm-5.2', quota_type: 0, model_ratio: 1, completion_ratio: 1, supported_endpoint_types: ['openai'] }] });
+      if (url.endsWith('/api/status')) return Response.json({ data: { quota_per_unit: 500_000, price: 7 } });
+      if (url.endsWith('/models')) return Response.json({ data: [{ id: 'glm-5.2' }] });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const gateway = new AiGateway(config, fetcher as typeof fetch);
+    await expect(gateway.proxyChat('demo', { model: 'glm-5.2', messages: [] }, 'reserved-demo')).rejects.toMatchObject({ status: 400, code: 'unknown_source' });
+    expect(fetcher.mock.calls.some(([input]) => String(input).endsWith('/chat/completions'))).toBe(false);
   });
 
   it('uses upstream SSE to keep long generations alive and normalizes the final answer for billing', async () => {
