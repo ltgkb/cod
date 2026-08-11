@@ -1,0 +1,58 @@
+name: Actions storage cleanup
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/actions-storage-cleanup.yml
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Delete repository Actions artifacts and caches
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          artifact_count=0
+          artifact_bytes=0
+          while IFS=$'\t' read -r id size name; do
+            [[ -z "${id}" ]] && continue
+            echo "Deleting artifact ${name} (${size} bytes, id ${id})"
+            if gh api -X DELETE "repos/${REPO}/actions/artifacts/${id}" >/dev/null 2>&1; then
+              artifact_count=$((artifact_count + 1))
+              artifact_bytes=$((artifact_bytes + size))
+            fi
+          done < <(gh api --paginate "repos/${REPO}/actions/artifacts?per_page=100" --jq '.artifacts[] | [.id, .size_in_bytes, .name] | @tsv')
+
+          cache_count=0
+          cache_bytes=0
+          while IFS=$'\t' read -r id size name; do
+            [[ -z "${id}" ]] && continue
+            echo "Deleting cache ${name} (${size} bytes, id ${id})"
+            if gh api -X DELETE "repos/${REPO}/actions/caches/${id}" >/dev/null 2>&1; then
+              cache_count=$((cache_count + 1))
+              cache_bytes=$((cache_bytes + size))
+            fi
+          done < <(gh api --paginate "repos/${REPO}/actions/caches?per_page=100" --jq '.actions_caches[] | [.id, .size_in_bytes, .key] | @tsv')
+
+          sleep 5
+          remaining_artifacts="$(gh api "repos/${REPO}/actions/artifacts?per_page=1" --jq '.total_count')"
+          remaining_caches="$(gh api "repos/${REPO}/actions/caches?per_page=1" --jq '.total_count')"
+
+          echo "Deleted artifacts: ${artifact_count} (${artifact_bytes} bytes)"
+          echo "Deleted caches: ${cache_count} (${cache_bytes} bytes)"
+          echo "Remaining artifacts: ${remaining_artifacts}"
+          echo "Remaining caches: ${remaining_caches}"
+
+          test "${remaining_artifacts}" -eq 0
+          test "${remaining_caches}" -eq 0
