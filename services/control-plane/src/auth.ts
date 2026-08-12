@@ -67,7 +67,9 @@ function signPayload(value: SessionPayload | AgentSessionPayload, secret: string
 }
 
 function verifySignedPayload(token: string, secret: string): Record<string, unknown> | null {
-  const [payload, signature] = token.split('.');
+  const segments = token.split('.');
+  if (segments.length !== 2) return null;
+  const [payload, signature] = segments;
   if (!payload || !signature) return null;
   const expected = createHmac('sha256', secret).update(payload).digest();
   let actual: Buffer;

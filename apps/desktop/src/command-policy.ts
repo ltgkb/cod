@@ -90,6 +90,9 @@ export function parseCommand(rawCommand: string): string[] {
       else current += character;
       continue;
     }
+    if (/[;&|<>`]/.test(character) || (character === '$' && rawCommand.trim()[index + 1] === '(')) {
+      throw new Error('Shell operators are not supported in the embedded terminal');
+    }
     if (character === '"' || character === "'") {
       quote = character;
       continue;

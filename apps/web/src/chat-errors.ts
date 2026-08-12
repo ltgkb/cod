@@ -1,6 +1,9 @@
 import { ApiError } from './api';
 
 export function chatFailureMessage(error: unknown): string {
+  if (error instanceof ApiError && ['invalid_task_claim', 'invalid_task_lease', 'task_lease_required', 'task_lease_expired'].includes(error.code)) {
+    return '远程任务执行状态已失效。普通模型对话不应受此影响；请刷新后重试，或为代码任务重新启动 Desktop。';
+  }
   if (error instanceof ApiError && error.code === 'insufficient_balance') {
     return 'COD 可用额度不足，最后一次失败请求未扣费；此前已成功的模型调用仍按实际用量结算。请充值或购买额度包后重试。';
   }

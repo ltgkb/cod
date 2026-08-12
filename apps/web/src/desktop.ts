@@ -1,5 +1,9 @@
 import type { ProjectSnapshot } from './types';
 
+export function desktopGitDiffError(diff: string): string | null {
+  return /^(?:Git (?:状态|改动)读取(?:超时|失败)|Unable to read git diff)/.test(diff) ? diff : null;
+}
+
 export const hasDesktopBridge = () => Boolean(window.codDesktop);
 
 export async function selectProjectRoot(): Promise<string | null> {

@@ -1,0 +1,42 @@
+{
+  "channel": "stable",
+  "updatedAt": "2026-08-11",
+  "platforms": {
+    "macos": {
+      "label": "macOS",
+      "status": "preparing",
+      "statusLabel": "正在完成签名与公证",
+      "version": null,
+      "architecture": "Apple 芯片",
+      "requirements": "macOS 12 或更高版本",
+      "size": null,
+      "sha256": null,
+      "url": null,
+      "note": "Apple 芯片版正在完成 Developer ID 签名和公证。"
+    },
+    "windows": {
+      "label": "Windows",
+      "status": "preparing",
+      "statusLabel": "正在完成签名与验收",
+      "version": null,
+      "architecture": "x64",
+      "requirements": "Windows 10 或更高版本",
+      "size": null,
+      "sha256": null,
+      "url": null,
+      "note": "Windows 安装程序正在完成代码签名与跨平台验收。"
+    },
+    "linux": {
+      "label": "Linux",
+      "status": "preparing",
+      "statusLabel": "正在完成发布验收",
+      "version": null,
+      "architecture": "x64",
+      "requirements": "glibc 2.28+ 的 64 位 Linux（如 Debian 10+ / Ubuntu 20.04+）",
+      "size": null,
+      "sha256": null,
+      "url": null,
+      "note": "AppImage 和 Deb 安装包正在完成发布验收。"
+    }
+  }
+}

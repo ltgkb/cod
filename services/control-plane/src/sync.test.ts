@@ -23,6 +23,17 @@ describe('synchronization database contract', () => {
   it('validates device platforms', async () => {
     const database = new MemoryDatabase();
     await expect(database.registerDevice(principal, { name: 'Unknown', platform: 'watch' as 'linux' })).rejects.toMatchObject({ code: 'invalid_device_platform' });
+    await expect(database.registerDevice(principal, { name: 42 as unknown as string, platform: 'linux' })).rejects.toMatchObject({ status: 400, code: 'invalid_device' });
+    await expect(database.createTask(principal, null as unknown as { title: string; deviceId: string })).rejects.toMatchObject({ status: 400, code: 'invalid_task' });
+  });
+
+  it('rejects malformed task outcomes as client errors', async () => {
+    const database = new MemoryDatabase();
+    const device = await database.registerDevice(principal, { name: 'Linux', platform: 'linux' });
+    const task = await database.createTask(principal, { title: 'Validate outcome', deviceId: device.id });
+    const running = await database.updateTask(principal, task.id, 'running', task.version);
+    await expect(database.updateTask(principal, task.id, 'complete', running.version, { result: 42 as unknown as string })).rejects.toMatchObject({ status: 400, code: 'invalid_task_result' });
+    await expect(database.updateTask(principal, task.id, 'failed', running.version, { error: {} as unknown as string })).rejects.toMatchObject({ status: 400, code: 'invalid_task_error' });
   });
 
   it('records cancellation as a terminal state and allows an explicit restart',async()=>{

@@ -15,6 +15,8 @@ describe('scoped agent sessions', () => {
     expect(verifySessionToken(agent, secret, now)).toBeNull();
     expect(verifyAgentSessionToken(agent, secret, now)).toMatchObject({ ...principal, ...scope, kind: 'agent', exp: now + AGENT_SESSION_TTL_MS });
     expect(verifyAgentSessionToken(agent, secret, now + AGENT_SESSION_TTL_MS)).toBeNull();
+    expect(verifySessionToken(`${session}.ignored`, secret, now)).toBeNull();
+    expect(verifyAgentSessionToken(`${agent}.ignored`, secret, now)).toBeNull();
   });
 
   it('rejects tampered scoped tokens', () => {

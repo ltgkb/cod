@@ -7,6 +7,7 @@ const config = {
   taskId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
   sourceId: 'ai-kai',
   modelId: 'glm-5.2',
+  root: '/approved/project',
 };
 
 function successfulResponse(overrides = {}) {
@@ -36,6 +37,7 @@ test('mints a scoped token without putting the full session in the request body'
   assert.equal(capturedInit.headers.authorization, `Bearer ${config.token}`);
   assert.deepEqual(JSON.parse(capturedInit.body), { taskId: config.taskId, sourceId: config.sourceId, model: config.modelId });
   assert.doesNotMatch(capturedInit.body, new RegExp(config.token));
+  assert.doesNotMatch(capturedInit.body, new RegExp(config.root));
 });
 
 test('rejects a response whose scope or expiration does not match the request', async () => {

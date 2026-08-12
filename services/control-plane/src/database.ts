@@ -1,6 +1,6 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { Pool, type PoolClient } from 'pg';
-import type { AccountSummary, DeviceRecord, TaskStatus, UsageEvent } from '@cod/contracts';
+import type { AccountSummary, AdminComputeRequestPage, AdminComputeRequestSummary, ComputeRequestKind, ComputeRequestStatus, DeviceRecord, TaskStatus, UsageEvent } from '@cod/contracts';
 import { HttpError } from './errors.js';
 import type { ComputeRequest, ComputeRequestInput } from './compute-market.js';
 
@@ -14,6 +14,9 @@ export interface Principal {
 export interface IdentityRecord {
   principal: Principal;
   passwordHash: string | null;
+  phoneE164: string | null;
+  emailVerifiedAt: string | null;
+  phoneVerifiedAt: string | null;
   inviteCode: string | null;
   referredByUserId: string | null;
   referralCodeUsed: string | null;
@@ -22,6 +25,87 @@ export interface IdentityRecord {
 export interface RegistrationResult {
   identity: IdentityRecord;
   created: boolean;
+}
+
+export interface RegistrationChallengeResult {
+  challengeId: string;
+  email: string;
+  expiresAt: string;
+  retryAfterSeconds: number;
+}
+
+export interface PhoneRegistrationChallengeResult {
+  challengeId: string;
+  phone: string;
+  expiresAt: string;
+  retryAfterSeconds: number;
+}
+
+export interface StartEmailRegistrationInput {
+  challengeId: string;
+  email: string;
+  codeHash: string;
+  now: Date;
+  expiresAt: Date;
+  resendAfter: Date;
+  maxSends: number;
+}
+
+export interface VerifyRegistrationEmailInput {
+  challengeId: string;
+  email: string;
+  codeHash: string;
+  now: Date;
+  maxFailures: number;
+}
+
+export interface StartPhoneRegistrationInput {
+  challengeId: string;
+  email: string;
+  phone: string;
+  codeHash: string;
+  now: Date;
+  expiresAt: Date;
+  resendAfter: Date;
+  maxSends: number;
+}
+
+export interface VerifyRegistrationPhoneInput extends VerifyRegistrationEmailInput {
+  phone: string;
+}
+
+export interface CompleteVerifiedRegistrationInput {
+  challengeId: string;
+  email: string;
+  phone: string;
+  passwordHash: string;
+  inviteCode: string | null;
+  idempotencyKey: string;
+  fingerprint: string;
+  principal: Principal;
+  now: Date;
+}
+
+export interface AssertVerifiedRegistrationInput {
+  challengeId: string;
+  email: string;
+  phone: string;
+  now: Date;
+}
+
+export interface RegistrationRateLimitInput {
+  scope: string;
+  keyHash: string;
+  now: Date;
+  windowSeconds: number;
+  limit: number;
+}
+
+export interface InvalidateRegistrationCodeInput {
+  challengeId: string;
+  channel: 'email' | 'phone';
+  codeHash: string;
+  now: Date;
 }
 
 export interface ReferralSummary {
@@ -157,7 +241,32 @@ export type ChatRequestClaim =
   | { state: 'pending' }
   | { state: 'complete'; responsePayload: Record<string, unknown> };
 
+export interface ComputeRequestCreationResult {
+  request: ComputeRequest;
+  created: boolean;
+}
+
+export interface ComputeRequestStatusUpdateResult {
+  request: ComputeRequest;
+  previousStatus: ComputeRequestStatus;
+  changed: boolean;
+}
+
+export interface ComputeRequestCursor {
+  createdAt: string;
+  id: string;
+}
+
+export interface AdminComputeRequestQuery {
+  limit?: number;
+  cursor?: ComputeRequestCursor | null;
+  status?: ComputeRequestStatus | null;
+  kind?: ComputeRequestKind | null;
+  q?: string | null;
+}
+
 export const CHAT_RESPONSE_CACHE_MAX_BYTES = 512 * 1024;
+export const adminComputeRequestIndexMigration = 'CREATE INDEX CONCURRENTLY IF NOT EXISTS cod_compute_requests_admin_created_idx ON cod_compute_requests(created_at DESC, id DESC)';
 
 export interface CodDatabase {
   initialize(): Promise<void>;
@@ -165,6 +274,14 @@ export interface CodDatabase {
   ensurePrincipal(principal: Principal): Promise<void>;
   findIdentityByEmail(email: string): Promise<IdentityRecord | null>;
   registerIdentity(principal: Principal, passwordHash: string, inviteCode: string | null, allowExisting: boolean): Promise<RegistrationResult>;
+  startEmailRegistration(input: StartEmailRegistrationInput): Promise<RegistrationChallengeResult>;
+  verifyRegistrationEmail(input: VerifyRegistrationEmailInput): Promise<void>;
+  startPhoneRegistration(input: StartPhoneRegistrationInput): Promise<PhoneRegistrationChallengeResult>;
+  verifyRegistrationPhone(input: VerifyRegistrationPhoneInput): Promise<void>;
+  assertVerifiedRegistration(input: AssertVerifiedRegistrationInput): Promise<'ready'|'consumed'>;
+  completeVerifiedRegistration(input: CompleteVerifiedRegistrationInput): Promise<RegistrationResult & { replayed: boolean }>;
+  consumeRegistrationRateLimit(input: RegistrationRateLimitInput): Promise<void>;
+  invalidateRegistrationCode(input: InvalidateRegistrationCodeInput): Promise<void>;
   getReferralSummary(principal: Principal): Promise<ReferralSummary>;
   getAccount(principal: Principal): Promise<AccountSummary>;
   getLedger(principal: Principal): Promise<LedgerEntry[]>;
@@ -180,8 +297,11 @@ export interface CodDatabase {
   reserveUsage(principal: Principal, reservationId: string, amountCents: number): Promise<void>;
   settleUsage(principal: Principal, reservationId: string, event: UsageEvent, completion?: ChatRequestCompletion): Promise<LedgerEntry>;
   releaseUsage(principal: Principal, reservationId: string): Promise<void>;
-  createComputeRequest(principal: Principal, input: ComputeRequestInput, idempotencyKey: string): Promise<ComputeRequest>;
+  createComputeRequest(principal: Principal, input: ComputeRequestInput, idempotencyKey: string): Promise<ComputeRequestCreationResult>;
   listComputeRequests(principal: Principal): Promise<ComputeRequest[]>;
+  listAdminComputeRequests(principal: Principal, query?: AdminComputeRequestQuery): Promise<AdminComputeRequestPage>;
+  getAdminComputeRequest(principal: Principal, requestId: string): Promise<ComputeRequest>;
+  updateAdminComputeRequestStatus(principal: Principal, requestId: string, status: ComputeRequestStatus, expectedStatus: ComputeRequestStatus): Promise<ComputeRequestStatusUpdateResult>;
   listDevices(principal: Principal): Promise<DeviceRecord[]>;
   registerDevice(principal: Principal, input: Pick<DeviceRecord, 'name' | 'platform'>): Promise<DeviceRecord>;
   heartbeat(principal: Principal, deviceId: string): Promise<DeviceRecord>;
@@ -205,8 +325,87 @@ const taskTransitions: Record<TaskStatus, ReadonlySet<TaskStatus>> = {
   cancelled: new Set(['running']),
 };
 
+const computeRequestStatuses = new Set<ComputeRequestStatus>(['submitted', 'contacting', 'quoted', 'closed']);
+const computeRequestKinds = new Set<ComputeRequestKind>(['rental', 'supply', 'installment', 'hosting']);
+const computeRequestTransitions: Record<ComputeRequestStatus, ReadonlySet<ComputeRequestStatus>> = {
+  submitted: new Set(['contacting', 'closed']),
+  contacting: new Set(['quoted', 'closed']),
+  quoted: new Set(['closed']),
+  closed: new Set(),
+};
+
+export function requireAdmin(principal: Principal): void {
+  if (principal.role !== 'admin') throw new HttpError('Administrator access is required', 403, 'admin_required');
+}
+
+export function validateComputeRequestStatus(status: unknown): asserts status is ComputeRequestStatus {
+  if (typeof status !== 'string' || !computeRequestStatuses.has(status as ComputeRequestStatus)) {
+    throw new HttpError('Compute request status is invalid', 400, 'invalid_compute_request_status');
+  }
+}
+
+export function validateComputeRequestKind(kind: unknown): asserts kind is ComputeRequestKind {
+  if (typeof kind !== 'string' || !computeRequestKinds.has(kind as ComputeRequestKind)) {
+    throw new HttpError('Compute request kind is invalid', 400, 'invalid_compute_request_kind');
+  }
+}
+
+export function validateComputeRequestId(id: unknown): asserts id is string {
+  if (typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+    throw new HttpError('Compute request ID is invalid',400,'invalid_compute_request_id');
+  }
+}
+
+export function encodeComputeRequestCursor(cursor: ComputeRequestCursor): string {
+  return Buffer.from(JSON.stringify([cursor.createdAt, cursor.id]), 'utf8').toString('base64url');
+}
+
+export function decodeComputeRequestCursor(raw: unknown): ComputeRequestCursor | null {
+  if (raw === null || raw === undefined || raw === '') return null;
+  if (typeof raw !== 'string' || raw.length > 512 || !/^[A-Za-z0-9_-]+$/.test(raw)) {
+    throw new HttpError('Compute request cursor is invalid', 400, 'invalid_compute_request_cursor');
+  }
+  try {
+    const decoded = Buffer.from(raw, 'base64url').toString('utf8');
+    const parsed = JSON.parse(decoded) as unknown;
+    if (!Array.isArray(parsed) || parsed.length !== 2 || typeof parsed[0] !== 'string' || typeof parsed[1] !== 'string') throw new Error('invalid cursor');
+    const [createdAt,id] = parsed;
+    const timestamp=createdAt.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.)(\d{3}|\d{6})Z$/);
+    const millisecondTimestamp=timestamp?`${timestamp[1]}${timestamp[2].slice(0,3)}Z`:'';
+    if (!timestamp || new Date(millisecondTimestamp).toISOString() !== millisecondTimestamp || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) throw new Error('invalid cursor');
+    const cursor={createdAt,id};
+    if (encodeComputeRequestCursor(cursor) !== raw) throw new Error('non-canonical cursor');
+    return cursor;
+  } catch {
+    throw new HttpError('Compute request cursor is invalid', 400, 'invalid_compute_request_cursor');
+  }
+}
+
+export function normalizeAdminComputeRequestQuery(raw: AdminComputeRequestQuery = {}): Required<AdminComputeRequestQuery> {
+  const limit=raw.limit??50;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new HttpError('Compute request page size is invalid',400,'invalid_compute_request_limit');
+  if (raw.status !== null && raw.status !== undefined) validateComputeRequestStatus(raw.status);
+  if (raw.kind !== null && raw.kind !== undefined) validateComputeRequestKind(raw.kind);
+  if (raw.cursor !== null && raw.cursor !== undefined) {
+    const canonical=encodeComputeRequestCursor(raw.cursor);
+    if (!decodeComputeRequestCursor(canonical)) throw new HttpError('Compute request cursor is invalid',400,'invalid_compute_request_cursor');
+  }
+  if (raw.q !== null && raw.q !== undefined && typeof raw.q !== 'string') throw new HttpError('Compute request search is invalid',400,'invalid_compute_request_query');
+  const q=raw.q?.trim()??'';
+  if (q.length > 100) throw new HttpError('Compute request search is invalid',400,'invalid_compute_request_query');
+  return {limit,cursor:raw.cursor??null,status:raw.status??null,kind:raw.kind??null,q:q.toLocaleLowerCase('en-US')||null};
+}
+
+export function validateComputeRequestTransition(current: ComputeRequestStatus, next: ComputeRequestStatus): void {
+  validateComputeRequestStatus(next);
+  if (current === next) return;
+  if (!computeRequestTransitions[current].has(next)) {
+    throw new HttpError(`Compute request cannot move from ${current} to ${next}`, 409, 'invalid_compute_request_transition');
+  }
+}
+
 export function validateDeviceInput(input: Pick<DeviceRecord, 'name' | 'platform'>): void {
-  if (!input.name?.trim()) throw new HttpError('Device name is required', 400, 'invalid_device');
+  if (!input || typeof input !== 'object' || typeof input.name !== 'string' || !input.name.trim()) throw new HttpError('Device name is required', 400, 'invalid_device');
   if (!devicePlatforms.has(input.platform)) throw new HttpError('Device platform is invalid', 400, 'invalid_device_platform');
 }
 
@@ -216,8 +415,78 @@ export function validateTaskTransition(current: TaskStatus, next: TaskStatus): v
 }
 
 export function validateTaskOutcome(status: TaskStatus, result: string | null, error: string | null): void {
+  if (result !== null && typeof result !== 'string') throw new HttpError('Task result is invalid', 400, 'invalid_task_result');
+  if (error !== null && typeof error !== 'string') throw new HttpError('Task error is invalid', 400, 'invalid_task_error');
   if (status === 'complete' && !result?.trim()) throw new HttpError('Completed tasks require a result', 400, 'task_result_required');
   if (status === 'failed' && !error?.trim()) throw new HttpError('Failed tasks require an error', 400, 'task_error_required');
+}
+
+export function validateTopupRequest(request: TopupRequest): void {
+  if (!request || typeof request !== 'object') throw new HttpError('Top-up request is invalid', 400, 'invalid_topup');
+  if (typeof request.idempotencyKey !== 'string' || !request.idempotencyKey || request.idempotencyKey.length > 200) throw new HttpError('Top-up idempotency key is invalid', 400, 'invalid_idempotency_key');
+  if (!Number.isInteger(request.amountCents) || request.amountCents < 100 || request.amountCents > 1_000_000) throw new HttpError('Top-up amount must be between 100 and 1000000 cents', 400, 'invalid_topup');
+  if (!['pilot', 'wechat', 'alipay'].includes(request.channel)) throw new HttpError('Top-up channel is invalid', 400, 'invalid_topup_channel');
+}
+
+export function topupMatchesLedger(entry: LedgerEntry, request: TopupRequest): boolean {
+  return entry.type === 'topup'
+    && entry.amountCents === request.amountCents
+    && entry.walletAmountCents === request.amountCents
+    && entry.creditAmountCents === 0
+    && entry.reference === `${request.channel}:${request.idempotencyKey}`;
+}
+
+export function validateUsageEvent(event: UsageEvent): void {
+  if (!event || typeof event !== 'object') throw new HttpError('Usage event is invalid', 400, 'invalid_usage');
+  if (typeof event.idempotencyKey !== 'string' || !event.idempotencyKey || event.idempotencyKey.length > 240) throw new HttpError('Usage idempotency key is invalid', 400, 'invalid_idempotency_key');
+  if (typeof event.taskId !== 'string' || !event.taskId || event.taskId.length > 200) throw new HttpError('Usage task is invalid', 400, 'invalid_usage');
+  if (typeof event.sourceId !== 'string' || !/^[a-z0-9-]{2,40}$/.test(event.sourceId)) throw new HttpError('Usage source is invalid', 400, 'invalid_usage');
+  if (event.upstreamSourceId !== undefined && (typeof event.upstreamSourceId !== 'string' || !/^[a-z0-9-]{2,40}$/.test(event.upstreamSourceId))) throw new HttpError('Usage upstream source is invalid', 400, 'invalid_usage');
+  if (typeof event.model !== 'string' || !event.model.trim() || event.model.length > 200) throw new HttpError('Usage model is invalid', 400, 'invalid_usage');
+  if (typeof event.paymentDirection !== 'string' || !event.paymentDirection.trim() || event.paymentDirection.length > 500) throw new HttpError('Usage payment direction is invalid', 400, 'invalid_usage');
+  if (!Number.isSafeInteger(event.inputTokens) || event.inputTokens < 0 || !Number.isSafeInteger(event.outputTokens) || event.outputTokens < 0) throw new HttpError('Usage token count is invalid', 400, 'invalid_usage');
+  if (!Number.isSafeInteger(event.costCents) || event.costCents < 0) throw new HttpError('Usage cost is invalid', 400, 'invalid_usage');
+  if (event.commissionRateBps !== undefined && (!Number.isInteger(event.commissionRateBps) || event.commissionRateBps < 0 || event.commissionRateBps > 10_000)) throw new HttpError('Usage commission rate is invalid', 400, 'invalid_usage');
+  if (event.commissionCents !== undefined && (!Number.isSafeInteger(event.commissionCents) || event.commissionCents < 0)) throw new HttpError('Usage commission is invalid', 400, 'invalid_usage');
+}
+
+export function billedUsageEvent(principal: Principal, event: UsageEvent): UsageEvent {
+  return principal.role === 'admin'
+    ? { ...event, costCents: 0, paymentDirection: '管理员测试免计费', commissionRateBps: 0, commissionCents: 0 }
+    : event;
+}
+
+export function usageMatchesLedger(entry: LedgerEntry, event: UsageEvent): boolean {
+  return entry.type === 'usage'
+    && entry.amountCents === -event.costCents
+    && entry.reference === `${event.sourceId}:${event.model}:${event.taskId}`
+    && entry.sourceId === event.sourceId
+    && entry.upstreamSourceId === (event.upstreamSourceId ?? 'ai-kai')
+    && entry.model === event.model
+    && entry.paymentDirection === event.paymentDirection
+    && (entry.commissionRateBps ?? 0) === (event.commissionRateBps ?? 0)
+    && (entry.commissionCents ?? 0) === (event.commissionCents ?? 0);
+}
+
+export function computeRequestMatchesInput(request: ComputeRequest, input: ComputeRequestInput): boolean {
+  return request.kind === input.kind
+    && request.offerId === (input.offerId ?? null)
+    && request.company === input.company
+    && request.contactName === input.contactName
+    && request.contactPhone === input.contactPhone
+    && request.city === input.city
+    && request.gpuModel === input.gpuModel
+    && request.quantity === input.quantity
+    && request.durationHours === (input.durationHours ?? null)
+    && request.termMonths === (input.termMonths ?? null)
+    && request.requirements === input.requirements
+    && request.hostingPeriodMonths === (input.hostingPeriodMonths ?? null)
+    && request.rackUnits === (input.rackUnits ?? null)
+    && request.powerKilowatts === (input.powerKilowatts ?? null)
+    && request.networkMbps === (input.networkMbps ?? null)
+    && request.availabilityNotes === (input.availabilityNotes ?? null)
+    && request.settlementPreference === (input.settlementPreference ?? null)
+    && request.hostingRequirements === (input.hostingRequirements ?? null);
 }
 
 export const legacyInviteCodeBackfillMigration = `
@@ -326,6 +595,32 @@ CREATE INDEX IF NOT EXISTS cod_chat_requests_owner_expiry_idx ON cod_chat_reques
 CREATE INDEX IF NOT EXISTS cod_chat_requests_expiry_idx ON cod_chat_requests(expires_at);
 `;
 
+export const computeRequestHostingMigration = `
+DO $compute_request_hosting$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='cod_compute_requests'::regclass AND conname='cod_compute_requests_kind_check'
+      AND position('hosting' in pg_get_constraintdef(oid))=0
+  ) THEN
+    ALTER TABLE cod_compute_requests DROP CONSTRAINT cod_compute_requests_kind_check;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='cod_compute_requests'::regclass AND conname='cod_compute_requests_kind_check'
+  ) THEN
+    ALTER TABLE cod_compute_requests ADD CONSTRAINT cod_compute_requests_kind_check
+      CHECK (kind IN ('rental','supply','installment','hosting')) NOT VALID;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='cod_compute_requests'::regclass AND conname='cod_compute_requests_kind_check' AND NOT convalidated
+  ) THEN
+    ALTER TABLE cod_compute_requests VALIDATE CONSTRAINT cod_compute_requests_kind_check;
+  END IF;
+END $compute_request_hosting$;
+`;
+
 const schema = `
 CREATE TABLE IF NOT EXISTS cod_users (
   tenant_id text NOT NULL, user_id text NOT NULL, email text NOT NULL, display_name text NOT NULL,
@@ -340,9 +635,69 @@ ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS referred_by_user_id text;
 ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS referral_code_used text;
 ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS referral_commission_rate_bps integer NOT NULL DEFAULT 0 CHECK (referral_commission_rate_bps >= 0 AND referral_commission_rate_bps <= 10000);
 ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'member' CHECK (role IN ('member','admin'));
+ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS phone_e164 text;
+ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS email_verified_at timestamptz;
+ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS phone_verified_at timestamptz;
+ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS registration_method text NOT NULL DEFAULT 'legacy';
+ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS registration_attempt_id uuid;
+DO $cod_registration_user_constraints$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cod_users'::regclass AND conname='cod_users_phone_e164_check') THEN
+    ALTER TABLE cod_users ADD CONSTRAINT cod_users_phone_e164_check CHECK (phone_e164 IS NULL OR phone_e164 ~ '^\\+[1-9][0-9]{7,14}$') NOT VALID;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cod_users'::regclass AND conname='cod_users_registration_method_check') THEN
+    ALTER TABLE cod_users ADD CONSTRAINT cod_users_registration_method_check CHECK (registration_method IN ('legacy','trusted_federated','public_dual_otp')) NOT VALID;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cod_users'::regclass AND conname='cod_users_dual_otp_verified_check') THEN
+    ALTER TABLE cod_users ADD CONSTRAINT cod_users_dual_otp_verified_check CHECK (registration_method<>'public_dual_otp' OR (phone_e164 IS NOT NULL AND email_verified_at IS NOT NULL AND phone_verified_at IS NOT NULL AND registration_attempt_id IS NOT NULL)) NOT VALID;
+  END IF;
+END $cod_registration_user_constraints$;
 ${legacyInviteCodeBackfillMigration}
 CREATE UNIQUE INDEX IF NOT EXISTS cod_users_email_global_unique ON cod_users (lower(email));
 CREATE UNIQUE INDEX IF NOT EXISTS cod_users_invite_code_unique ON cod_users (upper(invite_code)) WHERE invite_code IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS cod_users_phone_global_unique ON cod_users (phone_e164) WHERE phone_e164 IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS cod_users_registration_attempt_unique ON cod_users (registration_attempt_id) WHERE registration_attempt_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS cod_registration_challenges (
+  id uuid PRIMARY KEY,
+  email text NOT NULL,
+  phone_e164 text,
+  email_code_hash text,
+  phone_code_hash text,
+  status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','locked','superseded','consumed')),
+  failed_attempts integer NOT NULL DEFAULT 0 CHECK (failed_attempts >= 0),
+  email_send_count integer NOT NULL DEFAULT 1 CHECK (email_send_count >= 0),
+  phone_send_count integer NOT NULL DEFAULT 0 CHECK (phone_send_count >= 0),
+  email_verified_at timestamptz,
+  phone_verified_at timestamptz,
+  email_sent_at timestamptz NOT NULL,
+  phone_sent_at timestamptz,
+  email_resend_at timestamptz NOT NULL,
+  phone_resend_at timestamptz,
+  expires_at timestamptz NOT NULL,
+  idempotency_key text,
+  request_fingerprint text,
+  consumed_tenant_id text,
+  consumed_user_id text,
+  consumed_at timestamptz,
+  replay_until timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (phone_e164 IS NULL OR phone_e164 ~ '^\\+[1-9][0-9]{7,14}$')
+);
+CREATE UNIQUE INDEX IF NOT EXISTS cod_registration_challenges_active_email_unique ON cod_registration_challenges (lower(email)) WHERE status='pending';
+CREATE UNIQUE INDEX IF NOT EXISTS cod_registration_challenges_active_phone_unique ON cod_registration_challenges (phone_e164) WHERE status='pending' AND phone_e164 IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS cod_registration_challenges_idempotency_unique ON cod_registration_challenges (idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS cod_registration_challenges_expiry_idx ON cod_registration_challenges (expires_at) WHERE status='pending';
+CREATE TABLE IF NOT EXISTS cod_registration_rate_limits (
+  scope text NOT NULL,
+  key_hash text NOT NULL,
+  bucket_start timestamptz NOT NULL,
+  window_seconds integer NOT NULL CHECK (window_seconds > 0),
+  request_count integer NOT NULL DEFAULT 1 CHECK (request_count > 0),
+  expires_at timestamptz NOT NULL,
+  PRIMARY KEY (scope,key_hash,bucket_start,window_seconds)
+);
+CREATE INDEX IF NOT EXISTS cod_registration_rate_limits_expiry_idx ON cod_registration_rate_limits (expires_at);
 CREATE TABLE IF NOT EXISTS cod_ledger (
   id uuid PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL, type text NOT NULL,
   amount_cents bigint NOT NULL, reference text NOT NULL, idempotency_key text NOT NULL, source_id text, model_id text, payment_direction text, created_at timestamptz NOT NULL DEFAULT now(),
@@ -390,12 +745,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS cod_payment_orders_provider_event_unique ON co
 CREATE UNIQUE INDEX IF NOT EXISTS cod_payment_orders_provider_payment_unique ON cod_payment_orders (channel,provider_payment_id) WHERE provider_payment_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS cod_compute_requests (
   id uuid PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL, email text NOT NULL,
-  kind text NOT NULL CHECK (kind IN ('rental','supply','installment')), offer_id text,
+  kind text NOT NULL CHECK (kind IN ('rental','supply','installment','hosting')), offer_id text,
   status text NOT NULL CHECK (status IN ('submitted','contacting','quoted','closed')) DEFAULT 'submitted',
   payload jsonb NOT NULL DEFAULT '{}', idempotency_key text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (tenant_id,user_id,idempotency_key)
 );
+${computeRequestHostingMigration}
 CREATE TABLE IF NOT EXISTS cod_devices (
   id uuid PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL, name text NOT NULL, platform text NOT NULL,
   status text NOT NULL, last_seen_at timestamptz NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
@@ -432,6 +788,9 @@ const principalFromUserRow = (row: Record<string, unknown>): Principal => ({ use
 const identityFromRow = (row: Record<string, unknown>): IdentityRecord => ({
   principal: principalFromUserRow(row),
   passwordHash: row.password_hash ? String(row.password_hash) : null,
+  phoneE164: row.phone_e164 ? String(row.phone_e164) : null,
+  emailVerifiedAt: row.email_verified_at ? new Date(String(row.email_verified_at)).toISOString() : null,
+  phoneVerifiedAt: row.phone_verified_at ? new Date(String(row.phone_verified_at)).toISOString() : null,
   inviteCode: row.invite_code ? String(row.invite_code) : null,
   referredByUserId: row.referred_by_user_id ? String(row.referred_by_user_id) : null,
   referralCodeUsed: row.referral_code_used ? String(row.referral_code_used) : null,
@@ -449,12 +808,40 @@ const parseGrantAllocations = (value: unknown): GrantAllocation[] => Array.isArr
 const paymentOrderFromRow = (row: Record<string, unknown>): PaymentOrder => ({ id: String(row.id), amountCents: Number(row.amount_cents), currency: 'CNY', channel: row.channel as PaymentOrder['channel'], status: row.status as PaymentOrder['status'], providerPaymentId: row.provider_payment_id ? String(row.provider_payment_id) : null, createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString() });
 const computeRequestFromRow = (row: Record<string, unknown>): ComputeRequest => {
   const payload = row.payload && typeof row.payload === 'object' ? row.payload as ComputeRequestInput : {} as ComputeRequestInput;
-  return { ...payload, id: String(row.id), email: String(row.email), kind: row.kind as ComputeRequest['kind'], offerId: row.offer_id ? String(row.offer_id) : null, durationHours: payload.durationHours ?? null, termMonths: payload.termMonths ?? null, status: row.status as ComputeRequest['status'], createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString() };
+  return {
+    ...payload,
+    id: String(row.id), email: String(row.email), kind: row.kind as ComputeRequest['kind'], offerId: row.offer_id ? String(row.offer_id) : null,
+    durationHours: payload.durationHours ?? null, termMonths: payload.termMonths ?? null,
+    hostingPeriodMonths: payload.hostingPeriodMonths ?? null, rackUnits: payload.rackUnits ?? null,
+    powerKilowatts: payload.powerKilowatts ?? null, networkMbps: payload.networkMbps ?? null,
+    availabilityNotes: payload.availabilityNotes ?? null, settlementPreference: payload.settlementPreference ?? null,
+    hostingRequirements: payload.hostingRequirements ?? null,
+    fulfillmentMode: row.kind === 'hosting' ? 'third-party-manual-match' : 'manual-confirmation',
+    status: row.status as ComputeRequest['status'], createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString(),
+  };
 };
+const computeRequestSummaryFromRow = (row: Record<string, unknown>): AdminComputeRequestSummary => ({
+  id:String(row.id),kind:row.kind as ComputeRequestKind,company:String(row.company),gpuModel:String(row.gpu_model),quantity:Number(row.quantity),
+  status:row.status as ComputeRequestStatus,createdAt:new Date(String(row.created_at)).toISOString(),updatedAt:new Date(String(row.updated_at)).toISOString(),
+});
 const validateChatRequestIdentity = (requestKey: string, fingerprint: string): void => {
   if (!requestKey || requestKey.length > 240) throw new HttpError('Chat request key is invalid', 400, 'invalid_idempotency_key');
   if (!/^[a-f0-9]{64}$/.test(fingerprint)) throw new HttpError('Chat request fingerprint is invalid', 400, 'invalid_request_fingerprint');
 };
+const normalizeRegistrationEmail = (email: string): string => email.trim().toLocaleLowerCase('en-US');
+const validateRegistrationPhone = (phone: string): string => {
+  const normalized=phone.trim();
+  if(!/^\+[1-9]\d{7,14}$/.test(normalized))throw new HttpError('手机号必须使用 E.164 格式',400,'invalid_phone');
+  return normalized;
+};
+const validateRegistrationSecret = (value: string, code: string): void => {
+  if(typeof value!=='string'||!/^[a-f0-9]{64}$/.test(value))throw new HttpError('Registration verification data is invalid',400,code);
+};
+const registrationSecretMatches = (stored: unknown, supplied: string): boolean => {
+  if(typeof stored!=='string'||!/^[a-f0-9]{64}$/.test(stored)||!/^[a-f0-9]{64}$/.test(supplied))return false;
+  return timingSafeEqual(Buffer.from(stored,'hex'),Buffer.from(supplied,'hex'));
+};
+const registrationRetrySeconds = (retryAt: Date, now: Date): number => Math.max(0,Math.ceil((retryAt.getTime()-now.getTime())/1000));
 const deviceFromRow = (row: Record<string, unknown>): DeviceRecord => {
   const lastSeenAt = new Date(String(row.last_seen_at)).toISOString();
   const stale = Date.now() - new Date(lastSeenAt).getTime() > 45_000;
@@ -467,6 +854,9 @@ export class PostgresDatabase implements CodDatabase {
   constructor(databaseUrl: string) { this.pool = new Pool({ connectionString: databaseUrl, max: 10, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 5_000 }); }
   async initialize() {
     await this.pool.query(schema);
+    // This table can already contain customer requests on upgrade. Build the
+    // global admin index outside the schema transaction so writes stay live.
+    await this.pool.query(adminComputeRequestIndexMigration);
     await this.transaction(async (client) => {
       const orphaned = await client.query(`UPDATE cod_usage_reservations SET status='released',updated_at=now() WHERE status='reserved' RETURNING tenant_id,user_id,wallet_cents,grant_allocations`);
       const refunds = new Map<string, { tenantId: string; userId: string; amountCents: number }>();
@@ -517,6 +907,162 @@ export class PostgresDatabase implements CodDatabase {
       return {identity:identityFromRow(inserted.rows[0]),created:true};
     });
   }
+  async startEmailRegistration(input: StartEmailRegistrationInput) {
+    const email=normalizeRegistrationEmail(input.email);validateRegistrationSecret(input.codeHash,'invalid_registration_code_hash');
+    const outcome=await this.transaction(async(client)=>{
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`registration-email:${email}`]);
+      const registered=await client.query('SELECT password_hash FROM cod_users WHERE lower(email)=lower($1) LIMIT 1',[email]);
+      if(registered.rows[0])return{state:registered.rows[0].password_hash?'registered' as const:'legacy' as const};
+      let current=await client.query(`SELECT * FROM cod_registration_challenges WHERE lower(email)=lower($1) AND status='pending' LIMIT 1 FOR UPDATE`,[email]);
+      if(current.rows[0]&&new Date(String(current.rows[0].expires_at)).getTime()<=input.now.getTime()){
+        await client.query(`UPDATE cod_registration_challenges SET status='superseded',email_code_hash=NULL,phone_code_hash=NULL,updated_at=$2 WHERE id=$1`,[current.rows[0].id,input.now]);
+        current={...current,rows:[]};
+      }
+      if(current.rows[0]){
+        const row=current.rows[0];
+        if(row.email_verified_at)return{state:'verified' as const};
+        const retryAt=new Date(String(row.email_resend_at));
+        if(retryAt.getTime()>input.now.getTime())return{state:'limited' as const,retryAt};
+        if(Number(row.email_send_count)>=input.maxSends){
+          await client.query(`UPDATE cod_registration_challenges SET status='locked',email_code_hash=NULL,phone_code_hash=NULL,updated_at=$2 WHERE id=$1`,[row.id,input.now]);
+          return{state:'locked' as const};
+        }
+        const {rows}=await client.query(`UPDATE cod_registration_challenges SET id=$6,email_code_hash=$2,email_send_count=email_send_count+1,email_sent_at=$3,email_resend_at=$4,expires_at=$5,updated_at=$3 WHERE id=$1 RETURNING *`,[row.id,input.codeHash,input.now,input.resendAfter,input.expiresAt,input.challengeId]);
+        return{state:'ok' as const,row:rows[0]};
+      }
+      const {rows}=await client.query(`INSERT INTO cod_registration_challenges (id,email,email_code_hash,email_sent_at,email_resend_at,expires_at,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$4,$4) RETURNING *`,[input.challengeId,email,input.codeHash,input.now,input.resendAfter,input.expiresAt]);
+      return{state:'ok' as const,row:rows[0]};
+    });
+    if(outcome.state==='registered')throw new HttpError('该邮箱已经注册，请直接登录',409,'email_registered');
+    if(outcome.state==='legacy')throw new HttpError('这是旧试点账号，请使用旧访问码完成一次性迁移',409,'legacy_migration_required');
+    if(outcome.state==='verified')throw new HttpError('邮箱已经完成验证',409,'registration_email_already_verified');
+    if(outcome.state==='locked')throw new HttpError('验证码发送次数过多，请稍后重试',429,'registration_challenge_locked');
+    if(outcome.state==='limited')throw new HttpError(`请在 ${registrationRetrySeconds(outcome.retryAt,input.now)} 秒后重试`,429,'registration_rate_limited');
+    return{challengeId:String(outcome.row.id),email:String(outcome.row.email),expiresAt:new Date(String(outcome.row.expires_at)).toISOString(),retryAfterSeconds:registrationRetrySeconds(new Date(String(outcome.row.email_resend_at)),input.now)};
+  }
+  async verifyRegistrationEmail(input: VerifyRegistrationEmailInput) {
+    const email=normalizeRegistrationEmail(input.email);validateRegistrationSecret(input.codeHash,'invalid_registration_code_hash');
+    const outcome=await this.transaction(async(client)=>{
+      const {rows}=await client.query(`SELECT * FROM cod_registration_challenges WHERE id=$1 FOR UPDATE`,[input.challengeId]);const row=rows[0];
+      if(!row||String(row.email).toLowerCase()!==email)return'invalid_challenge' as const;
+      if(row.status==='consumed')return'consumed' as const;if(row.status==='locked')return'locked' as const;if(row.status!=='pending')return'expired' as const;
+      if(new Date(String(row.expires_at)).getTime()<=input.now.getTime()){
+        await client.query(`UPDATE cod_registration_challenges SET status='superseded',email_code_hash=NULL,phone_code_hash=NULL,updated_at=$2 WHERE id=$1`,[row.id,input.now]);return'expired' as const;
+      }
+      if(row.email_verified_at)return'ok' as const;
+      if(!registrationSecretMatches(row.email_code_hash,input.codeHash)){
+        const failures=Number(row.failed_attempts)+1;const locked=failures>=input.maxFailures;
+        await client.query(`UPDATE cod_registration_challenges SET failed_attempts=$2,status=CASE WHEN $3 THEN 'locked' ELSE status END,email_code_hash=CASE WHEN $3 THEN NULL ELSE email_code_hash END,phone_code_hash=CASE WHEN $3 THEN NULL ELSE phone_code_hash END,updated_at=$4 WHERE id=$1`,[row.id,failures,locked,input.now]);
+        return locked?'locked' as const:'invalid_code' as const;
+      }
+      await client.query(`UPDATE cod_registration_challenges SET email_verified_at=$2,email_code_hash=NULL,updated_at=$2 WHERE id=$1`,[row.id,input.now]);return'ok' as const;
+    });
+    if(outcome==='ok')return;if(outcome==='consumed')throw new HttpError('本次注册已经完成',409,'registration_challenge_consumed');
+    if(outcome==='locked')throw new HttpError('验证码错误次数过多，请重新开始',429,'registration_challenge_locked');
+    if(outcome==='expired')throw new HttpError('本次注册验证已过期',410,'registration_challenge_expired');
+    throw new HttpError(outcome==='invalid_code'?'验证码错误':'注册验证不存在',400,outcome==='invalid_code'?'invalid_verification_code':'invalid_registration_challenge');
+  }
+  async startPhoneRegistration(input: StartPhoneRegistrationInput) {
+    const email=normalizeRegistrationEmail(input.email);const phone=validateRegistrationPhone(input.phone);validateRegistrationSecret(input.codeHash,'invalid_registration_code_hash');
+    const outcome=await this.transaction(async(client)=>{
+      const locks=[`registration-challenge:${input.challengeId}`,`registration-phone:${phone}`].sort();for(const lock of locks)await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[lock]);
+      const {rows}=await client.query(`SELECT * FROM cod_registration_challenges WHERE id=$1 FOR UPDATE`,[input.challengeId]);const row=rows[0];
+      if(!row||String(row.email).toLowerCase()!==email)return'invalid_challenge' as const;
+      if(row.status==='consumed')return'consumed' as const;if(row.status==='locked')return'locked' as const;if(row.status!=='pending'||new Date(String(row.expires_at)).getTime()<=input.now.getTime()){
+        if(row.status==='pending')await client.query(`UPDATE cod_registration_challenges SET status='superseded',email_code_hash=NULL,phone_code_hash=NULL,updated_at=$2 WHERE id=$1`,[row.id,input.now]);return'expired' as const;
+      }
+      if(!row.email_verified_at)return'email_required' as const;
+      if(row.phone_e164&&String(row.phone_e164)!==phone)return'phone_mismatch' as const;
+      const used=await client.query(`SELECT 1 FROM cod_users WHERE phone_e164=$1 LIMIT 1`,[phone]);if(used.rows[0])return'phone_registered' as const;
+      const other=await client.query(`SELECT 1 FROM cod_registration_challenges WHERE phone_e164=$1 AND status='pending' AND id<>$2 LIMIT 1`,[phone,input.challengeId]);if(other.rows[0])return'phone_pending' as const;
+      if(row.phone_verified_at)return'verified' as const;
+      if(Number(row.phone_send_count)>0){
+        const retryAt=new Date(String(row.phone_resend_at));if(retryAt.getTime()>input.now.getTime())return{state:'limited' as const,retryAt};
+        if(Number(row.phone_send_count)>=input.maxSends){await client.query(`UPDATE cod_registration_challenges SET status='locked',email_code_hash=NULL,phone_code_hash=NULL,updated_at=$2 WHERE id=$1`,[row.id,input.now]);return'locked' as const;}
+      }
+      const {rows:updated}=await client.query(`UPDATE cod_registration_challenges SET phone_e164=$2,phone_code_hash=$3,phone_send_count=phone_send_count+1,phone_sent_at=$4,phone_resend_at=$5,expires_at=$6,updated_at=$4 WHERE id=$1 RETURNING *`,[row.id,phone,input.codeHash,input.now,input.resendAfter,input.expiresAt]);
+      return{state:'ok' as const,row:updated[0]};
+    });
+    if(typeof outcome==='string'){
+      if(outcome==='consumed')throw new HttpError('本次注册已经完成',409,'registration_challenge_consumed');if(outcome==='locked')throw new HttpError('验证码发送次数过多，请重新开始',429,'registration_challenge_locked');if(outcome==='expired')throw new HttpError('本次注册验证已过期',410,'registration_challenge_expired');if(outcome==='email_required')throw new HttpError('请先验证邮箱',409,'registration_email_verification_required');if(outcome==='phone_registered')throw new HttpError('该手机号已经注册',409,'phone_registered');if(outcome==='phone_pending')throw new HttpError('该手机号正在用于其他注册验证',409,'phone_registration_pending');if(outcome==='phone_mismatch')throw new HttpError('本次验证已绑定其他手机号',409,'registration_phone_mismatch');if(outcome==='verified')throw new HttpError('手机号已经完成验证',409,'registration_phone_already_verified');throw new HttpError('注册验证不存在',400,'invalid_registration_challenge');
+    }
+    if(outcome.state==='limited')throw new HttpError(`请在 ${registrationRetrySeconds(outcome.retryAt,input.now)} 秒后重试`,429,'registration_rate_limited');
+    return{challengeId:String(outcome.row.id),phone:String(outcome.row.phone_e164),expiresAt:new Date(String(outcome.row.expires_at)).toISOString(),retryAfterSeconds:registrationRetrySeconds(new Date(String(outcome.row.phone_resend_at)),input.now)};
+  }
+  async verifyRegistrationPhone(input: VerifyRegistrationPhoneInput) {
+    const email=normalizeRegistrationEmail(input.email);const phone=validateRegistrationPhone(input.phone);validateRegistrationSecret(input.codeHash,'invalid_registration_code_hash');
+    const outcome=await this.transaction(async(client)=>{
+      const {rows}=await client.query(`SELECT * FROM cod_registration_challenges WHERE id=$1 FOR UPDATE`,[input.challengeId]);const row=rows[0];
+      if(!row||String(row.email).toLowerCase()!==email||String(row.phone_e164??'')!==phone)return'invalid_challenge' as const;
+      if(row.status==='consumed')return'consumed' as const;if(row.status==='locked')return'locked' as const;if(row.status!=='pending')return'expired' as const;
+      if(new Date(String(row.expires_at)).getTime()<=input.now.getTime()){
+        await client.query(`UPDATE cod_registration_challenges SET status='superseded',email_code_hash=NULL,phone_code_hash=NULL,updated_at=$2 WHERE id=$1`,[row.id,input.now]);return'expired' as const;
+      }
+      if(!row.email_verified_at)return'email_required' as const;if(row.phone_verified_at)return'ok' as const;
+      if(!registrationSecretMatches(row.phone_code_hash,input.codeHash)){
+        const failures=Number(row.failed_attempts)+1;const locked=failures>=input.maxFailures;
+        await client.query(`UPDATE cod_registration_challenges SET failed_attempts=$2,status=CASE WHEN $3 THEN 'locked' ELSE status END,email_code_hash=CASE WHEN $3 THEN NULL ELSE email_code_hash END,phone_code_hash=CASE WHEN $3 THEN NULL ELSE phone_code_hash END,updated_at=$4 WHERE id=$1`,[row.id,failures,locked,input.now]);return locked?'locked' as const:'invalid_code' as const;
+      }
+      await client.query(`UPDATE cod_registration_challenges SET phone_verified_at=$2,phone_code_hash=NULL,updated_at=$2 WHERE id=$1`,[row.id,input.now]);return'ok' as const;
+    });
+    if(outcome==='ok')return;if(outcome==='consumed')throw new HttpError('本次注册已经完成',409,'registration_challenge_consumed');if(outcome==='locked')throw new HttpError('验证码错误次数过多，请重新开始',429,'registration_challenge_locked');if(outcome==='expired')throw new HttpError('本次注册验证已过期',410,'registration_challenge_expired');if(outcome==='email_required')throw new HttpError('请先验证邮箱',409,'registration_email_verification_required');throw new HttpError(outcome==='invalid_code'?'验证码错误':'注册验证不存在',400,outcome==='invalid_code'?'invalid_verification_code':'invalid_registration_challenge');
+  }
+  async assertVerifiedRegistration(input: AssertVerifiedRegistrationInput):Promise<'ready'|'consumed'> {
+    const email=normalizeRegistrationEmail(input.email);const phone=validateRegistrationPhone(input.phone);
+    const {rows}=await this.pool.query(`SELECT email,phone_e164,status,email_verified_at,phone_verified_at,expires_at FROM cod_registration_challenges WHERE id=$1`,[input.challengeId]);const row=rows[0];
+    if(!row||String(row.email).toLowerCase()!==email||String(row.phone_e164??'')!==phone)throw new HttpError('注册验证不存在',400,'invalid_registration_challenge');
+    if(row.status==='consumed')return'consumed';
+    if(row.status==='locked')throw new HttpError('本次注册验证已经锁定',429,'registration_challenge_locked');
+    if(row.status!=='pending'||new Date(String(row.expires_at)).getTime()<=input.now.getTime())throw new HttpError('本次注册验证已过期',410,'registration_challenge_expired');
+    if(!row.email_verified_at||!row.phone_verified_at)throw new HttpError('请先完成邮箱和手机验证',409,'registration_verification_required');return'ready';
+  }
+  async completeVerifiedRegistration(input: CompleteVerifiedRegistrationInput) {
+    const email=normalizeRegistrationEmail(input.email);const phone=validateRegistrationPhone(input.phone);validateRegistrationSecret(input.fingerprint,'invalid_request_fingerprint');
+    if(!input.idempotencyKey||input.idempotencyKey.length>200)throw new HttpError('Registration idempotency key is invalid',400,'invalid_idempotency_key');
+    const outcome=await this.transaction(async(client)=>{
+      const locks=[`registration-email:${email}`,`registration-idempotency:${input.idempotencyKey}`,`registration-phone:${phone}`].sort();for(const lock of locks)await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[lock]);
+      const replay=await client.query(`SELECT * FROM cod_registration_challenges WHERE idempotency_key=$1 LIMIT 1 FOR UPDATE`,[input.idempotencyKey]);
+      if(replay.rows[0]){
+        const row=replay.rows[0];if(String(row.request_fingerprint)!==input.fingerprint)return{state:'idempotency_conflict' as const};if(row.status!=='consumed'||!row.consumed_tenant_id||!row.consumed_user_id)return{state:'inconsistent' as const};if(row.replay_until&&new Date(String(row.replay_until)).getTime()<input.now.getTime())return{state:'consumed' as const};
+        const identity=await client.query(`SELECT * FROM cod_users WHERE tenant_id=$1 AND user_id=$2`,[row.consumed_tenant_id,row.consumed_user_id]);if(!identity.rows[0])return{state:'inconsistent' as const};return{state:'replay' as const,identity:identityFromRow(identity.rows[0])};
+      }
+      const challenge=await client.query(`SELECT * FROM cod_registration_challenges WHERE id=$1 FOR UPDATE`,[input.challengeId]);const row=challenge.rows[0];
+      if(!row||String(row.email).toLowerCase()!==email||String(row.phone_e164??'')!==phone)return{state:'invalid_challenge' as const};
+      if(row.status==='consumed')return{state:'consumed' as const};if(row.status==='locked')return{state:'locked' as const};if(row.status!=='pending'||new Date(String(row.expires_at)).getTime()<=input.now.getTime()){
+        if(row.status==='pending')await client.query(`UPDATE cod_registration_challenges SET status='superseded',email_code_hash=NULL,phone_code_hash=NULL,updated_at=$2 WHERE id=$1`,[row.id,input.now]);return{state:'expired' as const};
+      }
+      if(!row.email_verified_at||!row.phone_verified_at)return{state:'verification_required' as const};
+      if(normalizeRegistrationEmail(input.principal.email)!==email)return{state:'principal_mismatch' as const};
+      const current=await client.query(`SELECT 1 FROM cod_users WHERE lower(email)=lower($1) LIMIT 1`,[email]);if(current.rows[0])return{state:'email_registered' as const};
+      const phoneOwner=await client.query(`SELECT 1 FROM cod_users WHERE phone_e164=$1 LIMIT 1`,[phone]);if(phoneOwner.rows[0])return{state:'phone_registered' as const};
+      let inviter:Record<string,unknown>|null=null;if(input.inviteCode){const found=await client.query(`SELECT tenant_id,user_id,invite_code FROM cod_users WHERE upper(invite_code)=upper($1) LIMIT 1`,[input.inviteCode]);inviter=found.rows[0]??null;if(!inviter)return{state:'invalid_invite' as const};}
+      const personalInviteCode=`KAI-${input.principal.userId.replace(/^usr_/,'').slice(0,10).toUpperCase()}`;
+      const inserted=await client.query(`INSERT INTO cod_users (tenant_id,user_id,email,display_name,password_hash,phone_e164,email_verified_at,phone_verified_at,registration_method,registration_attempt_id,invite_code,referred_by_tenant_id,referred_by_user_id,referral_code_used,role) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'public_dual_otp',$9,$10,$11,$12,$13,$14) RETURNING *`,[input.principal.tenantId,input.principal.userId,email,email.split('@')[0],input.passwordHash,phone,row.email_verified_at,row.phone_verified_at,row.id,personalInviteCode,inviter?.tenant_id??null,inviter?.user_id??null,inviter?.invite_code??null,input.principal.role]);
+      const key='trial-credit-v1';await client.query(`INSERT INTO cod_credit_grants (id,tenant_id,user_id,pack_id,name,purchase_price_cents,original_cents,remaining_cents,purchased_at,expires_at,status,idempotency_key) VALUES ($1,$2,$3,'trial','新用户试用金',0,1000,1000,$4,$4+interval '30 days','active',$5)`,[randomUUID(),input.principal.tenantId,input.principal.userId,input.now,key]);
+      await client.query(`INSERT INTO cod_ledger (id,tenant_id,user_id,type,amount_cents,wallet_amount_cents,credit_amount_cents,reference,idempotency_key,payment_direction,created_at) VALUES ($1,$2,$3,'trial_credit',1000,0,1000,'新用户试用金',$4,'平台赠送 → COD 使用额度',$5)`,[randomUUID(),input.principal.tenantId,input.principal.userId,key,input.now]);
+      await client.query(`INSERT INTO cod_audit (id,tenant_id,user_id,action,entity_type,entity_id,data,created_at) VALUES ($1,$2,$3,'auth.register','user',$3,$4,$5)`,[randomUUID(),input.principal.tenantId,input.principal.userId,JSON.stringify({inviteCodeUsed:inviter?.invite_code??null}),input.now]);
+      await client.query(`UPDATE cod_registration_challenges SET status='consumed',email_code_hash=NULL,phone_code_hash=NULL,idempotency_key=$2,request_fingerprint=$3,consumed_tenant_id=$4,consumed_user_id=$5,consumed_at=$6,replay_until=$6+interval '24 hours',updated_at=$6 WHERE id=$1`,[row.id,input.idempotencyKey,input.fingerprint,input.principal.tenantId,input.principal.userId,input.now]);
+      return{state:'created' as const,identity:identityFromRow(inserted.rows[0])};
+    });
+    if(outcome.state==='created')return{identity:outcome.identity,created:true,replayed:false};if(outcome.state==='replay')return{identity:outcome.identity,created:false,replayed:true};
+    if(outcome.state==='idempotency_conflict')throw new HttpError('Idempotency key was already used with different registration data',409,'idempotency_conflict');if(outcome.state==='email_registered')throw new HttpError('该邮箱已经注册，请直接登录',409,'email_registered');if(outcome.state==='phone_registered')throw new HttpError('该手机号已经注册',409,'phone_registered');if(outcome.state==='invalid_invite')throw new HttpError('邀请码无效',400,'invalid_invite_code');if(outcome.state==='verification_required')throw new HttpError('请先完成邮箱和手机验证',409,'registration_verification_required');if(outcome.state==='expired')throw new HttpError('本次注册验证已过期',410,'registration_challenge_expired');if(outcome.state==='locked')throw new HttpError('本次注册验证已经锁定',429,'registration_challenge_locked');if(outcome.state==='consumed')throw new HttpError('本次注册已经完成，请直接登录',409,'registration_challenge_consumed');if(outcome.state==='principal_mismatch')throw new HttpError('Registration identity does not match the verified email',400,'registration_principal_mismatch');if(outcome.state==='inconsistent')throw new HttpError('Registration replay data is inconsistent',500,'registration_replay_inconsistent');throw new HttpError('注册验证不存在',400,'invalid_registration_challenge');
+  }
+  async consumeRegistrationRateLimit(input: RegistrationRateLimitInput) {
+    if(!input.scope||input.scope.length>100||!input.keyHash||input.keyHash.length>256||!Number.isInteger(input.windowSeconds)||input.windowSeconds<1||!Number.isInteger(input.limit)||input.limit<1)throw new HttpError('Registration rate limit input is invalid',400,'invalid_rate_limit');
+    const bucketStart=new Date(Math.floor(input.now.getTime()/(input.windowSeconds*1000))*input.windowSeconds*1000);const expiresAt=new Date(bucketStart.getTime()+input.windowSeconds*2000);
+    await this.pool.query(`DELETE FROM cod_registration_rate_limits WHERE ctid IN (SELECT ctid FROM cod_registration_rate_limits WHERE expires_at<$1 LIMIT 1000)`,[input.now]);
+    const {rows}=await this.pool.query(`INSERT INTO cod_registration_rate_limits (scope,key_hash,bucket_start,window_seconds,request_count,expires_at) VALUES ($1,$2,$3,$4,1,$5) ON CONFLICT (scope,key_hash,bucket_start,window_seconds) DO UPDATE SET request_count=cod_registration_rate_limits.request_count+1,expires_at=GREATEST(cod_registration_rate_limits.expires_at,EXCLUDED.expires_at) WHERE cod_registration_rate_limits.request_count<$6 RETURNING request_count`,[input.scope,input.keyHash,bucketStart,input.windowSeconds,expiresAt,input.limit]);
+    if(!rows[0])throw new HttpError('请求过于频繁，请稍后重试',429,'registration_rate_limited');
+  }
+  async invalidateRegistrationCode(input: InvalidateRegistrationCodeInput) {
+    validateRegistrationSecret(input.codeHash,'invalid_registration_code_hash');
+    await this.transaction(async(client)=>{
+      const {rows}=await client.query(`SELECT * FROM cod_registration_challenges WHERE id=$1 FOR UPDATE`,[input.challengeId]);const row=rows[0];if(!row||row.status!=='pending')return;
+      const column=input.channel==='email'?'email_code_hash':'phone_code_hash';if(!registrationSecretMatches(row[column],input.codeHash))return;
+      if(input.channel==='email')await client.query(`UPDATE cod_registration_challenges SET status='superseded',email_code_hash=NULL,phone_code_hash=NULL,updated_at=$2 WHERE id=$1`,[row.id,input.now]);
+      else await client.query(`UPDATE cod_registration_challenges SET phone_code_hash=NULL,phone_verified_at=NULL,updated_at=$2 WHERE id=$1`,[row.id,input.now]);
+    });
+  }
   async getReferralSummary(p: Principal) {
     const {rows}=await this.pool.query(`SELECT u.invite_code,u.referral_commission_rate_bps,(SELECT count(*) FROM cod_users r WHERE r.referred_by_tenant_id=u.tenant_id AND r.referred_by_user_id=u.user_id)::integer AS referred_users FROM cod_users u WHERE u.tenant_id=$1 AND u.user_id=$2`,[p.tenantId,p.userId]);
     if(!rows[0]||!rows[0].invite_code)throw new HttpError('Referral profile not found',404,'referral_profile_not_found');
@@ -552,10 +1098,15 @@ export class PostgresDatabase implements CodDatabase {
     return { grant, account: await this.getAccount(p), summary: await this.getCreditSummary(p) };
   }
   async topup(p: Principal, request: TopupRequest) {
-    if (!Number.isInteger(request.amountCents) || request.amountCents < 100 || request.amountCents > 1_000_000) throw new HttpError('Top-up amount must be between 100 and 1000000 cents',400,'invalid_topup');
+    validateTopupRequest(request);
     return this.transaction(async (client) => {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`${p.tenantId}:${p.userId}:${request.idempotencyKey}`]);
-      const existing = await client.query('SELECT * FROM cod_ledger WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3',[p.tenantId,p.userId,request.idempotencyKey]); if (existing.rows[0]) return ledgerFromRow(existing.rows[0]);
+      const existing = await client.query('SELECT * FROM cod_ledger WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3',[p.tenantId,p.userId,request.idempotencyKey]);
+      if (existing.rows[0]) {
+        const entry=ledgerFromRow(existing.rows[0]);
+        if(!topupMatchesLedger(entry,request))throw new HttpError('Idempotency key was already used with different top-up parameters',409,'idempotency_conflict');
+        return entry;
+      }
       const id=randomUUID(); const reference=`${request.channel}:${request.idempotencyKey}`;
       const inserted=await client.query(`INSERT INTO cod_ledger (id,tenant_id,user_id,type,amount_cents,wallet_amount_cents,reference,idempotency_key,payment_direction) VALUES ($1,$2,$3,'topup',$4,$4,$5,$6,$7) RETURNING *`,[id,p.tenantId,p.userId,request.amountCents,reference,request.idempotencyKey,'用户 → COD 钱包']);
       await client.query('UPDATE cod_users SET balance_cents=balance_cents+$3,updated_at=now() WHERE tenant_id=$1 AND user_id=$2',[p.tenantId,p.userId,request.amountCents]); return ledgerFromRow(inserted.rows[0]);
@@ -606,11 +1157,16 @@ export class PostgresDatabase implements CodDatabase {
     });
   }
   async recordUsage(p: Principal, event: UsageEvent) {
-    if (!Number.isInteger(event.costCents) || event.costCents < 0) throw new HttpError('Usage cost is invalid',400,'invalid_usage');
+    validateUsageEvent(event);
+    const billedEvent=billedUsageEvent(p,event);
     return this.transaction(async (client) => {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`${p.tenantId}:${p.userId}:${event.idempotencyKey}`]);
-      const existing=await client.query('SELECT * FROM cod_ledger WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3',[p.tenantId,p.userId,event.idempotencyKey]); if(existing.rows[0]) return ledgerFromRow(existing.rows[0]);
-      const billedEvent=p.role==='admin'?{...event,costCents:0,paymentDirection:'管理员测试免计费',commissionRateBps:0,commissionCents:0}:event;
+      const existing=await client.query('SELECT * FROM cod_ledger WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3',[p.tenantId,p.userId,event.idempotencyKey]);
+      if(existing.rows[0]){
+        const entry=ledgerFromRow(existing.rows[0]);
+        if(!usageMatchesLedger(entry,billedEvent))throw new HttpError('Idempotency key was already used with different usage parameters',409,'idempotency_conflict');
+        return entry;
+      }
       const allocation=await this.allocateFunds(client,p,billedEvent.costCents);
       const creditCents=allocation.grantAllocations.reduce((total,item)=>total+item.amountCents,0);
       return this.insertUsageLedger(client,p,billedEvent,allocation.walletCents,creditCents);
@@ -670,7 +1226,8 @@ export class PostgresDatabase implements CodDatabase {
     await this.transaction(async(client)=>{const existing=await client.query('SELECT status FROM cod_usage_reservations WHERE id=$1 AND tenant_id=$2 AND user_id=$3',[reservationId,p.tenantId,p.userId]);if(existing.rows[0])return;const allocation=await this.allocateFunds(client,p,reservableAmount);await client.query(`INSERT INTO cod_usage_reservations (id,tenant_id,user_id,amount_cents,wallet_cents,grant_allocations,status) VALUES ($1,$2,$3,$4,$5,$6,'reserved')`,[reservationId,p.tenantId,p.userId,reservableAmount,allocation.walletCents,JSON.stringify(allocation.grantAllocations)]);});
   }
   async settleUsage(p:Principal,reservationId:string,event:UsageEvent,completion?:ChatRequestCompletion) {
-    if(!Number.isInteger(event.costCents)||event.costCents<0)throw new HttpError('Usage cost is invalid',400,'invalid_usage');
+    validateUsageEvent(event);
+    const billedEvent=billedUsageEvent(p,event);
     if(completion){
       validateChatRequestIdentity(completion.requestKey,completion.fingerprint);
       if(event.idempotencyKey!==`chat:${completion.requestKey}:${completion.fingerprint}`)throw new HttpError('Chat settlement key is invalid',400,'invalid_idempotency_key');
@@ -692,12 +1249,14 @@ export class PostgresDatabase implements CodDatabase {
       const reservation=await client.query(`SELECT * FROM cod_usage_reservations WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE`,[reservationId,p.tenantId,p.userId]);
       const existing=await client.query('SELECT * FROM cod_ledger WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3',[p.tenantId,p.userId,event.idempotencyKey]);
       if(existing.rows[0]){
+        const entry=ledgerFromRow(existing.rows[0]);
+        if(!usageMatchesLedger(entry,billedEvent))throw new HttpError('Idempotency key was already used with different usage parameters',409,'idempotency_conflict');
         if(reservation.rows[0]?.status==='reserved')await this.releaseReservation(client,p,reservation.rows[0],reservationId);
         if(completion&&chatRequest?.rows[0]?.status==='pending')await client.query(
           `UPDATE cod_chat_requests SET status='complete',response_payload=$4,updated_at=now(),expires_at=now()+interval '24 hours' WHERE tenant_id=$1 AND user_id=$2 AND request_key=$3`,
           [p.tenantId,p.userId,completion.requestKey,JSON.stringify(completion.responsePayload)],
         );
-        return ledgerFromRow(existing.rows[0]);
+        return entry;
       }
       if(completion&&chatRequest?.rows[0]?.status==='complete')throw new HttpError('Completed chat request is missing its billing record',500,'chat_billing_inconsistent');
       if(!reservation.rows[0]||reservation.rows[0].status!=='reserved')throw new HttpError('Usage reservation not found',409,'reservation_not_found');
@@ -707,7 +1266,6 @@ export class PostgresDatabase implements CodDatabase {
         if(task.rows[0].status==='cancelled')throw new HttpError('Task was cancelled before settlement',409,'task_cancelled');
         if(task.rows[0].status!=='running'&&task.rows[0].status!=='waiting')throw new HttpError('Task is not running',409,'task_not_running');
       }
-      const billedEvent=p.role==='admin'?{...event,costCents:0,paymentDirection:'管理员测试免计费',commissionRateBps:0,commissionCents:0}:event;
       const reservedGrants=parseGrantAllocations(reservation.rows[0].grant_allocations);const reservedWallet=Number(reservation.rows[0].wallet_cents);let remaining=billedEvent.costCents;let creditConsumed=0;
       for(const allocation of reservedGrants){const consumed=Math.min(allocation.amountCents,remaining);creditConsumed+=consumed;remaining-=consumed;const refund=allocation.amountCents-consumed;if(refund>0)await this.restoreGrants(client,[{grantId:allocation.grantId,amountCents:refund}]);}
       const walletConsumed=Math.min(reservedWallet,remaining);remaining-=walletConsumed;const walletRefund=reservedWallet-walletConsumed;if(walletRefund>0)await client.query('UPDATE cod_users SET balance_cents=balance_cents+$3,updated_at=now() WHERE tenant_id=$1 AND user_id=$2',[p.tenantId,p.userId,walletRefund]);
@@ -736,18 +1294,58 @@ export class PostgresDatabase implements CodDatabase {
     return this.transaction(async(client)=>{
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`compute:${p.tenantId}:${p.userId}:${idempotencyKey}`]);
       const existing=await client.query('SELECT * FROM cod_compute_requests WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3',[p.tenantId,p.userId,idempotencyKey]);
-      if(existing.rows[0])return computeRequestFromRow(existing.rows[0]);
+      if(existing.rows[0]){
+        const request=computeRequestFromRow(existing.rows[0]);
+        if(!computeRequestMatchesInput(request,input))throw new HttpError('Idempotency key was already used with different compute request parameters',409,'idempotency_conflict');
+        return {request,created:false};
+      }
       const {rows}=await client.query(`INSERT INTO cod_compute_requests (id,tenant_id,user_id,email,kind,offer_id,payload,idempotency_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,[randomUUID(),p.tenantId,p.userId,p.email,input.kind,input.offerId??null,JSON.stringify(input),idempotencyKey]);
-      return computeRequestFromRow(rows[0]);
+      return {request:computeRequestFromRow(rows[0]),created:true};
     });
   }
   async listComputeRequests(p:Principal) { const {rows}=await this.pool.query('SELECT * FROM cod_compute_requests WHERE tenant_id=$1 AND user_id=$2 ORDER BY created_at DESC LIMIT 100',[p.tenantId,p.userId]);return rows.map(computeRequestFromRow); }
+  async listAdminComputeRequests(p:Principal,rawQuery:AdminComputeRequestQuery={}) {
+    requireAdmin(p);const query=normalizeAdminComputeRequestQuery(rawQuery);
+    const clauses:string[]=[];const values:unknown[]=[];
+    const parameter=(value:unknown)=>{values.push(value);return `$${values.length}`;};
+    if(query.status)clauses.push(`status=${parameter(query.status)}`);
+    if(query.kind)clauses.push(`kind=${parameter(query.kind)}`);
+    if(query.q){
+      const q=parameter(query.q);
+      clauses.push(`(position(${q} in lower(id::text))>0 OR position(${q} in lower(email))>0 OR position(${q} in lower(coalesce(payload->>'company','')))>0 OR position(${q} in lower(coalesce(payload->>'contactName','')))>0 OR position(${q} in lower(coalesce(payload->>'contactPhone','')))>0 OR position(${q} in lower(coalesce(payload->>'city','')))>0 OR position(${q} in lower(coalesce(payload->>'gpuModel','')))>0)`);
+    }
+    if(query.cursor){const createdAt=parameter(query.cursor.createdAt);const id=parameter(query.cursor.id);clauses.push(`(created_at,id)<(${createdAt}::timestamptz,${id}::uuid)`);}
+    const limit=parameter(query.limit+1);const where=clauses.length?` WHERE ${clauses.join(' AND ')}`:'';
+    const {rows}=await this.pool.query(`SELECT id,kind,status,payload->>'company' AS company,payload->>'gpuModel' AS gpu_model,(payload->>'quantity')::integer AS quantity,created_at,updated_at,to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_created_at FROM cod_compute_requests${where} ORDER BY created_at DESC,id DESC LIMIT ${limit}`,values);
+    const itemRows=rows.slice(0,query.limit);const items=itemRows.map(computeRequestSummaryFromRow);const lastRow=itemRows.at(-1);
+    return{items,nextCursor:rows.length>query.limit&&lastRow?encodeComputeRequestCursor({createdAt:String(lastRow.cursor_created_at),id:String(lastRow.id)}):null};
+  }
+  async getAdminComputeRequest(p:Principal,id:string) {
+    requireAdmin(p);validateComputeRequestId(id);
+    const {rows}=await this.pool.query('SELECT * FROM cod_compute_requests WHERE id=$1',[id]);
+    if(!rows[0])throw new HttpError('Compute request not found',404,'compute_request_not_found');
+    return computeRequestFromRow(rows[0]);
+  }
+  async updateAdminComputeRequestStatus(p:Principal,id:string,status:ComputeRequestStatus,expectedStatus:ComputeRequestStatus) {
+    requireAdmin(p);validateComputeRequestId(id);validateComputeRequestStatus(status);validateComputeRequestStatus(expectedStatus);
+    return this.transaction(async(client)=>{
+      const currentResult=await client.query('SELECT * FROM cod_compute_requests WHERE id=$1 FOR UPDATE',[id]);
+      if(!currentResult.rows[0])throw new HttpError('Compute request not found',404,'compute_request_not_found');
+      const current=computeRequestFromRow(currentResult.rows[0]);
+      if(current.status!==status&&current.status!==expectedStatus)throw new HttpError('Compute request status changed; reload and confirm the latest state',409,'compute_request_status_conflict');
+      validateComputeRequestTransition(current.status,status);
+      const changed=current.status!==status;
+      const request=changed?computeRequestFromRow((await client.query('UPDATE cod_compute_requests SET status=$2,updated_at=now() WHERE id=$1 RETURNING *',[id,status])).rows[0]):current;
+      await client.query('INSERT INTO cod_audit (id,tenant_id,user_id,action,entity_type,entity_id,data) VALUES ($1,$2,$3,$4,$5,$6,$7)',[randomUUID(),p.tenantId,p.userId,'compute.request.admin.status','compute_request',id,JSON.stringify({previousStatus:current.status,status:request.status,changed})]);
+      return{request,previousStatus:current.status,changed};
+    });
+  }
   async listDevices(p: Principal) { const {rows}=await this.pool.query('SELECT * FROM cod_devices WHERE tenant_id=$1 AND user_id=$2 ORDER BY created_at',[p.tenantId,p.userId]); return rows.map(deviceFromRow); }
   async registerDevice(p: Principal,input:Pick<DeviceRecord,'name'|'platform'>) { validateDeviceInput(input); const id=randomUUID(); const {rows}=await this.pool.query(`INSERT INTO cod_devices (id,tenant_id,user_id,name,platform,status,last_seen_at) VALUES ($1,$2,$3,$4,$5,'online',now()) RETURNING *`,[id,p.tenantId,p.userId,input.name.trim().slice(0,100),input.platform]); const device=deviceFromRow(rows[0]); await this.append(p,'device.registered',id,device); return device; }
   async heartbeat(p: Principal,id:string) { const {rows}=await this.pool.query(`UPDATE cod_devices SET status='online',last_seen_at=now() WHERE id=$1 AND tenant_id=$2 AND user_id=$3 RETURNING *`,[id,p.tenantId,p.userId]); if(!rows[0]) throw new HttpError('Device not found',404,'device_not_found'); return deviceFromRow(rows[0]); }
   async listTasks(p: Principal) { const {rows}=await this.pool.query('SELECT * FROM cod_tasks WHERE tenant_id=$1 AND user_id=$2 ORDER BY updated_at DESC',[p.tenantId,p.userId]); return rows.map(taskFromRow); }
   async getTask(p:Principal,id:string) { const {rows}=await this.pool.query('SELECT * FROM cod_tasks WHERE id=$1 AND tenant_id=$2 AND user_id=$3',[id,p.tenantId,p.userId]);if(!rows[0])throw new HttpError('Task not found',404,'task_not_found');return taskFromRow(rows[0]); }
-  async createTask(p: Principal,input:Pick<SyncedTask,'title'|'deviceId'>) { if(!input.title?.trim()) throw new HttpError('Task title is required',400,'invalid_task'); const device=await this.pool.query('SELECT 1 FROM cod_devices WHERE id=$1 AND tenant_id=$2 AND user_id=$3',[input.deviceId,p.tenantId,p.userId]); if(!device.rows[0]) throw new HttpError('Device not found',404,'device_not_found'); const id=randomUUID(); const {rows}=await this.pool.query(`INSERT INTO cod_tasks (id,tenant_id,user_id,title,status,device_id) VALUES ($1,$2,$3,$4,'draft',$5) RETURNING *`,[id,p.tenantId,p.userId,input.title.trim().slice(0,500),input.deviceId]); const task=taskFromRow(rows[0]); await this.append(p,'task.created',id,task); return task; }
+  async createTask(p: Principal,input:Pick<SyncedTask,'title'|'deviceId'>) { if(!input||typeof input!=='object'||typeof input.title!=='string'||!input.title.trim()) throw new HttpError('Task title is required',400,'invalid_task'); if(typeof input.deviceId!=='string')throw new HttpError('Device not found',404,'device_not_found'); const device=await this.pool.query('SELECT 1 FROM cod_devices WHERE id=$1 AND tenant_id=$2 AND user_id=$3',[input.deviceId,p.tenantId,p.userId]); if(!device.rows[0]) throw new HttpError('Device not found',404,'device_not_found'); const id=randomUUID(); const {rows}=await this.pool.query(`INSERT INTO cod_tasks (id,tenant_id,user_id,title,status,device_id) VALUES ($1,$2,$3,$4,'draft',$5) RETURNING *`,[id,p.tenantId,p.userId,input.title.trim().slice(0,500),input.deviceId]); const task=taskFromRow(rows[0]); await this.append(p,'task.created',id,task); return task; }
   async updateTask(p: Principal,id:string,status:TaskStatus,version:number,outcome:TaskOutcome={}) {
     return this.transaction(async (client) => {
       const currentResult = await client.query('SELECT * FROM cod_tasks WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE', [id,p.tenantId,p.userId]);
@@ -755,8 +1353,10 @@ export class PostgresDatabase implements CodDatabase {
       const current = taskFromRow(currentResult.rows[0]);
       if (current.version !== version) throw new HttpError('Task version conflict',409,'version_conflict');
       validateTaskTransition(current.status, status);
-      if (outcome.result !== undefined && outcome.result !== null && outcome.result.length > 50_000) throw new HttpError('Task result is too large', 400, 'task_result_too_large');
-      if (outcome.error !== undefined && outcome.error !== null && outcome.error.length > 5_000) throw new HttpError('Task error is too large', 400, 'task_error_too_large');
+      if (outcome.result !== undefined && outcome.result !== null && typeof outcome.result !== 'string') throw new HttpError('Task result is invalid', 400, 'invalid_task_result');
+      if (outcome.error !== undefined && outcome.error !== null && typeof outcome.error !== 'string') throw new HttpError('Task error is invalid', 400, 'invalid_task_error');
+      if (typeof outcome.result === 'string' && outcome.result.length > 50_000) throw new HttpError('Task result is too large', 400, 'task_result_too_large');
+      if (typeof outcome.error === 'string' && outcome.error.length > 5_000) throw new HttpError('Task error is too large', 400, 'task_error_too_large');
       if (current.status === status && outcome.result === undefined && outcome.error === undefined) return current;
       let nextResult = outcome.result === undefined ? current.result : outcome.result;
       let nextError = outcome.error === undefined ? current.error : outcome.error;

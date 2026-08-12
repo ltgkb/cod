@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta
+      name="description"
+      content="下载 COD 桌面客户端，在同一处完成智能对话、代码协作和本机项目操作。"
+    />
+    <meta name="theme-color" content="#fbfdfd" />
+    <meta property="og:type" content="website" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:title" content="COD 桌面客户端" />
+    <meta
+      property="og:description"
+      content="把对话、代码和本机项目放进同一条工作流。"
+    />
+    <meta
+      property="og:image"
+      content="https://cod.kai.com/download/assets/cod-web-app.webp"
+    />
+    <link rel="canonical" href="https://cod.kai.com/download/" />
+    <link rel="icon" href="./assets/cod-icon.svg" type="image/svg+xml" />
+    <link
+      rel="preload"
+      href="./assets/cod-web-app.webp"
+      as="image"
+      type="image/webp"
+      fetchpriority="high"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./script.js" defer></script>
+    <title>下载 COD 桌面客户端</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到主要内容</a>
+
+    <header class="site-header">
+      <nav class="nav-shell" aria-label="主导航">
+        <a class="brand" href="#top" aria-label="COD 下载页首页">
+          <span class="brand-mark" aria-hidden="true">C</span>
+          <span class="brand-copy">
+            <strong>COD</strong>
+            <small>桌面客户端</small>
+          </span>
+        </a>
+
+        <div class="nav-links">
+          <a href="#download">下载</a>
+          <a href="#desktop">桌面能力</a>
+        </div>
+
+        <div class="nav-actions">
+          <img src="./assets/kai-logo.png" alt="KAI 词元" width="220" height="52" />
+          <a class="nav-web" href="/app/">打开网页版</a>
+        </div>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="hero section-shell" id="top">
+        <div class="hero-copy reveal">
+          <p class="kicker">COD DESKTOP</p>
+          <h1>你的工作，留在本机。</h1>
+          <p class="hero-lede">
+            对话、代码和本机项目放进同一个浅色工作区。需要读取文件或执行命令时，操作仍由你确认。
+          </p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="#download">查看桌面版本</a>
+            <a class="button button-secondary" href="/app/">先用网页版</a>
+          </div>
+          <p class="hero-availability">
+            <span aria-hidden="true"></span>
+            macOS、Windows 与 Linux 版本正在完成正式发布验收
+          </p>
+        </div>
+
+        <figure class="hero-visual reveal">
+          <div class="product-window">
+            <img
+              src="./assets/cod-web-app.webp"
+              alt="COD 浅色主工作区，任务、对话、文件、改动和终端并列显示"
+              width="1440"
+              height="900"
+              fetchpriority="high"
+            />
+          </div>
+        </figure>
+      </section>
+
+      <section class="download" id="download" aria-labelledby="download-heading">
+        <div class="download-layout section-shell">
+          <header class="download-copy reveal">
+            <p class="section-label">下载</p>
+            <h2 id="download-heading">选择系统，准备好就能直接下载。</h2>
+            <p>
+              发布页只会提供完成签名与安全验收的安装包。版本、文件大小和校验值会随正式链接一起出现。
+            </p>
+            <ul class="trust-list" aria-label="正式发布标准">
+              <li>安装包签名可验证</li>
+              <li>下载地址按版本固定</li>
+              <li>同步提供 SHA-256 校验值</li>
+            </ul>
+          </header>
+
+          <div class="download-shell reveal">
+            <div class="platform-tabs" role="tablist" aria-label="选择操作系统">
+              <button
+                class="platform-tab"
+                id="tab-macos"
+                type="button"
+                role="tab"
+                aria-controls="releasePanel"
+                aria-selected="true"
+                data-platform="macos"
+              >
+                <span>macOS</span>
+                <small>Apple 芯片</small>
+              </button>
+              <button
+                class="platform-tab"
+                id="tab-windows"
+                type="button"
+                role="tab"
+                aria-controls="releasePanel"
+                aria-selected="false"
+                tabindex="-1"
+                data-platform="windows"
+              >
+                <span>Windows</span>
+                <small>x64</small>
+              </button>
+              <button
+                class="platform-tab"
+                id="tab-linux"
+                type="button"
+                role="tab"
+                aria-controls="releasePanel"
+                aria-selected="false"
+                tabindex="-1"
+                data-platform="linux"
+              >
+                <span>Linux</span>
+                <small>AppImage / Deb</small>
+              </button>
+            </div>
+
+            <article
+              class="release-panel"
+              id="releasePanel"
+              role="tabpanel"
+              aria-labelledby="tab-macos"
+            >
+              <header class="release-header">
+                <div>
+                  <span class="release-platform" id="releasePlatform">macOS</span>
+                  <h3 id="releaseTitle">COD for macOS</h3>
+                </div>
+                <span class="release-state" id="releaseState">正在读取发布状态</span>
+              </header>
+
+              <dl class="release-details">
+                <div>
+                  <dt>版本</dt>
+                  <dd id="releaseVersion">待公布</dd>
+                </div>
+                <div>
+                  <dt>架构</dt>
+                  <dd id="releaseArchitecture">Apple 芯片</dd>
+                </div>
+                <div>
+                  <dt>系统要求</dt>
+                  <dd id="releaseRequirements">macOS 12 或更高版本</dd>
+                </div>
+                <div>
+                  <dt>文件大小</dt>
+                  <dd id="releaseSize">待公布</dd>
+                </div>
+              </dl>
+
+              <p class="release-note" id="releaseNote" aria-live="polite">
+                正在确认最新的正式发布状态。
+              </p>
+
+              <div class="release-actions">
+                <a
+                  class="button button-primary is-disabled"
+                  id="downloadButton"
+                  aria-disabled="true"
+                  tabindex="-1"
+                >即将开放</a>
+                <a class="button button-secondary" href="/app/">使用网页版</a>
+              </div>
+
+              <p class="release-integrity" id="releaseIntegrity" hidden>
+                <strong>SHA-256</strong>
+                <code id="releaseChecksum"></code>
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="desktop section-shell" id="desktop" aria-labelledby="desktop-heading">
+        <header class="section-heading reveal">
+          <h2 id="desktop-heading">网页开始，桌面接手。</h2>
+          <p>需要本机上下文时，不必把项目内容搬进浏览器。</p>
+        </header>
+
+        <div class="feature-grid">
+          <article class="reveal">
+            <span>01 / LOCAL</span>
+            <h3>项目就在旁边</h3>
+            <p>文件、Git 改动和终端紧邻对话，减少来回复制。</p>
+          </article>
+          <article class="reveal">
+            <span>02 / MODELS</span>
+            <h3>模型一起比较</h3>
+            <p>同一个问题并行比较多个模型，再决定采用哪条思路。</p>
+          </article>
+          <article class="reveal">
+            <span>03 / CONTROL</span>
+            <h3>操作由你确认</h3>
+            <p>读取项目和执行命令保留清晰边界，控制权不会消失。</p>
+          </article>
+        </div>
+
+        <div class="web-callout reveal">
+          <div>
+            <strong>还不需要本机能力？</strong>
+            <p>网页版无需安装，登录后即可继续现有工作流。</p>
+          </div>
+          <a class="button button-secondary" href="/app/">打开 COD 网页版</a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer section-shell">
+      <a class="brand" href="#top" aria-label="返回页面顶部">
+        <span class="brand-mark" aria-hidden="true">C</span>
+        <span class="brand-copy">
+          <strong>COD</strong>
+          <small>agent workspace</small>
+        </span>
+      </a>
+      <p>对话、代码与本机项目，放在同一条工作流。</p>
+      <span><a href="/app/">网页版</a><i aria-hidden="true">/</i>© 2026 COD</span>
+    </footer>
+  </body>
+</html>

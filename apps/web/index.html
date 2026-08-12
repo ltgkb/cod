@@ -2,16 +2,336 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#fbfdfd" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' https://cod.kai.com ws://127.0.0.1:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-src https://hongkong.kai.com; base-uri 'self'; form-action 'self'; object-src 'none'" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta
+      name="description"
+      content="COD 是一个支持简单问答、代码协作、多模型对比与项目上下文的智能工作区，可在线体验，并为 Windows、macOS 与 Linux 提供桌面版本。"
+    />
+    <meta name="theme-color" content="#f4f5f6" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'self'; form-action 'self'; object-src 'none'" />
+    <link rel="canonical" href="https://cod.kai.com/" />
     <link rel="manifest" href="./manifest.webmanifest" />
-    <title>COD</title>
+    <title>COD 桌面智能体</title>
+    <link rel="preload" href="./showcase/assets/cod-web-app-light.jpg" as="image" type="image/jpeg" />
+    <link rel="stylesheet" href="/showcase/styles.css" />
   </head>
   <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <a class="skip-link" href="#main">跳到主要内容</a>
+    <div class="page-ambient" aria-hidden="true"></div>
+
+    <header class="site-header">
+      <nav class="nav-shell glass-surface" aria-label="主导航">
+        <a class="brand" href="#top" aria-label="COD 首页">
+          <span class="cod-wordmark">COD</span>
+        </a>
+
+        <div class="nav-links">
+          <a href="#workspace">工作区</a>
+          <a href="#conversation">对话</a>
+          <a href="#capabilities">能力</a>
+          <a href="#download">下载</a>
+        </div>
+
+        <div class="kai-brand" aria-label="KAI 词元公司商标">
+          <img src="./showcase/assets/kai-logo.png" alt="KAI 词元" width="220" height="52" />
+        </div>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="hero section-shell" id="top">
+        <div class="hero-copy">
+          <h1 class="reveal" style="--delay: 80ms">
+            <span class="hero-line">把复杂的事，</span>
+            <span class="hero-line hero-accent">聊简单。</span>
+          </h1>
+          <p class="hero-lede reveal" style="--delay: 150ms">
+            简单问答、代码协作与多模型比较，COD 把聊天和真正的工作放进同一个界面。
+          </p>
+          <div class="hero-actions reveal" style="--delay: 220ms">
+            <a class="button button-primary" id="heroDownloadButton" href="#download">下载 COD</a>
+            <a
+              class="button button-quiet"
+              href="./app/"
+            >打开网页版</a>
+            <a
+              class="button button-primary"
+              id="registerButton"
+              href="./app/?auth=register"
+              hidden
+            >注册账号</a>
+          </div>
+        </div>
+
+        <figure class="hero-visual reveal" style="--delay: 180ms">
+          <div class="hero-image-shell glass-surface">
+            <img
+              src="./showcase/assets/cod-web-app-light.jpg"
+              alt="COD 主工作区，包含任务列表、多模型对比入口和对话编辑区"
+              width="2122"
+              height="1740"
+              fetchpriority="high"
+            />
+          </div>
+        </figure>
+      </section>
+
+      <section class="platform-band section-shell reveal" id="platforms" aria-labelledby="platform-heading">
+        <div class="platform-heading">
+          <h2 id="platform-heading">在你的电脑上，保持同一种思考方式。</h2>
+          <p>为三种主流桌面系统准备统一、安静的使用体验。</p>
+        </div>
+        <div class="platform-rail glass-surface" aria-label="支持的平台">
+          <span>Windows</span>
+          <span>macOS</span>
+          <span>Linux</span>
+        </div>
+      </section>
+
+      <section class="workspace section-shell" id="workspace" aria-labelledby="workspace-heading">
+        <div class="workspace-intro reveal">
+          <div>
+            <p class="eyebrow">WEB PREVIEW</p>
+            <h2 id="workspace-heading">现在就进入<br />COD 工作区。</h2>
+          </div>
+          <div class="workspace-summary">
+            <p>
+              不用等待安装包。先在浏览器里开始一段对话、比较模型，或查看 COD 如何组织任务与项目上下文。
+            </p>
+            <a
+              class="text-link"
+              href="./app/"
+              aria-label="进入 COD 网页工作区"
+            >体验网页版 <span aria-hidden="true">↗</span></a>
+          </div>
+        </div>
+
+        <figure class="workspace-preview glass-surface reveal">
+          <div class="preview-bar" aria-hidden="true">
+            <div class="window-dots"><span></span><span></span><span></span></div>
+            <span class="preview-address">cod.kai.com</span>
+            <span class="preview-status"><i></i> 在线体验</span>
+          </div>
+          <div class="preview-frame">
+            <img
+              src="./showcase/assets/cod-web-app-light.jpg"
+              alt="COD 网页版工作区，包含任务列表、多模型对比入口和对话编辑区"
+              width="2122"
+              height="1740"
+              loading="lazy"
+            />
+          </div>
+          <figcaption>COD 当前公开开发界面，实际功能会继续更新。</figcaption>
+        </figure>
+
+        <div class="workspace-details">
+          <article class="mode-story reveal">
+            <span class="detail-index">01</span>
+            <div>
+              <h3>聊天是入口，代码是另一种工作模式。</h3>
+              <p>
+                在对话与代码之间直接切换。简单问题保持简单，需要进入项目时，再把文件、改动和终端放到同一条工作流里。
+              </p>
+            </div>
+          </article>
+
+          <div class="detail-stack">
+            <article class="detail-row reveal">
+              <span class="detail-index">02</span>
+              <div>
+                <h3>同一个问题，并行比较多个模型</h3>
+                <p>多模型对比把不同回答放在一起，减少来回切换，也更容易找到适合当前任务的思路。</p>
+              </div>
+            </article>
+            <article class="detail-row reveal">
+              <span class="detail-index">03</span>
+              <div>
+                <h3>模型和参考价格，选择前先看清</h3>
+                <p>公开模型目录集中展示可用模型、参考价格与服务来源，登录前也能先完成比较。</p>
+              </div>
+            </article>
+            <article class="detail-row reveal">
+              <span class="detail-index">04</span>
+              <div>
+                <h3>本机操作，由你确认</h3>
+                <p>网页适合先聊、先选、先组织；读取本机项目、查看真实改动或运行终端时，再交给桌面端并由你确认。</p>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="extensions section-shell" id="extensions" aria-labelledby="extensions-heading">
+        <div class="extensions-intro reveal">
+          <h2 id="extensions-heading">从模型选择，<br />走到算力交付。</h2>
+          <p>
+            COD 的公开界面还包含统一模型目录与 GPU 算力市场入口，让模型、成本参考和运行资源更接近同一条工作流。
+          </p>
+        </div>
+
+        <div class="product-gallery">
+          <figure class="product-shot product-shot-compute glass-surface reveal">
+            <header class="product-shot-header">
+              <strong>算力市场</strong>
+              <span>按需求连接 GPU 算力</span>
+            </header>
+            <div class="product-shot-frame">
+              <img
+                src="./showcase/assets/cod-compute-market-light.jpg"
+                alt="COD 算力市场界面，展示 GPU 算力商品、租赁方式与需求提交入口"
+                width="1762"
+                height="1440"
+                loading="lazy"
+              />
+            </div>
+            <figcaption>从按时租用到企业需求，先查看资源形态，再进入确认与交付流程。</figcaption>
+          </figure>
+
+          <figure class="product-shot product-shot-models glass-surface reveal">
+            <header class="product-shot-header">
+              <strong>模型目录</strong>
+              <span>集中比较模型与服务来源</span>
+            </header>
+            <div class="product-shot-frame">
+              <img
+                src="./showcase/assets/cod-model-catalog-light.jpg"
+                alt="COD 模型目录界面，按行展示模型、参考价格与可用来源"
+                width="1726"
+                height="1438"
+                loading="lazy"
+              />
+            </div>
+            <figcaption>模型与参考价格持续更新，实际可用性和费用以 COD 实时页面为准。</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="conversation section-shell" id="conversation" aria-labelledby="conversation-heading">
+        <div class="conversation-intro reveal">
+          <h2 id="conversation-heading">不是搜索框。<br />是一段持续的对话。</h2>
+          <p>从一句简单提问开始，继续补充背景。COD 会跟住上下文，把答案变得更具体。</p>
+        </div>
+
+        <div class="conversation-stage">
+          <figure class="conversation-art reveal">
+            <img
+              src="./showcase/assets/cod-conversation.webp"
+              alt="多层深蓝玻璃对话气泡汇聚成回答平面的概念图"
+              width="1024"
+              height="1536"
+              loading="lazy"
+            />
+          </figure>
+
+          <section class="chat-demo glass-surface reveal" aria-label="COD 对话演示">
+            <header class="chat-header">
+              <div>
+                <strong>COD</strong>
+                <span>对话演示</span>
+              </div>
+              <button class="clear-chat" type="button" id="clearChat">清空</button>
+            </header>
+
+            <div class="chat-thread" id="chatThread" aria-live="polite" aria-relevant="additions">
+              <div class="message message-user">帮我整理今天的工作重点。</div>
+              <div class="message message-cod">
+                可以。把项目资料放进来，我会提取截止时间，再整理成一份可执行清单。
+              </div>
+            </div>
+
+            <div class="chat-empty" id="chatEmpty" hidden>
+              <strong>从一个问题开始</strong>
+              <span>试着问计划、代码或安装相关的问题。</span>
+            </div>
+
+            <form class="chat-form" id="chatForm">
+              <label class="sr-only" for="chatInput">向 COD 提问</label>
+              <input
+                id="chatInput"
+                name="message"
+                type="text"
+                autocomplete="off"
+                placeholder="向 COD 提问"
+                maxlength="160"
+              />
+              <button type="submit">发送</button>
+            </form>
+          </section>
+        </div>
+      </section>
+
+      <section class="capabilities section-shell" id="capabilities" aria-labelledby="capabilities-heading">
+        <div class="capabilities-title reveal">
+          <h2 id="capabilities-heading">让工作继续向前。</h2>
+          <p>COD 保留简单的入口，把更多注意力留给真正的问题。</p>
+        </div>
+
+        <div class="capability-list">
+          <article class="capability-item reveal">
+            <h3>简单问答</h3>
+            <p>输入第一条消息就能开始。发送时再登录，已经写好的内容会被保留。</p>
+          </article>
+          <article class="capability-item capability-offset reveal">
+            <h3>双工作模式</h3>
+            <p>对话用于日常思考，代码模式用于理解项目、定位问题与推进修改。</p>
+          </article>
+          <article class="capability-item reveal">
+            <h3>多模型对比</h3>
+            <p>让同一个问题并行获得不同回答，在一个位置完成比较和判断。</p>
+          </article>
+          <article class="capability-item capability-offset reveal">
+            <h3>完整项目视图</h3>
+            <p>任务、项目文件、改动与终端彼此相邻，不用在分散窗口之间搬运上下文。</p>
+          </article>
+          <article class="capability-item reveal">
+            <h3>模型目录</h3>
+            <p>集中搜索模型与服务来源，并在使用前查看公开的参考价格信息。</p>
+          </article>
+          <article class="capability-item capability-offset reveal">
+            <h3>三端桌面体验</h3>
+            <p>面向 Windows、macOS 与 Linux 保持统一体验，本机敏感操作始终需要确认。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="download section-shell" id="download" aria-labelledby="download-heading">
+        <div class="download-panel glass-surface">
+          <div class="download-copy">
+            <p class="eyebrow">准备就绪</p>
+            <h2 id="download-heading">选择你的桌面。</h2>
+            <p>桌面安装包接入后，三端即可直接下载。等待期间，你可以先使用 COD 网页版。</p>
+          </div>
+
+          <div class="platform-picker" role="group" aria-label="选择操作系统">
+            <button type="button" data-platform="windows" aria-pressed="false">Windows</button>
+            <button type="button" data-platform="macos" aria-pressed="false">macOS</button>
+            <button type="button" data-platform="linux" aria-pressed="false">Linux</button>
+          </div>
+
+          <div class="download-selection" aria-live="polite">
+            <div>
+              <span>当前选择</span>
+              <strong id="selectedPlatform">Windows</strong>
+            </div>
+            <button class="button button-primary download-button" type="button" id="downloadButton">
+              下载 COD
+            </button>
+          </div>
+          <p class="download-note" id="downloadNote">安装包接入后即可下载。</p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer section-shell">
+      <a class="brand" href="#top" aria-label="返回顶部">
+        <span class="cod-wordmark">COD</span>
+      </a>
+      <p>一个简单、专注的桌面智能体。</p>
+      <span><a href="./app/">网页版</a> · © 2026 COD</span>
+    </footer>
+
+    <div class="toast glass-surface" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+    <script type="module" src="/showcase/script.js"></script>
   </body>
 </html>

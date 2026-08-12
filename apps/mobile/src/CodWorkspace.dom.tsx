@@ -1,12 +1,18 @@
 'use dom';
 
-import { useDOMImperativeHandle, type DOMImperativeFactory } from 'expo/dom';
+import { useEffect } from 'react';
+import type { DOMImperativeFactory } from 'expo/dom';
 import type { Ref } from 'react';
 
 import { App } from '../../web/src/App';
 import { configureCodRuntime, dispatchCodNativeBack } from '../../web/src/runtime';
 import type { NativeHttpRequest, NativeHttpResponse } from '../../web/src/runtime';
+import { ensureExpoDomGlobals } from './dom-bootstrap';
+import { domNativeActions, installNativeBackHandle } from './dom-native-bridge';
 import '../../web/src/styles.css';
+
+const fallbackControlPlaneUrl = process.env.EXPO_PUBLIC_COD_CONTROL_PLANE_URL ?? 'https://cod.kai.com';
+ensureExpoDomGlobals(fallbackControlPlaneUrl);
 
 export interface CodWorkspaceRef extends DOMImperativeFactory {
   handleNativeBack: () => void;
@@ -26,31 +32,17 @@ interface CodWorkspaceProps {
 }
 
 export default function CodWorkspace({
-  ref,
   controlPlaneUrl,
   hostPlatform,
-  nativeRequest,
-  cancelNativeRequest,
-  openExternalUrl,
-  copyText,
-  setNativeColorMode,
-  setNativeBackAvailable,
 }: CodWorkspaceProps) {
-  useDOMImperativeHandle(ref, () => ({
-    handleNativeBack: () => {
-      dispatchCodNativeBack();
-    },
+  useEffect(() => installNativeBackHandle(() => {
+    dispatchCodNativeBack();
   }), []);
 
   configureCodRuntime({
     controlPlaneUrl,
     hostPlatform,
-    nativeRequest,
-    cancelNativeRequest,
-    openExternalUrl,
-    copyText,
-    setNativeColorMode,
-    setNativeBackAvailable,
+    ...domNativeActions,
   });
   return <App />;
 }

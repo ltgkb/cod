@@ -12,7 +12,7 @@ const { renderer, controlPlane } = resolveDesktopDevelopmentEndpoints(process.en
 await waitOn({
   resources: [
     `http-get://${controlPlane.host}/ready`,
-    `http-get://${renderer.host}/`,
+    `http-get://${renderer.host}/app/`,
   ],
   interval: 200,
   timeout: 30_000,

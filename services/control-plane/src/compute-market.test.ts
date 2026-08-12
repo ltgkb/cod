@@ -1,0 +1,92 @@
+import { describe, expect, it } from 'vitest';
+import { HttpError } from './errors.js';
+import { validateComputeRequest } from './compute-market.js';
+
+const hostingRequest = {
+  kind: 'hosting',
+  company: '算力设备有限公司',
+  contactName: '张经理',
+  contactPhone: '13800138000',
+  city: '上海',
+  gpuModel: 'NVIDIA H100 SXM 80GB',
+  quantity: 16,
+  requirements: '设备产权与序列号可在线下审核时提供',
+  hostingPeriodMonths: 24,
+  rackUnits: 8,
+  powerKilowatts: 12.5,
+  networkMbps: 1000,
+  availabilityNotes: '设备预计 2026 年 9 月可入场',
+  settlementPreference: '希望由实际托管服务商按月结算并开具发票',
+  hostingRequirements: '需第三方合规机房、双路供电、远程运维和书面 SLA',
+} as const;
+
+function expectInvalid(input: unknown, code: string): void {
+  try {
+    validateComputeRequest(input);
+    throw new Error('Expected compute request to be rejected');
+  } catch (error) {
+    expect(error).toBeInstanceOf(HttpError);
+    expect((error as HttpError).status).toBe(400);
+    expect((error as HttpError).code).toBe(code);
+  }
+}
+
+describe('third-party GPU hosting request validation', () => {
+  it('normalizes a complete manually matched hosting request', () => {
+    expect(validateComputeRequest(hostingRequest)).toEqual({
+      ...hostingRequest,
+      offerId: null,
+      durationHours: null,
+      termMonths: null,
+    });
+  });
+
+  it('accepts availability notes when rack, power, and network figures are not known yet', () => {
+    const result = validateComputeRequest({
+      ...hostingRequest,
+      rackUnits: null,
+      powerKilowatts: null,
+      networkMbps: null,
+      availabilityNotes: '整机已在深圳，可在合同确认后两周内迁入第三方机房',
+    });
+    expect(result).toMatchObject({ kind: 'hosting', rackUnits: null, powerKilowatts: null, networkMbps: null });
+  });
+
+  it('rejects incomplete or out-of-range hosting terms', () => {
+    expectInvalid({ ...hostingRequest, hostingPeriodMonths: 0 }, 'invalid_compute_hosting_period');
+    expectInvalid({ ...hostingRequest, hostingPeriodMonths: '24' }, 'invalid_compute_hosting_period');
+    expectInvalid({ ...hostingRequest, rackUnits: 0 }, 'invalid_compute_rack_units');
+    expectInvalid({ ...hostingRequest, powerKilowatts: 1000.1 }, 'invalid_compute_power');
+    expectInvalid({ ...hostingRequest, networkMbps: 1.5 }, 'invalid_compute_network');
+    expectInvalid({ ...hostingRequest, rackUnits: null, powerKilowatts: null, networkMbps: null, availabilityNotes: '' }, 'invalid_compute_hosting_capacity');
+    expectInvalid({ ...hostingRequest, settlementPreference: '' }, 'invalid_compute_hosting_terms');
+    expectInvalid({ ...hostingRequest, hostingRequirements: '' }, 'invalid_compute_hosting_terms');
+  });
+
+  it('keeps existing request kinds valid while rejecting coerced numeric fields', () => {
+    const rental = {
+      kind: 'rental', offerId: 'cod-h100-pcie-card-hour', company: '测试企业', contactName: 'Kai', contactPhone: 'kai_compute_2026',
+      city: '北京', gpuModel: 'NVIDIA H100 PCIe 80GB', quantity: 2, durationHours: 100, requirements: '模型微调',
+    };
+    expect(validateComputeRequest(rental)).toMatchObject({ kind: 'rental', quantity: 2, durationHours: 100 });
+    expectInvalid({ ...rental, quantity: '2' }, 'invalid_compute_quantity');
+    expectInvalid({ ...rental, durationHours: '100' }, 'invalid_compute_duration');
+  });
+
+  it('drops fields that do not belong to the selected request kind', () => {
+    const rental = validateComputeRequest({
+      kind: 'rental', offerId: 'cod-h100-pcie-card-hour', company: '测试企业', contactName: 'Kai', contactPhone: 'kai_compute_2026',
+      city: '北京', gpuModel: 'NVIDIA H100 PCIe 80GB', quantity: 2, durationHours: 100, termMonths: 36, requirements: '模型微调',
+      hostingPeriodMonths: 120, rackUnits: 256, powerKilowatts: 1000, networkMbps: 1_000_000,
+      availabilityNotes: '不应保留', settlementPreference: '不应保留', hostingRequirements: '不应保留',
+    });
+    expect(rental).toMatchObject({
+      kind: 'rental', offerId: 'cod-h100-pcie-card-hour', durationHours: 100, termMonths: null,
+      hostingPeriodMonths: null, rackUnits: null, powerKilowatts: null, networkMbps: null,
+      availabilityNotes: null, settlementPreference: null, hostingRequirements: null,
+    });
+
+    const hosting = validateComputeRequest({ ...hostingRequest, offerId: 'cod-h100-pcie-card-hour', durationHours: 100, termMonths: 36 });
+    expect(hosting).toMatchObject({ kind: 'hosting', offerId: null, durationHours: null, termMonths: null, hostingPeriodMonths: 24 });
+  });
+});

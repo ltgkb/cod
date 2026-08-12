@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { chatRequestSchemaMigration, ledgerAllocationBackfillMigration, ledgerTypeConstraintMigration, legacyInviteCodeBackfillMigration, walletOpeningBalanceMigration } from './database.js';
+import { adminComputeRequestIndexMigration, chatRequestSchemaMigration, computeRequestHostingMigration, ledgerAllocationBackfillMigration, ledgerTypeConstraintMigration, legacyInviteCodeBackfillMigration, walletOpeningBalanceMigration } from './database.js';
 
 describe('production-safe migrations and rate limits', () => {
   it('backfills only legacy unallocated ledger rows and enforces the accounting invariant', () => {
@@ -53,6 +53,17 @@ describe('production-safe migrations and rate limits', () => {
     expect(databaseSource).toContain('SELECT ctid FROM cod_chat_requests WHERE expires_at<=now() ORDER BY expires_at LIMIT 1000');
   });
 
+  it('widens the existing compute request kind constraint without rewriting payloads', () => {
+    const databaseSource=readFileSync(new URL('./database.ts',import.meta.url),'utf8');
+    expect(computeRequestHostingMigration).toContain("position('hosting' in pg_get_constraintdef(oid))=0");
+    expect(computeRequestHostingMigration).toContain("CHECK (kind IN ('rental','supply','installment','hosting')) NOT VALID");
+    expect(computeRequestHostingMigration).toContain('VALIDATE CONSTRAINT cod_compute_requests_kind_check');
+    expect(computeRequestHostingMigration).not.toContain('UPDATE cod_compute_requests');
+    expect(adminComputeRequestIndexMigration).toContain('CREATE INDEX CONCURRENTLY IF NOT EXISTS');
+    expect(adminComputeRequestIndexMigration).toContain('cod_compute_requests_admin_created_idx ON cod_compute_requests(created_at DESC, id DESC)');
+    expect(databaseSource).not.toContain('CREATE INDEX IF NOT EXISTS cod_compute_requests_admin_created_idx');
+  });
+
   it('trusts only the observed ALB subnet and isolates heartbeat bursts', () => {
     const httpConfig = readFileSync(new URL('../../../deploy/nginx-http.conf', import.meta.url), 'utf8');
     const siteConfig = readFileSync(new URL('../../../deploy/cod.nginx.conf', import.meta.url), 'utf8');
@@ -68,7 +79,7 @@ describe('production-safe migrations and rate limits', () => {
     expect(httpConfig).toContain('map $http_x_request_id $cod_request_id');
     expect(httpConfig).toContain('default $http_x_request_id;');
     expect(httpConfig).toContain('"" $request_id;');
-    expect(siteConfig.match(/proxy_set_header X-Request-ID \$cod_request_id;/g)).toHaveLength(5);
+    expect(siteConfig.match(/proxy_set_header X-Request-ID \$cod_request_id;/g)).toHaveLength(6);
     expect(siteConfig).not.toContain('proxy_set_header X-Request-ID $request_id;');
   });
 

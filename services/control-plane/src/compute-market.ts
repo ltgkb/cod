@@ -1,6 +1,7 @@
+import type { ComputeRequestInput } from '@cod/contracts';
 import { HttpError } from './errors.js';
 
-export type ComputeRequestKind = 'rental' | 'supply' | 'installment';
+export type { ComputeRequest, ComputeRequestInput, ComputeRequestKind } from '@cod/contracts';
 
 export interface ComputeOffer {
   id: string;
@@ -18,31 +19,6 @@ export interface ComputeOffer {
   availability: 'ready' | 'limited' | 'quote';
   verified: boolean;
   tags: string[];
-}
-
-export interface ComputeRequestInput {
-  kind: ComputeRequestKind;
-  offerId?: string | null;
-  company: string;
-  contactName: string;
-  contactPhone: string;
-  city: string;
-  gpuModel: string;
-  quantity: number;
-  durationHours?: number | null;
-  termMonths?: number | null;
-  requirements: string;
-}
-
-export interface ComputeRequest extends ComputeRequestInput {
-  id: string;
-  email: string;
-  offerId: string | null;
-  durationHours: number | null;
-  termMonths: number | null;
-  status: 'submitted' | 'contacting' | 'quoted' | 'closed';
-  createdAt: string;
-  updatedAt: string;
 }
 
 export const computeOfferCatalog: readonly ComputeOffer[] = [
@@ -66,14 +42,16 @@ export const computeOfferCatalog: readonly ComputeOffer[] = [
   },
 ] as const;
 
-const clean = (value: unknown, max: number) => String(value ?? '').trim().slice(0, max);
+const clean = (value: unknown, max: number) => typeof value === 'string' ? value.trim().slice(0, max) : '';
+const optionalClean = (value: unknown, max: number) => clean(value, max) || null;
+const optionalNumber = (value: unknown): number | null => value === null || value === undefined || value === '' ? null : typeof value === 'number' ? value : Number.NaN;
 const contactPattern = /^(?:[0-9+()\-\s]{6,40}|[A-Za-z][A-Za-z0-9_-]{5,39})$/;
 
 export function validateComputeRequest(raw: unknown): ComputeRequestInput {
   if (!raw || typeof raw !== 'object') throw new HttpError('Compute request is invalid', 400, 'invalid_compute_request');
   const value = raw as Record<string, unknown>;
   const kind = value.kind;
-  if (kind !== 'rental' && kind !== 'supply' && kind !== 'installment') throw new HttpError('Compute request kind is invalid', 400, 'invalid_compute_request_kind');
+  if (kind !== 'rental' && kind !== 'supply' && kind !== 'installment' && kind !== 'hosting') throw new HttpError('Compute request kind is invalid', 400, 'invalid_compute_request_kind');
   const offerId = clean(value.offerId, 100) || null;
   if (kind === 'rental' && (!offerId || !computeOfferCatalog.some((offer) => offer.id === offerId))) throw new HttpError('Compute offer is invalid', 400, 'invalid_compute_offer');
   const company = clean(value.company, 120);
@@ -82,12 +60,39 @@ export function validateComputeRequest(raw: unknown): ComputeRequestInput {
   const city = clean(value.city, 80);
   const gpuModel = clean(value.gpuModel, 100);
   const requirements = clean(value.requirements, 2000);
-  const quantity = Number(value.quantity);
-  const durationHours = value.durationHours === null || value.durationHours === undefined || value.durationHours === '' ? null : Number(value.durationHours);
-  const termMonths = value.termMonths === null || value.termMonths === undefined || value.termMonths === '' ? null : Number(value.termMonths);
+  const quantity = typeof value.quantity === 'number' ? value.quantity : Number.NaN;
+  const durationHours = optionalNumber(value.durationHours);
+  const termMonths = optionalNumber(value.termMonths);
+  const hostingPeriodMonths = optionalNumber(value.hostingPeriodMonths);
+  const rackUnits = optionalNumber(value.rackUnits);
+  const powerKilowatts = optionalNumber(value.powerKilowatts);
+  const networkMbps = optionalNumber(value.networkMbps);
+  const availabilityNotes = optionalClean(value.availabilityNotes, 1000);
+  const settlementPreference = optionalClean(value.settlementPreference, 500);
+  const hostingRequirements = optionalClean(value.hostingRequirements, 2000);
   if (company.length < 2 || !contactName || !contactPattern.test(contactPhone) || !city || !gpuModel) throw new HttpError('Company and contact details are incomplete', 400, 'invalid_compute_contact');
   if (!Number.isInteger(quantity) || quantity < 1 || quantity > 4096) throw new HttpError('GPU quantity is invalid', 400, 'invalid_compute_quantity');
   if (kind === 'rental' && (!Number.isInteger(durationHours) || Number(durationHours) < 1 || Number(durationHours) > 1_000_000)) throw new HttpError('Rental duration is invalid', 400, 'invalid_compute_duration');
   if (kind === 'installment' && ![12, 24, 36].includes(Number(termMonths))) throw new HttpError('Installment term is invalid', 400, 'invalid_compute_term');
-  return { kind, offerId, company, contactName, contactPhone, city, gpuModel, quantity, durationHours, termMonths, requirements };
+  if (kind === 'hosting') {
+    if (!Number.isInteger(hostingPeriodMonths) || Number(hostingPeriodMonths) < 1 || Number(hostingPeriodMonths) > 120) throw new HttpError('Hosting period is invalid', 400, 'invalid_compute_hosting_period');
+    if (rackUnits !== null && (!Number.isInteger(rackUnits) || rackUnits < 1 || rackUnits > 256)) throw new HttpError('Rack requirement is invalid', 400, 'invalid_compute_rack_units');
+    if (powerKilowatts !== null && (!Number.isFinite(powerKilowatts) || powerKilowatts <= 0 || powerKilowatts > 1000)) throw new HttpError('Power requirement is invalid', 400, 'invalid_compute_power');
+    if (networkMbps !== null && (!Number.isInteger(networkMbps) || networkMbps < 1 || networkMbps > 1_000_000)) throw new HttpError('Network requirement is invalid', 400, 'invalid_compute_network');
+    if (rackUnits === null && powerKilowatts === null && networkMbps === null && !availabilityNotes) throw new HttpError('Hosting capacity or availability details are required', 400, 'invalid_compute_hosting_capacity');
+    if (!settlementPreference || !hostingRequirements) throw new HttpError('Hosting settlement and service requirements are required', 400, 'invalid_compute_hosting_terms');
+  }
+  return {
+    kind, company, contactName, contactPhone, city, gpuModel, quantity, requirements,
+    offerId: kind === 'rental' ? offerId : null,
+    durationHours: kind === 'rental' ? durationHours : null,
+    termMonths: kind === 'installment' ? termMonths : null,
+    hostingPeriodMonths: kind === 'hosting' ? hostingPeriodMonths : null,
+    rackUnits: kind === 'hosting' ? rackUnits : null,
+    powerKilowatts: kind === 'hosting' ? powerKilowatts : null,
+    networkMbps: kind === 'hosting' ? networkMbps : null,
+    availabilityNotes: kind === 'hosting' ? availabilityNotes : null,
+    settlementPreference: kind === 'hosting' ? settlementPreference : null,
+    hostingRequirements: kind === 'hosting' ? hostingRequirements : null,
+  };
 }

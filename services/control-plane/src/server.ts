@@ -1,10 +1,11 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type ServerResponse } from 'node:http';
-import type { TaskStatus, UsageEvent } from '@cod/contracts';
+import { isIP } from 'node:net';
+import type { ComputeRequestKind, ComputeRequestStatus, TaskStatus, UsageEvent } from '@cod/contracts';
 import { AGENT_SESSION_TTL_MS, createAgentSessionToken, createSessionToken, hashPassword, validatePassword, verifyAgentSessionToken, verifyPassword, verifySessionToken } from './auth.js';
 import { BotService, parseBotCommand, parseFeishuWebhook, replyFeishuMessage, verifyWebhookSignature, type BotPlatform } from './bots.js';
 import { loadConfig, type ControlPlaneConfig } from './config.js';
-import { CHAT_RESPONSE_CACHE_MAX_BYTES, creditPackCatalog, type CodDatabase, type Principal, PostgresDatabase, type TopupRequest } from './database.js';
+import { CHAT_RESPONSE_CACHE_MAX_BYTES, creditPackCatalog, decodeComputeRequestCursor, requireAdmin, validateComputeRequestId, validateComputeRequestKind, validateComputeRequestStatus, type AdminComputeRequestQuery, type CodDatabase, type Principal, PostgresDatabase, type TopupRequest } from './database.js';
 import { errorResponse, HttpError } from './errors.js';
 import { AiGateway, type ModelSourceInfo } from './gateway.js';
 import { bearerToken, readJson, readText, sendJson, sendText } from './http.js';
@@ -14,17 +15,32 @@ import { ProductRegistry } from './products.js';
 import { beginRequest, recordRequest, renderMetrics } from './metrics.js';
 import { computeOfferCatalog, validateComputeRequest } from './compute-market.js';
 import { OfficialPaymentService } from './payments.js';
+import { maskRegistrationDestination, normalizeRegistrationEmail, normalizeRegistrationPhone, RegistrationVerification, registrationDeliveryFromConfig, validateRegistrationChallengeId, validateRegistrationCode, type RegistrationDelivery } from './registration-verification.js';
 
 export interface ControlPlaneOptions {
   config?: ControlPlaneConfig;
   database?: CodDatabase;
   gateway?: AiGateway;
+  registrationDelivery?: RegistrationDelivery;
+  registrationFetcher?: typeof fetch;
+  now?: () => Date;
 }
 
 const validStatuses = new Set<TaskStatus>(['draft', 'running', 'waiting', 'complete', 'failed', 'cancelled']);
 const userIdFor = (email: string) => `usr_${createHash('sha256').update(email).digest('hex').slice(0, 20)}`;
 const tenantIdFor = (email: string) => `tenant_${email.split('@')[1]?.replace(/[^a-z0-9]+/g, '_') ?? 'unknown'}`;
-const principalFromSession = (session: { sub: string; tenantId: string; email: string; role: Principal['role'] }): Principal => ({ userId: session.sub, tenantId: session.tenantId, email: session.email, role: session.role });
+
+async function currentPrincipal(database: CodDatabase, session: { sub: string; tenantId: string; email: string }): Promise<Principal | null> {
+  const identity = await database.findIdentityByEmail(session.email);
+  if (!identity?.passwordHash) return null;
+  const principal = identity.principal;
+  if (
+    principal.userId !== session.sub
+    || principal.tenantId !== session.tenantId
+    || principal.email.toLowerCase() !== session.email.toLowerCase()
+  ) return null;
+  return principal;
+}
 
 type PublicModelSourceInfo = Pick<ModelSourceInfo, 'id' | 'label' | 'upstreamSourceId' | 'status' | 'callable' | 'paymentDirection' | 'models' | 'note'>;
 function publicModelCatalog(sources: ModelSourceInfo[]): PublicModelSourceInfo[] {
@@ -36,14 +52,46 @@ function publicModelCatalog(sources: ModelSourceInfo[]): PublicModelSourceInfo[]
 const dummyPasswordHash='scrypt$16384$8$1$MDEyMzQ1Njc4OWFiY2RlZg$vNLqtxxHxO9XlDJYZk-T6OzryI7HSubiscMSJDaWZtd0bu3h2vmmdlKsAZpCn3V20q-R_KOLJgJl9mHX32LDiA';
 
 function validateAuthEmail(raw: unknown): string {
-  if(typeof raw!=='string')throw new HttpError('请输入有效邮箱',400,'invalid_email');
-  const email = (raw ?? '').trim().toLowerCase();
-  if(email.length>254||!/^\S+@\S+\.\S+$/.test(email))throw new HttpError('请输入有效邮箱',400,'invalid_email');
-  return email;
+  return normalizeRegistrationEmail(raw);
+}
+
+function isLoopbackAddress(value: string): boolean {
+  const normalized=value.toLowerCase().replace(/^::ffff:/,'');
+  return normalized==='::1'||normalized==='0:0:0:0:0:0:0:1'||/^127(?:\.[0-9]{1,3}){3}$/.test(normalized);
+}
+
+function registrationAddressPrefix(value: string): string {
+  const normalized=value.toLowerCase().replace(/^::ffff:/,'');
+  if(isIP(normalized)===4){const parts=normalized.split('.');return `${parts[0]}.${parts[1]}.${parts[2]}.0/24`;}
+  if(isIP(normalized)!==6)return'unknown';
+  const [leftRaw,rightRaw='']=normalized.split('::');
+  const convert=(segments:string[])=>segments.flatMap((segment)=>{
+    if(isIP(segment)!==4)return[segment];
+    const octets=segment.split('.').map(Number);return[((octets[0]!<<8)|octets[1]!).toString(16),((octets[2]!<<8)|octets[3]!).toString(16)];
+  });
+  const left=convert(leftRaw?leftRaw.split(':'):[]);const right=convert(rightRaw?rightRaw.split(':'):[]);
+  const expanded=normalized.includes('::')?[...left,...Array(Math.max(0,8-left.length-right.length)).fill('0'),...right]:left;
+  return `${expanded.slice(0,4).map((part)=>Number.parseInt(part||'0',16).toString(16)).join(':')}::/64`;
+}
+
+export function registrationRateLimitAddress(socketAddress: string | undefined, xRealIp: string | string[] | undefined): string {
+  const socket=socketAddress??'';
+  const forwarded=typeof xRealIp==='string'&&!xRealIp.includes(',')?xRealIp.trim():'';
+  const selected=isLoopbackAddress(socket)&&isIP(forwarded)?forwarded:socket;
+  return registrationAddressPrefix(selected);
+}
+
+function registrationClientAddress(request: import('node:http').IncomingMessage): string {
+  return registrationRateLimitAddress(request.socket.remoteAddress,request.headers['x-real-ip']);
+}
+
+function validateIdempotencyKey(raw: unknown): string {
+  if (typeof raw !== 'string' || !/^[A-Za-z0-9._:-]{8,200}$/.test(raw)) throw new HttpError('请提供有效的幂等键', 400, 'invalid_idempotency_key');
+  return raw;
 }
 
 function verifyLegacyAccessCode(accessCode: unknown, config:ControlPlaneConfig):boolean{
-  if(config.pilotAccessCodeHash&&typeof accessCode==='string'){
+  if(config.pilotAccessCodeHash&&typeof accessCode==='string'&&Buffer.byteLength(accessCode,'utf8')<=256){
     const expected = Buffer.from(config.pilotAccessCodeHash, 'hex');
     const actual = createHash('sha256').update(accessCode).digest();
     return expected.length===actual.length&&timingSafeEqual(expected,actual);
@@ -185,6 +233,35 @@ function queryInteger(raw: string | null, fallback: number, maximum = Number.MAX
   return value;
 }
 
+function decodePathSegment(value: string): string {
+  try { return decodeURIComponent(value); }
+  catch { throw new HttpError('URL path is invalid', 400, 'invalid_path'); }
+}
+
+function adminComputeRequestQuery(url: URL): AdminComputeRequestQuery {
+  const allowed=new Set(['limit','cursor','status','kind']);
+  for(const key of url.searchParams.keys())if(!allowed.has(key)||url.searchParams.getAll(key).length!==1)throw new HttpError('Compute request filter is invalid',400,'invalid_compute_request_filter');
+  const limit=queryInteger(url.searchParams.get('limit'),50,100);
+  if(limit<1)throw new HttpError('Compute request page size is invalid',400,'invalid_compute_request_limit');
+  const rawStatus=url.searchParams.get('status');if(rawStatus!==null)validateComputeRequestStatus(rawStatus);
+  const rawKind=url.searchParams.get('kind');if(rawKind!==null)validateComputeRequestKind(rawKind);
+  return{limit,cursor:decodeComputeRequestCursor(url.searchParams.get('cursor')),status:rawStatus as ComputeRequestStatus|null,kind:rawKind as ComputeRequestKind|null,q:null};
+}
+
+function adminComputeRequestSearchBody(raw: unknown): AdminComputeRequestQuery {
+  if(!raw||typeof raw!=='object'||Array.isArray(raw))throw new HttpError('Compute request search is invalid',400,'invalid_compute_request_query');
+  const body=raw as Record<string,unknown>;const allowed=new Set(['limit','cursor','status','kind','q']);
+  for(const key of Object.keys(body))if(!allowed.has(key))throw new HttpError('Compute request filter is invalid',400,'invalid_compute_request_filter');
+  const q=typeof body.q==='string'?body.q.trim():'';
+  if(!q||q.length>100)throw new HttpError('Compute request search is invalid',400,'invalid_compute_request_query');
+  const limit=body.limit===undefined?50:body.limit;
+  if(!Number.isInteger(limit)||Number(limit)<1||Number(limit)>100)throw new HttpError('Compute request page size is invalid',400,'invalid_compute_request_limit');
+  const status=body.status===undefined?null:body.status; if(status!==null)validateComputeRequestStatus(status);
+  const kind=body.kind===undefined?null:body.kind; if(kind!==null)validateComputeRequestKind(kind);
+  const cursor=body.cursor===undefined?null:decodeComputeRequestCursor(body.cursor);
+  return{limit:Number(limit),cursor,status:status as ComputeRequestStatus|null,kind:kind as ComputeRequestKind|null,q};
+}
+
 export function createControlPlane(options: ControlPlaneOptions = {}) {
   const config = options.config ?? loadConfig();
   const database = options.database ?? (config.databaseUrl ? new PostgresDatabase(config.databaseUrl) : new MemoryDatabase());
@@ -192,6 +269,22 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
   const knowledge = new KnowledgeAdapter(config);
   const products = new ProductRegistry(config);
   const officialPayments = new OfficialPaymentService(config);
+  const registrationFetcher = options.registrationFetcher ?? fetch;
+  const registrationDelivery = options.registrationDelivery ?? registrationDeliveryFromConfig(config.registrationVerification, registrationFetcher);
+  const registration = new RegistrationVerification(config.registrationVerification, registrationDelivery, registrationFetcher);
+  const now = options.now ?? (() => new Date());
+  const requireRegistration = () => {
+    if (!config.registrationEnabled || !registration.available) throw new HttpError('账号注册暂未开放', 503, 'registration_unavailable');
+  };
+  const consumeRegistrationLimits = async (request: import('node:http').IncomingMessage, scope: string, destination: string, instant: Date) => {
+    const address = registrationClientAddress(request);
+    await database.consumeRegistrationRateLimit({
+      scope: `${scope}:destination`, keyHash: registration.rateLimitKey(`${scope}:destination`, destination), now: instant, windowSeconds: 60 * 60, limit: 6,
+    });
+    await database.consumeRegistrationRateLimit({
+      scope: `${scope}:address`, keyHash: registration.rateLimitKey(`${scope}:address`, address), now: instant, windowSeconds: 60 * 60, limit: 20,
+    });
+  };
   const seenFeishuMessages = new Set<string>();
   interface ActiveChatRequest { controller: AbortController; reservationId: string; reservationReady: Promise<void>; state: 'active' | 'settling' | 'settled' }
   const activeChats = new Map<string, Set<ActiveChatRequest>>();
@@ -229,14 +322,16 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         response.setHeader('vary', 'Origin');
       }
       response.setHeader('access-control-allow-headers', 'authorization,content-type,idempotency-key,x-request-id');
-      response.setHeader('access-control-allow-methods', 'GET,POST,OPTIONS');
+      response.setHeader('access-control-allow-methods', 'GET,POST,PATCH,OPTIONS');
       if (request.method === 'OPTIONS') return sendJson(response, 204, null);
       if (request.method === 'GET' && url.pathname === '/health') return sendJson(response, 200, { status: 'ok', service: 'cod-control-plane' });
       if (request.method === 'GET' && url.pathname === '/ready') { const ready=await database.health(); return sendJson(response, ready ? 200 : 503, { status: ready ? 'ready' : 'not_ready', database: config.databaseUrl ? 'postgres' : 'memory' }); }
       if (request.method === 'GET' && url.pathname === '/metrics') { const ready=await database.health(); response.writeHead(200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8' }); response.end(renderMetrics(ready)); return; }
       if (request.method === 'GET' && url.pathname === '/version') return sendJson(response, 200, { revision: process.env.COD_REVISION ?? 'development', node: process.version });
-      if (request.method === 'GET' && url.pathname === '/api/capabilities') return sendJson(response, 200, {
-        authentication: { mode: 'password', registrationEnabled: config.registrationEnabled, inviteCodeOptional: !config.inviteCodeRequired, inviteCodeRequired: config.inviteCodeRequired, accessCodeRequired: false },
+      if (request.method === 'GET' && url.pathname === '/api/capabilities') {
+        const legacyIdentity=config.developmentLoginEnabled&&config.pilotAccessCodeHash?await database.findIdentityByEmail(config.developmentLoginEmail):null;
+        return sendJson(response, 200, {
+        authentication: { mode: 'password', registrationEnabled: config.registrationEnabled&&registration.available, legacyMigrationEnabled: Boolean(legacyIdentity&&!legacyIdentity.passwordHash), inviteCodeOptional: !config.inviteCodeRequired, inviteCodeRequired: config.inviteCodeRequired, accessCodeRequired: false, verificationMethods: ['email_otp','sms_otp'], turnstileSiteKey: config.registrationVerification.turnstileSiteKey, registrationWebOnly: true, publicRegistrationUrl: config.publicRegistrationUrl },
         ai: { mode: await gateway.mode(), streaming: true, streamingMode: 'buffered-sse' },
         knowledge: { mode: knowledge.mode() },
         payments: {
@@ -250,33 +345,93 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
           feishu: config.feishuVerificationToken && config.feishuAppId && config.feishuAppSecret && Object.keys(config.feishuBindings).length ? 'live' : 'unavailable',
           wecom: process.env.COD_BOT_WEBHOOK_SECRET ? 'adapter' : 'unavailable',
         },
-      });
+        });
+      }
       if (request.method === 'GET' && url.pathname === '/api/model-catalog') return sendJson(response, 200, publicModelCatalog(await gateway.listSources()));
       if (request.method === 'GET' && url.pathname === '/api/compute/offers') return sendJson(response, 200, computeOfferCatalog);
       if (request.method === 'POST' && url.pathname === '/api/auth/login') {
-        const body = await readJson<{ email?: string; password?: string }>(request);
-        const email = validateAuthEmail(body.email);
+        const body = await readJson<{ email?: string; password?: string } | null>(request);
+        const email = validateAuthEmail(body?.email);
         const identity=await database.findIdentityByEmail(email);
-        const passwordMatches=await verifyPassword(body.password,identity?.passwordHash??dummyPasswordHash);
+        const passwordMatches=await verifyPassword(body?.password,identity?.passwordHash??dummyPasswordHash);
         if(!identity?.passwordHash||!passwordMatches)throw new HttpError('邮箱或密码错误',401,'invalid_credentials');
         const principal=identity.principal;
         await database.audit(principal, 'auth.login', 'session', null);
         const token = createSessionToken({ sub: principal.userId, tenantId: principal.tenantId, email, role: principal.role }, config.sessionSecret);
         return sendJson(response, 200, { token, user: { id: principal.userId, email } });
       }
+      if (request.method === 'POST' && url.pathname === '/api/auth/registration/email/start') {
+        requireRegistration();
+        const body=await readJson<{email?:unknown;humanChallengeToken?:unknown}|null>(request);
+        const email=normalizeRegistrationEmail(body?.email);
+        const instant=now();
+        await registration.verifyHuman(body?.humanChallengeToken);
+        await consumeRegistrationLimits(request,'registration-email-start',email,instant);
+        const challengeId=randomUUID();
+        const expiresAt=new Date(instant.getTime()+config.registrationVerification.otpTtlSeconds*1000);
+        const resendAt=new Date(instant.getTime()+config.registrationVerification.resendSeconds*1000);
+        const generated=registration.createCode(challengeId,'email',email);
+        const challenge=await database.startEmailRegistration({challengeId,email,codeHash:generated.hash,now:instant,expiresAt,resendAfter:resendAt,maxSends:config.registrationVerification.maxSendsPerChannel});
+        try { await registration.deliver('email',{challengeId:challenge.challengeId,destination:email,code:generated.code,expiresAt:challenge.expiresAt}); }
+        catch(error){await database.invalidateRegistrationCode({challengeId:challenge.challengeId,channel:'email',codeHash:generated.hash,now:now()});throw error;}
+        return sendJson(response,202,{challengeId:challenge.challengeId,maskedDestination:maskRegistrationDestination('email',email),expiresAt:challenge.expiresAt,resendAt:new Date(instant.getTime()+challenge.retryAfterSeconds*1000).toISOString()});
+      }
+      if (request.method === 'POST' && url.pathname === '/api/auth/registration/email/verify') {
+        requireRegistration();
+        const body=await readJson<{challengeId?:unknown;email?:unknown;code?:unknown}|null>(request);
+        const challengeId=validateRegistrationChallengeId(body?.challengeId);const email=normalizeRegistrationEmail(body?.email);const code=validateRegistrationCode(body?.code);const instant=now();
+        await database.consumeRegistrationRateLimit({scope:'registration-email-verify:address',keyHash:registration.rateLimitKey('registration-email-verify:address',registrationClientAddress(request)),now:instant,windowSeconds:60*60,limit:40});
+        await database.verifyRegistrationEmail({challengeId,email,codeHash:registration.hashCode(challengeId,'email',email,code),now:instant,maxFailures:config.registrationVerification.maxFailedAttempts});
+        return sendJson(response,200,{verified:true});
+      }
+      if (request.method === 'POST' && url.pathname === '/api/auth/registration/phone/start') {
+        requireRegistration();
+        const body=await readJson<{challengeId?:unknown;email?:unknown;phone?:unknown;humanChallengeToken?:unknown}|null>(request);
+        const challengeId=validateRegistrationChallengeId(body?.challengeId);const email=normalizeRegistrationEmail(body?.email);const phone=normalizeRegistrationPhone(body?.phone);const instant=now();
+        await registration.verifyHuman(body?.humanChallengeToken);
+        await consumeRegistrationLimits(request,'registration-phone-start',phone,instant);
+        const expiresAt=new Date(instant.getTime()+config.registrationVerification.otpTtlSeconds*1000);const resendAt=new Date(instant.getTime()+config.registrationVerification.resendSeconds*1000);
+        const generated=registration.createCode(challengeId,'phone',phone);
+        const challenge=await database.startPhoneRegistration({challengeId,email,phone,codeHash:generated.hash,now:instant,expiresAt,resendAfter:resendAt,maxSends:config.registrationVerification.maxSendsPerChannel});
+        try { await registration.deliver('phone',{challengeId:challenge.challengeId,destination:phone,code:generated.code,expiresAt:challenge.expiresAt}); }
+        catch(error){await database.invalidateRegistrationCode({challengeId:challenge.challengeId,channel:'phone',codeHash:generated.hash,now:now()});throw error;}
+        return sendJson(response,202,{challengeId:challenge.challengeId,maskedDestination:maskRegistrationDestination('phone',phone),expiresAt:challenge.expiresAt,resendAt:new Date(instant.getTime()+challenge.retryAfterSeconds*1000).toISOString()});
+      }
+      if (request.method === 'POST' && url.pathname === '/api/auth/registration/phone/verify') {
+        requireRegistration();
+        const body=await readJson<{challengeId?:unknown;email?:unknown;phone?:unknown;code?:unknown}|null>(request);
+        const challengeId=validateRegistrationChallengeId(body?.challengeId);const email=normalizeRegistrationEmail(body?.email);const phone=normalizeRegistrationPhone(body?.phone);const code=validateRegistrationCode(body?.code);const instant=now();
+        await database.consumeRegistrationRateLimit({scope:'registration-phone-verify:address',keyHash:registration.rateLimitKey('registration-phone-verify:address',registrationClientAddress(request)),now:instant,windowSeconds:60*60,limit:40});
+        await database.verifyRegistrationPhone({challengeId,email,phone,codeHash:registration.hashCode(challengeId,'phone',phone,code),now:instant,maxFailures:config.registrationVerification.maxFailedAttempts});
+        return sendJson(response,200,{verified:true});
+      }
       if(request.method==='POST'&&url.pathname==='/api/auth/register'){
-        if(!config.registrationEnabled)throw new HttpError('账号注册暂未开放',503,'registration_unavailable');
-        const body=await readJson<{email?:string;password?:string;inviteCode?:string;legacyAccessCode?:string}>(request);
-        const email=validateAuthEmail(body.email);
-        let password:string;try{password=validatePassword(body.password);}catch(error){throw new HttpError(error instanceof Error?error.message:'密码不符合要求',400,'invalid_password');}
-        const inviteCode=typeof body.inviteCode==='string'&&body.inviteCode.trim()?body.inviteCode.trim().toUpperCase():null;
-        if(inviteCode&&(!/^[A-Z0-9-]{4,32}$/.test(inviteCode)))throw new HttpError('邀请码格式无效',400,'invalid_invite_code');
+        const body=await readJson<{challengeId?:unknown;email?:unknown;phone?:unknown;password?:unknown;inviteCode?:unknown;legacyAccessCode?:unknown}|null>(request);
+        const email=validateAuthEmail(body?.email);
         const existing=await database.findIdentityByEmail(email);
-        const allowExisting=Boolean(existing&&!existing.passwordHash&&verifyLegacyAccessCode(body.legacyAccessCode,config));
+        const allowLegacyMigration=config.developmentLoginEnabled&&email===config.developmentLoginEmail&&Boolean(existing&&!existing.passwordHash);
+        const allowExisting=Boolean(allowLegacyMigration&&verifyLegacyAccessCode(body?.legacyAccessCode,config));
+        if(!allowExisting)requireRegistration();
+        let password:string;try{password=validatePassword(body?.password);}catch(error){throw new HttpError(error instanceof Error?error.message:'密码不符合要求',400,'invalid_password');}
+        const inviteCode=typeof body?.inviteCode==='string'&&body.inviteCode.trim()?body.inviteCode.trim().toUpperCase():null;
+        if(inviteCode&&(!/^[A-Z0-9-]{4,32}$/.test(inviteCode)))throw new HttpError('邀请码格式无效',400,'invalid_invite_code');
         if(!allowExisting&&config.inviteCodeRequired&&!inviteCode)throw new HttpError('请输入有效邀请码',400,'invite_code_required');
         const principal:Principal={userId:userIdFor(email),tenantId:tenantIdFor(email),email,role:'member'};
-        const result=await database.registerIdentity(principal,await hashPassword(password),inviteCode,allowExisting);
-        await database.audit(result.identity.principal,result.created?'auth.register':'auth.legacy_migrated','user',result.identity.principal.userId,{inviteCodeUsed:result.identity.referralCodeUsed});
+        let result;
+        if(allowExisting){result=await database.registerIdentity(principal,await hashPassword(password),inviteCode,true);await database.audit(result.identity.principal,'auth.legacy_migrated','user',result.identity.principal.userId,{inviteCodeUsed:result.identity.referralCodeUsed});}
+        else{
+          const challengeId=validateRegistrationChallengeId(body?.challengeId);const phone=normalizeRegistrationPhone(body?.phone);const idempotencyKey=validateIdempotencyKey(request.headers['idempotency-key']);
+          const fingerprint=registration.requestFingerprint({challengeId,email,phone,password,inviteCode});
+          const instant=now();const address=registrationClientAddress(request);
+          await Promise.all([
+            database.consumeRegistrationRateLimit({scope:'registration-final:address',keyHash:registration.rateLimitKey('registration-final:address',address),now:instant,windowSeconds:60*60,limit:10}),
+            database.consumeRegistrationRateLimit({scope:'registration-final:email',keyHash:registration.rateLimitKey('registration-final:email',email),now:instant,windowSeconds:60*60,limit:5}),
+            database.consumeRegistrationRateLimit({scope:'registration-final:phone',keyHash:registration.rateLimitKey('registration-final:phone',phone),now:instant,windowSeconds:60*60,limit:5}),
+          ]);
+          const readiness=await database.assertVerifiedRegistration({challengeId,email,phone,now:instant});
+          const passwordHash=readiness==='consumed'?dummyPasswordHash:await hashPassword(password);
+          result=await database.completeVerifiedRegistration({challengeId,email,phone,passwordHash,inviteCode,idempotencyKey,fingerprint,principal,now:now()});
+        }
         const token=createSessionToken({sub:result.identity.principal.userId,tenantId:result.identity.principal.tenantId,email,role:result.identity.principal.role},config.sessionSecret);
         return sendJson(response,result.created?201:200,{token,user:{id:result.identity.principal.userId,email},inviteCode:result.identity.inviteCode,referred:Boolean(result.identity.referredByUserId)});
       }
@@ -310,7 +465,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       if (request.method === 'POST' && url.pathname === '/api/webhooks/wecom') {
         const rawBody = await readText(request);
         let raw: { text?: string; userId?: string; tenantId?: string; email?: string };
-        try { raw = JSON.parse(rawBody || '{}') as typeof raw; }
+        try { const parsed=JSON.parse(rawBody || '{}') as unknown;if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))throw new Error();raw=parsed as typeof raw; }
         catch { throw new HttpError('Request body must be valid JSON', 400, 'invalid_json'); }
         const platform: BotPlatform = 'wecom';
         const timestamp = String(request.headers['x-cod-timestamp'] ?? '');
@@ -327,11 +482,11 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         const signature = String(request.headers['x-cod-signature'] ?? '');
         if (!config.paymentWebhookSecret || !verifyWebhookSignature(rawBody, timestamp, signature, config.paymentWebhookSecret)) return sendJson(response, 401, { error: 'invalid_signature' });
         let event: { eventId?: string; orderId?: string; status?: string; amountCents?: number; currency?: string; channel?: string; providerPaymentId?: string };
-        try { event = JSON.parse(rawBody || '{}') as typeof event; }
+        try { const parsed=JSON.parse(rawBody || '{}') as unknown;if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))throw new Error();event=parsed as typeof event; }
         catch { throw new HttpError('Request body must be valid JSON', 400, 'invalid_json'); }
         if (event.status !== 'paid') return sendJson(response, 202, { accepted: true, credited: false });
         const channel = event.channel === 'wechat' || event.channel === 'alipay' ? event.channel : null;
-        if (!channel || event.currency !== 'CNY' || !event.eventId || !event.orderId || !event.providerPaymentId || !Number.isInteger(event.amountCents)) throw new HttpError('Payment event is invalid', 400, 'invalid_payment_event');
+        if (!channel || event.currency !== 'CNY' || typeof event.eventId!=='string' || !event.eventId || event.eventId.length>200 || typeof event.orderId!=='string' || !event.orderId || event.orderId.length>200 || typeof event.providerPaymentId!=='string' || !event.providerPaymentId || event.providerPaymentId.length>200 || !Number.isSafeInteger(event.amountCents)) throw new HttpError('Payment event is invalid', 400, 'invalid_payment_event');
         const completed = await database.completePaymentOrder({ orderId: event.orderId, amountCents: Number(event.amountCents), currency: 'CNY', channel, providerPaymentId: event.providerPaymentId, providerEventId: event.eventId });
         return sendJson(response, 200, { accepted: true, credited: true, order: completed.order, ledgerId: completed.entry.id });
       }
@@ -353,47 +508,79 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         const scopedPath=`/v1/tasks/${agentSession.taskId}/sources/${agentSession.sourceId}/chat/completions`;
         if(request.method!=='POST'||url.pathname!==scopedPath)return sendJson(response,403,{error:'agent_scope_forbidden'});
       }
-      const principal=principalFromSession(session??agentSession!);
+      // Roles are authorization state, not durable token claims. Resolve the
+      // current database identity on every authenticated request so account
+      // deletion and admin demotion take effect immediately instead of only
+      // after the seven-day session expires.
+      const principal=await currentPrincipal(database,session??agentSession!);
+      if(!principal)return sendJson(response,401,{error:'unauthorized'});
       if(request.method==='POST'&&url.pathname==='/api/agent-sessions'){
         if(!session)throw new HttpError('A full account session is required',403,'agent_scope_forbidden');
-        const body=await readJson<{taskId?:unknown;sourceId?:unknown;model?:unknown}>(request);
-        const taskId=typeof body.taskId==='string'?body.taskId.trim():'';
-        const sourceId=typeof body.sourceId==='string'?body.sourceId.trim():'';
-        const model=typeof body.model==='string'?body.model.trim():'';
+        const body=await readJson<{taskId?:unknown;sourceId?:unknown;model?:unknown}|null>(request);
+        const taskId=typeof body?.taskId==='string'?body.taskId.trim():'';
+        const sourceId=typeof body?.sourceId==='string'?body.sourceId.trim():'';
+        const model=typeof body?.model==='string'?body.model.trim():'';
         if(!/^[a-f0-9-]{36}$/i.test(taskId))throw new HttpError('Task ID is invalid',400,'invalid_task_id');
         if(!/^[a-z0-9-]{2,40}$/.test(sourceId))throw new HttpError('Model source is invalid',400,'invalid_source');
         if(!model||model.length>200)throw new HttpError('Model is invalid',400,'invalid_model');
         const task=await database.getTask(principal,taskId);
         if(task.status!=='running'&&task.status!=='waiting')throw new HttpError('Task is not running',409,task.status==='cancelled'?'task_cancelled':'task_not_running');
         await gateway.getModel(sourceId,model);
-        const issuedAt=Date.now();const scope={taskId,sourceId,model};const token=createAgentSessionToken(session,scope,config.sessionSecret,issuedAt);
+        const issuedAt=Date.now();const scope={taskId,sourceId,model};const token=createAgentSessionToken({sub:principal.userId,tenantId:principal.tenantId,email:principal.email,role:principal.role},scope,config.sessionSecret,issuedAt);
         await database.audit(principal,'agent_session.issue','task',taskId,{sourceId,model,expiresAt:new Date(issuedAt+AGENT_SESSION_TTL_MS).toISOString()});
         return sendJson(response,201,{token,expiresAt:new Date(issuedAt+AGENT_SESSION_TTL_MS).toISOString(),scope});
       }
       if(request.method==='GET'&&url.pathname==='/api/referrals')return sendJson(response,200,await database.getReferralSummary(principal));
       if (request.method === 'GET' && url.pathname === '/api/account') return sendJson(response, 200, await database.getAccount(principal));
       if (request.method === 'GET' && url.pathname === '/api/ledger') return sendJson(response, 200, await database.getLedger(principal));
+      if(request.method==='GET'&&url.pathname==='/api/admin/compute/requests'){
+        requireAdmin(principal);const query=adminComputeRequestQuery(url);const page=await database.listAdminComputeRequests(principal,query);
+        await database.audit(principal,'compute.request.admin.list','compute_request',null,{resultCount:page.items.length,hasMore:Boolean(page.nextCursor),status:query.status??null,kind:query.kind??null,hasQuery:Boolean(query.q)});
+        return sendJson(response,200,page);
+      }
+      if(request.method==='POST'&&url.pathname==='/api/admin/compute/requests/search'){
+        requireAdmin(principal);const query=adminComputeRequestSearchBody(await readJson<unknown>(request));const page=await database.listAdminComputeRequests(principal,query);
+        await database.audit(principal,'compute.request.admin.list','compute_request',null,{resultCount:page.items.length,hasMore:Boolean(page.nextCursor),status:query.status??null,kind:query.kind??null,hasQuery:true});
+        return sendJson(response,200,page);
+      }
+      const adminComputeDetail=url.pathname.match(/^\/api\/admin\/compute\/requests\/([^/]+)$/);
+      if(request.method==='GET'&&adminComputeDetail){
+        requireAdmin(principal);const id=decodePathSegment(adminComputeDetail[1]);validateComputeRequestId(id);const result=await database.getAdminComputeRequest(principal,id);
+        await database.audit(principal,'compute.request.admin.view','compute_request',result.id,{kind:result.kind,status:result.status});
+        return sendJson(response,200,result);
+      }
+      const adminComputeStatus=url.pathname.match(/^\/api\/admin\/compute\/requests\/([^/]+)\/status$/);
+      if(request.method==='PATCH'&&adminComputeStatus){
+        requireAdmin(principal);
+        const body=await readJson<unknown>(request);if(!body||typeof body!=='object'||Array.isArray(body)||Object.keys(body).some((key)=>key!=='status'&&key!=='expectedStatus'))throw new HttpError('Compute request status update is invalid',400,'invalid_compute_request_status_update');
+        const status=(body as {status?:unknown}).status;const expectedStatus=(body as {expectedStatus?:unknown}).expectedStatus;validateComputeRequestStatus(status);validateComputeRequestStatus(expectedStatus);
+        const id=decodePathSegment(adminComputeStatus[1]);validateComputeRequestId(id);const result=await database.updateAdminComputeRequestStatus(principal,id,status,expectedStatus);
+        return sendJson(response,200,result.request);
+      }
       if (request.method === 'GET' && url.pathname === '/api/compute/requests') return sendJson(response,200,await database.listComputeRequests(principal));
       if (request.method === 'POST' && url.pathname === '/api/compute/requests') {
         const key=String(request.headers['idempotency-key']??'');if(!key)throw new HttpError('idempotency-key is required',400,'idempotency_required');
         const input=validateComputeRequest(await readJson(request));const result=await database.createComputeRequest(principal,input,key);
-        await database.audit(principal,'compute.request.created','compute_request',result.id,{kind:result.kind,offerId:result.offerId,gpuModel:result.gpuModel,quantity:result.quantity});
-        return sendJson(response,201,result);
+        if(result.created)await database.audit(principal,'compute.request.created','compute_request',result.request.id,{kind:result.request.kind,offerId:result.request.offerId,gpuModel:result.request.gpuModel,quantity:result.request.quantity,fulfillmentMode:result.request.fulfillmentMode});
+        return sendJson(response,201,result.request);
       }
       if (request.method === 'GET' && url.pathname === '/api/credit-packs') return sendJson(response,200,{packs:creditPackCatalog,summary:await database.getCreditSummary(principal)});
       if (request.method === 'POST' && url.pathname.match(/^\/api\/credit-packs\/[^/]+\/purchase$/)) {
         const key=String(request.headers['idempotency-key']??'');if(!key)throw new HttpError('idempotency-key is required',400,'idempotency_required');
-        const packId=decodeURIComponent(url.pathname.split('/')[3]);const result=await database.purchaseCreditPack(principal,packId,key);
+        const packId=decodePathSegment(url.pathname.split('/')[3]);const result=await database.purchaseCreditPack(principal,packId,key);
         await database.audit(principal,'credit_pack.purchase','credit_grant',result.grant.id,{packId,creditCents:result.grant.originalCents,expiresAt:result.grant.expiresAt});
         return sendJson(response,201,result);
       }
       if (request.method === 'POST' && url.pathname === '/api/payment-orders') {
         const key=String(request.headers['idempotency-key']??'');if(!key)throw new HttpError('idempotency-key is required',400,'idempotency_required');
-        const body=await readJson<{amountCents?:number;channel?:'wechat'|'alipay'}>(request);
-        const channel=body.channel as 'wechat'|'alipay';
+        const body=await readJson<{amountCents?:unknown;channel?:unknown}|null>(request);
+        if(!body||typeof body!=='object')throw new HttpError('Payment order is invalid',400,'invalid_payment_order');
+        if(body.channel!=='wechat'&&body.channel!=='alipay')throw new HttpError('Payment channel is invalid',400,'invalid_payment_channel');
+        if(!Number.isSafeInteger(body.amountCents))throw new HttpError('Payment amount is invalid',400,'invalid_payment_amount');
+        const channel=body.channel;
         const officialChannel=officialPayments.availableChannels().includes(channel);
         if(!officialChannel&&!config.paymentWebhookSecret)throw new HttpError('所选支付渠道尚未接入',503,'payments_unavailable');
-        const order=await database.createPaymentOrder(principal,{amountCents:Number(body.amountCents),channel,idempotencyKey:key});
+        const order=await database.createPaymentOrder(principal,{amountCents:body.amountCents as number,channel,idempotencyKey:key});
         await database.audit(principal,'payment.order.created','payment_order',order.id,{amountCents:order.amountCents,channel:order.channel});
         if (!officialChannel) return sendJson(response,201,order);
         return sendJson(response,201,{order,checkout:await officialPayments.createCheckout(order)});
@@ -404,7 +591,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       if (request.method === 'GET' && url.pathname === '/api/models') return sendJson(response, 200, (await gateway.listSources()).flatMap((source) => source.models.map((model) => ({ ...model, sourceId: source.id }))));
       if (request.method === 'GET' && url.pathname === '/api/products') return sendJson(response, 200, products.list());
       if (request.method === 'POST' && url.pathname.match(/^\/api\/products\/[^/]+\/launch$/)) {
-        const productId = decodeURIComponent(url.pathname.split('/')[3]);
+        const productId = decodePathSegment(url.pathname.split('/')[3]);
         const launch = products.launch(productId, principal);
         await database.audit(principal, 'product.launch', 'product', productId, { mode: launch.mode });
         return sendJson(response, 200, launch);
@@ -416,15 +603,15 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       if (request.method === 'GET' && url.pathname === '/api/tasks') return sendJson(response, 200, await database.listTasks(principal));
       if (request.method === 'POST' && url.pathname === '/api/tasks') { const task=await database.createTask(principal,await readJson(request)); await database.audit(principal,'task.create','task',task.id); return sendJson(response,201,task); }
       if (request.method === 'POST' && url.pathname.match(/^\/api\/tasks\/[^/]+\/cancel$/)) {
-        const taskId=decodeURIComponent(url.pathname.split('/')[3]);
-        const body=await readJson<{expectedVersion?:number}>(request);
-        if(!Number.isInteger(body.expectedVersion)||Number(body.expectedVersion)<1)throw new HttpError('Expected task version is required',400,'invalid_task_version');
-        const task=await database.updateTask(principal,taskId,'cancelled',Number(body.expectedVersion),{result:null,error:null});
+        const taskId=decodePathSegment(url.pathname.split('/')[3]);
+        const body=await readJson<{expectedVersion?:number}|null>(request);
+        if(!Number.isInteger(body?.expectedVersion)||Number(body?.expectedVersion)<1)throw new HttpError('Expected task version is required',400,'invalid_task_version');
+        const task=await database.updateTask(principal,taskId,'cancelled',Number(body?.expectedVersion),{result:null,error:null});
         const cancelledRequests=await cancelActiveChats(principal,taskId);
         await database.audit(principal,'task.cancel','task',task.id,{cancelledRequests});
         return sendJson(response,200,{task,cancelledRequests});
       }
-      if (request.method === 'POST' && url.pathname.match(/^\/api\/tasks\/[^/]+\/status$/)) { const body=await readJson<{status:TaskStatus;expectedVersion:number;result?:string|null;error?:string|null}>(request); if(!validStatuses.has(body.status)) throw new HttpError('Invalid task status',400,'invalid_status'); const task=await database.updateTask(principal,url.pathname.split('/')[3],body.status,body.expectedVersion,{result:body.result,error:body.error}); await database.audit(principal,'task.status','task',task.id,{status:body.status,hasResult:Boolean(body.result),hasError:Boolean(body.error)}); return sendJson(response,200,task); }
+      if (request.method === 'POST' && url.pathname.match(/^\/api\/tasks\/[^/]+\/status$/)) { const body=await readJson<{status:TaskStatus;expectedVersion:number;result?:string|null;error?:string|null}|null>(request); if(!body||!validStatuses.has(body.status)) throw new HttpError('Invalid task status',400,'invalid_status'); if(!Number.isInteger(body.expectedVersion)||Number(body.expectedVersion)<1)throw new HttpError('Expected task version is required',400,'invalid_task_version'); const task=await database.updateTask(principal,url.pathname.split('/')[3],body.status,body.expectedVersion,{result:body.result,error:body.error}); await database.audit(principal,'task.status','task',task.id,{status:body.status,hasResult:Boolean(body.result),hasError:Boolean(body.error)}); return sendJson(response,200,task); }
       if (request.method === 'GET' && url.pathname === '/api/events') return sendJson(response, 200, await database.eventsAfter(principal, queryInteger(url.searchParams.get('cursor'), 0)));
       if (request.method === 'POST' && url.pathname === '/api/topups') {
         if (!config.developmentTopupEnabled) throw new HttpError('Direct top-up is disabled; use a verified payment callback', 403, 'topup_disabled');
@@ -437,12 +624,24 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       }
       const chatRoute = url.pathname.match(/^\/v1(?:\/tasks\/([^/]+))?(?:\/sources\/([a-z0-9-]{2,40}))?\/chat\/completions$/);
       if (request.method === 'POST' && chatRoute) {
-        const body = await readJson<{ model?: string; source?: string; task_id?: string } & Record<string, unknown>>(request);
+        // Attach disconnect handling before any body parsing, identity/model
+        // lookup, or billing work. Native clients can cancel immediately after
+        // dispatch, and Node will not replay an earlier close event for a late
+        // listener.
+        const controller=new AbortController();
+        const clientDisconnected=()=>request.aborted||response.destroyed||response.writableEnded;
+        const cancelOnDisconnect=()=>{if(!response.writableEnded&&!controller.signal.aborted)controller.abort(new HttpError('Client disconnected',409,'client_disconnected'));};
+        request.once('aborted',cancelOnDisconnect);response.once('close',cancelOnDisconnect);
+        try {
+        const assertClientConnected=()=>{if(controller.signal.aborted||clientDisconnected())throw controller.signal.reason instanceof HttpError?controller.signal.reason:new HttpError('Client disconnected',409,'client_disconnected');};
+        assertClientConnected();
+        const rawBody=await readJson<unknown>(request);assertClientConnected();if(!rawBody||typeof rawBody!=='object'||Array.isArray(rawBody))throw new HttpError('Chat request is invalid',400,'invalid_chat_request');
+        const body = rawBody as { model?: string; source?: string; task_id?: string } & Record<string, unknown>;
         const clientRequestedStream=body.stream===true;
         if(!Array.isArray(body.messages) || body.messages.length === 0 || body.messages.length > 40)throw new HttpError('Chat must contain between 1 and 40 messages',400,'invalid_messages');
         const validMessages = body.messages.every(isValidChatMessage);
         if (!validMessages) throw new HttpError('Chat messages are invalid',400,'invalid_messages');
-        const routeTaskId=chatRoute[1]?decodeURIComponent(chatRoute[1]):null;
+        const routeTaskId=chatRoute[1]?decodePathSegment(chatRoute[1]):null;
         const bodyTaskId=body.task_id===undefined?null:typeof body.task_id==='string'?body.task_id.trim():'';
         if(body.task_id!==undefined&&!bodyTaskId)throw new HttpError('Task ID is invalid',400,'invalid_task_id');
         if(routeTaskId&&bodyTaskId&&routeTaskId!==bodyTaskId)throw new HttpError('Task conflicts with the gateway route',400,'task_conflict');
@@ -455,18 +654,17 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         const model=typeof body.model==='string'?body.model.trim():'';
         if(!model)throw new HttpError('Model is required',400,'model_required');
         if(agentSession&&(taskId!==agentSession.taskId||sourceId!==agentSession.sourceId||model!==agentSession.model))throw new HttpError('Agent session does not permit this chat request',403,'agent_scope_forbidden');
-        const selection=await gateway.getModel(sourceId,model);const fallbackCandidate=sourceId==='demo'?null:await gateway.getFallbackModel(sourceId,model);
+        const selection=await gateway.getModel(sourceId,model);assertClientConnected();const fallbackCandidate=sourceId==='demo'?null:await gateway.getFallbackModel(sourceId,model);assertClientConnected();
         const maxOutput=Number(body.max_completion_tokens??body.max_tokens??4096);if(!Number.isInteger(maxOutput)||maxOutput<1||maxOutput>20_000)throw new HttpError('Invalid max output tokens; COD allows at most 20000',400,'invalid_max_tokens');
         const {source: _source,task_id: _taskId, ...rawProviderBody}=body;const providerMaxOutput=Math.max(512,maxOutput);const providerBody={...rawProviderBody,stream:false,...(body.max_completion_tokens!==undefined?{max_completion_tokens:providerMaxOutput}:{max_tokens:providerMaxOutput})};
         const requestFingerprint=createHash('sha256').update(canonicalJson({taskId:taskId??null,sourceId,providerBody})).digest('hex');
         const requestKey=agentSession?`agent:${agentSession.jti}:${requestFingerprint}`:requestId;
         const upstreamRequestKey=`cod-${createHash('sha256').update(canonicalJson({tenantId:principal.tenantId,userId:principal.userId,requestKey,requestFingerprint})).digest('hex').slice(0,48)}`;
-        const claim=await database.claimChatRequest(principal,requestKey,requestFingerprint);
+        const claim=await database.claimChatRequest(principal,requestKey,requestFingerprint);assertClientConnected();
         if(claim.state==='pending')throw new HttpError('An identical chat request is still in progress',409,'chat_request_in_progress');
         if(claim.state==='complete'){sendChatResult(response,claim.responsePayload,clientRequestedStream,requestId);return;}
         const reservationId=randomUUID();const estimatedInput=estimatedInputTokens(providerBody);const reservedCost=Math.max(gateway.costCents(selection.model,estimatedInput,providerMaxOutput),fallbackCandidate?gateway.costCents(fallbackCandidate,estimatedInput,providerMaxOutput):0);
-        const controller=new AbortController();let markReservationReady:()=>void=()=>undefined;const reservationReady=new Promise<void>((resolve)=>{markReservationReady=resolve;});const activeChat:ActiveChatRequest={controller,reservationId,reservationReady,state:'active'};const unregisterActiveChat=taskId?registerActiveChat(principal,taskId,activeChat):()=>undefined;
-        const cancelOnDisconnect=()=>{if(!response.writableEnded&&!controller.signal.aborted)controller.abort(new HttpError('Client disconnected',409,'client_disconnected'));};response.once('close',cancelOnDisconnect);
+        let markReservationReady:()=>void=()=>undefined;const reservationReady=new Promise<void>((resolve)=>{markReservationReady=resolve;});const activeChat:ActiveChatRequest={controller,reservationId,reservationReady,state:'active'};const unregisterActiveChat=taskId?registerActiveChat(principal,taskId,activeChat):()=>undefined;
         let chatSettled=false;
         const failChatClaim=async()=>{try{await database.failChatRequest(principal,requestKey,requestFingerprint);}catch(failure){console.error(JSON.stringify({level:'error',event:'chat.claim.fail_failed',requestId,taskId:taskId??null,sourceId,error:failure instanceof Error?failure.message:String(failure)}));}};
         try {
@@ -485,11 +683,13 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
           await database.settleUsage(principal,reservationId,{idempotencyKey:`chat:${requestKey}:${requestFingerprint}`,taskId:taskId??'chat',sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection,model:actualModel,inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,costCents,commissionRateBps,commissionCents},{requestKey,fingerprint:requestFingerprint,responsePayload:result,audit:{entityId:actualModel,data:{taskId:taskId??null,requestedModel:model,fallbackUsed:actualModel!==model,fallbackReason,sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection,...usage,costCents,commissionRateBps,commissionCents}}});activeChat.state='settled';chatSettled=true;
           sendChatResult(response,result,clientRequestedStream,requestId);return;
         } catch(error) { markReservationReady();if(!chatSettled)await failChatClaim();await database.releaseUsage(principal,reservationId);if(controller.signal.aborted)throw controller.signal.reason instanceof HttpError?controller.signal.reason:new HttpError('Task was cancelled',409,'task_cancelled');throw error; }
-        finally { response.removeListener('close',cancelOnDisconnect);unregisterActiveChat(); }
+        finally { unregisterActiveChat(); }
+        } finally { request.removeListener('aborted',cancelOnDisconnect);response.removeListener('close',cancelOnDisconnect); }
       }
       return sendJson(response, 404, { error: 'not_found' });
     } catch (error) {
       console.error(JSON.stringify({ level: 'error', event: 'http.error', requestId, method: request.method, path: url.pathname, error: error instanceof Error ? error.message : String(error) }));
+      if(error instanceof HttpError&&error.status===429&&!response.headersSent)response.setHeader('retry-after','60');
       const result=errorResponse(error); return sendJson(response,result.status,result.body);
     }
   });

@@ -16,6 +16,13 @@ test('parses quoted arguments without invoking a shell', () => {
   assert.deepEqual(parseCommand('node C:\\workspace\\check.mjs'), ['node', 'C:\\workspace\\check.mjs']);
   assert.throws(() => parseCommand('npm run "unfinished'), /unfinished quote/);
   assert.throws(() => parseCommand('npm test\nnode bad.js'), /control characters/);
+  for (const command of [
+    'git status --short && echo unsafe',
+    'git status; echo unsafe',
+    'git status | tee status.txt',
+    'node $(pwd)/script.mjs',
+    'node `pwd`/script.mjs',
+  ]) assert.throws(() => parseCommand(command), /Shell operators/, command);
 });
 
 test('blocks inline Node evaluation but permits project scripts', () => {

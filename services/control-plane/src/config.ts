@@ -31,6 +31,24 @@ export interface AlipayConfig {
   gatewayUrl: string;
 }
 
+export interface RegistrationWebhookConfig {
+  url: string;
+  bearerToken: string;
+}
+
+export interface RegistrationVerificationConfig {
+  hmacKey: string | null;
+  emailWebhook: RegistrationWebhookConfig | null;
+  smsWebhook: RegistrationWebhookConfig | null;
+  turnstileSiteKey: string | null;
+  turnstileSecretKey: string | null;
+  turnstileVerifyUrl: string;
+  otpTtlSeconds: number;
+  resendSeconds: number;
+  maxSendsPerChannel: number;
+  maxFailedAttempts: number;
+}
+
 export interface ControlPlaneConfig {
   port: number;
   sessionSecret: string;
@@ -38,6 +56,8 @@ export interface ControlPlaneConfig {
   allowedEmailDomains: string[];
   allowedOrigins: string[];
   registrationEnabled: boolean;
+  registrationVerification: RegistrationVerificationConfig;
+  publicRegistrationUrl: string | null;
   inviteCodeRequired: boolean;
   developmentLoginEnabled: boolean;
   developmentLoginEmail: string;
@@ -139,12 +159,19 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
   const databaseUrl = environment.DATABASE_URL ?? null;
   const pilotAccessCodeHash = environment.COD_PILOT_ACCESS_CODE_HASH ?? null;
   const registrationEnabled = environment.COD_REGISTRATION_ENABLED === undefined ? !production : environment.COD_REGISTRATION_ENABLED === 'true';
+  const allowedOrigins = (environment.COD_ALLOWED_ORIGINS ?? (production
+    ? 'https://cod.kai.com,https://localhost,capacitor://localhost,null'
+    : 'http://127.0.0.1:5173,http://localhost:5173,null')).split(',').map((value) => value.trim()).filter(Boolean);
+  const publicRegistrationUrl = environment.COD_PUBLIC_REGISTRATION_URL ?? null;
   // Invitation codes are a referral attribution mechanism, not an account gate.
   // Keep the capability field for older clients, but registration must remain open
   // when a code is omitted in every environment.
   const inviteCodeRequired = false;
   const developmentLoginEnabled = environment.COD_DEVELOPMENT_LOGIN_ENABLED === 'true' || !production;
-  const demoMode = environment.COD_DEMO_MODE === 'true' || !production;
+  // Fake model replies must be an explicit opt-in. Development environments
+  // without a provider key stay unavailable instead of silently appearing to
+  // complete a real model request.
+  const demoMode = environment.COD_DEMO_MODE === 'true';
   const paymentWebhookSecret = environment.COD_PAYMENT_WEBHOOK_SECRET ?? null;
   const paymentPublicBaseUrl = environment.COD_PAYMENT_PUBLIC_BASE_URL?.replace(/\/$/, '') ?? null;
   const configuredGroup = <T extends Record<string, string | undefined>>(name: string, values: T): { [K in keyof T]: string } | null => {
@@ -152,6 +179,50 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     if (present === 0) return null;
     if (present !== Object.keys(values).length) throw new Error(`${name} configuration is incomplete`);
     return values as { [K in keyof T]: string };
+  };
+  const registrationEmailWebhook = configuredGroup('Registration email webhook', {
+    url: environment.COD_REGISTRATION_EMAIL_WEBHOOK_URL,
+    bearerToken: environment.COD_REGISTRATION_EMAIL_WEBHOOK_TOKEN,
+  });
+  const registrationSmsWebhook = configuredGroup('Registration SMS webhook', {
+    url: environment.COD_REGISTRATION_SMS_WEBHOOK_URL,
+    bearerToken: environment.COD_REGISTRATION_SMS_WEBHOOK_TOKEN,
+  });
+  const turnstile = configuredGroup('Turnstile', {
+    siteKey: environment.COD_TURNSTILE_SITE_KEY,
+    secretKey: environment.COD_TURNSTILE_SECRET_KEY,
+  });
+  const registrationHmacKey = environment.COD_REGISTRATION_HMAC_KEY
+    ?? (!production ? '0123456789abcdef0123456789abcdef' : null);
+  const decodedRegistrationHmacKey = (value: string | null): Buffer | null => {
+    if (!value) return null;
+    if (value.startsWith('base64url:')) {
+      try { return Buffer.from(value.slice('base64url:'.length), 'base64url'); }
+      catch { return null; }
+    }
+    if (!value.startsWith('base64:')) return Buffer.from(value, 'utf8');
+    try {
+      const encoded = value.slice('base64:'.length);
+      if (!encoded || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return null;
+      return Buffer.from(encoded, 'base64');
+    } catch { return null; }
+  };
+  const positiveInteger = (name: string, raw: string | undefined, fallback: number, minimum: number, maximum: number): number => {
+    const value = raw === undefined ? fallback : Number(raw);
+    if (!Number.isInteger(value) || value < minimum || value > maximum) throw new Error(`${name} must be an integer between ${minimum} and ${maximum}`);
+    return value;
+  };
+  const registrationVerification: RegistrationVerificationConfig = {
+    hmacKey: registrationHmacKey,
+    emailWebhook: registrationEmailWebhook ? { url: registrationEmailWebhook.url, bearerToken: registrationEmailWebhook.bearerToken } : null,
+    smsWebhook: registrationSmsWebhook ? { url: registrationSmsWebhook.url, bearerToken: registrationSmsWebhook.bearerToken } : null,
+    turnstileSiteKey: turnstile?.siteKey ?? null,
+    turnstileSecretKey: turnstile?.secretKey ?? null,
+    turnstileVerifyUrl: environment.COD_TURNSTILE_VERIFY_URL ?? 'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+    otpTtlSeconds: positiveInteger('COD_REGISTRATION_OTP_TTL_SECONDS', environment.COD_REGISTRATION_OTP_TTL_SECONDS, 600, 60, 3600),
+    resendSeconds: positiveInteger('COD_REGISTRATION_RESEND_SECONDS', environment.COD_REGISTRATION_RESEND_SECONDS, 60, 15, 900),
+    maxSendsPerChannel: positiveInteger('COD_REGISTRATION_MAX_SENDS_PER_CHANNEL', environment.COD_REGISTRATION_MAX_SENDS_PER_CHANNEL, 3, 1, 10),
+    maxFailedAttempts: positiveInteger('COD_REGISTRATION_MAX_FAILED_ATTEMPTS', environment.COD_REGISTRATION_MAX_FAILED_ATTEMPTS, 5, 1, 20),
   };
   const wechat = configuredGroup('WeChat Pay', {
     mchId: environment.COD_WECHAT_PAY_MCH_ID,
@@ -184,6 +255,38 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     if (paymentWebhookSecret && Buffer.byteLength(paymentWebhookSecret, 'utf8') < 32) {
       throw new Error('COD_PAYMENT_WEBHOOK_SECRET must contain at least 32 bytes');
     }
+    if (registrationEnabled) {
+      if (decodedRegistrationHmacKey(registrationHmacKey)?.length !== 32) throw new Error('Production registration requires COD_REGISTRATION_HMAC_KEY with exactly 32 bytes');
+      if (!registrationEmailWebhook) throw new Error('Production registration requires a complete Registration email webhook configuration');
+      if (!registrationSmsWebhook) throw new Error('Production registration requires a complete Registration SMS webhook configuration');
+      if (!turnstile) throw new Error('Production registration requires complete Turnstile configuration');
+      if (!publicRegistrationUrl) throw new Error('Production registration requires COD_PUBLIC_REGISTRATION_URL');
+    }
+  }
+  if (registrationHmacKey && decodedRegistrationHmacKey(registrationHmacKey)?.length !== 32) throw new Error('COD_REGISTRATION_HMAC_KEY must contain exactly 32 bytes');
+  for (const [name, webhook] of [['COD_REGISTRATION_EMAIL_WEBHOOK_URL', registrationEmailWebhook], ['COD_REGISTRATION_SMS_WEBHOOK_URL', registrationSmsWebhook]] as const) {
+    if (!webhook) continue;
+    let parsed: URL;
+    try { parsed = new URL(webhook.url); }
+    catch { throw new Error(`${name} must be a valid URL`); }
+    if (parsed.username || parsed.password) throw new Error(`${name} must not contain URL credentials`);
+    if (production && parsed.protocol !== 'https:') throw new Error(`${name} must use HTTPS in production`);
+    if (!production && parsed.protocol !== 'https:' && parsed.protocol !== 'http:') throw new Error(`${name} must use HTTP or HTTPS`);
+  }
+  {
+    let parsed: URL;
+    try { parsed = new URL(registrationVerification.turnstileVerifyUrl); }
+    catch { throw new Error('COD_TURNSTILE_VERIFY_URL must be a valid URL'); }
+    if (parsed.username || parsed.password) throw new Error('COD_TURNSTILE_VERIFY_URL must not contain URL credentials');
+    if (production && parsed.protocol !== 'https:') throw new Error('COD_TURNSTILE_VERIFY_URL must use HTTPS in production');
+  }
+  if (publicRegistrationUrl) {
+    let parsed: URL;
+    try { parsed = new URL(publicRegistrationUrl); }
+    catch { throw new Error('COD_PUBLIC_REGISTRATION_URL must be a valid URL'); }
+    if (parsed.username || parsed.password) throw new Error('COD_PUBLIC_REGISTRATION_URL must not contain URL credentials');
+    if (production && parsed.protocol !== 'https:') throw new Error('COD_PUBLIC_REGISTRATION_URL must use HTTPS in production');
+    if (production && !allowedOrigins.includes(parsed.origin)) throw new Error('COD_PUBLIC_REGISTRATION_URL origin must be listed in COD_ALLOWED_ORIGINS');
   }
   if ((wechatPay || alipay) && !paymentPublicBaseUrl) throw new Error('Official payments require COD_PAYMENT_PUBLIC_BASE_URL');
   if (paymentPublicBaseUrl && !/^https:\/\//.test(paymentPublicBaseUrl)) throw new Error('COD_PAYMENT_PUBLIC_BASE_URL must use HTTPS');
@@ -207,8 +310,10 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     sessionSecret,
     databaseUrl,
     allowedEmailDomains: (environment.COD_ALLOWED_EMAIL_DOMAINS ?? 'kai.com').split(',').map((value) => value.trim().toLowerCase()).filter(Boolean),
-    allowedOrigins: (environment.COD_ALLOWED_ORIGINS ?? 'http://127.0.0.1:5173,http://localhost:5173,null').split(',').map((value) => value.trim()).filter(Boolean),
+    allowedOrigins,
     registrationEnabled,
+    registrationVerification,
+    publicRegistrationUrl,
     inviteCodeRequired,
     developmentLoginEnabled,
     developmentLoginEmail: (environment.COD_DEVELOPMENT_LOGIN_EMAIL ?? 'developer@kai.com').toLowerCase(),

@@ -6,13 +6,14 @@ import { AiGateway } from './gateway.js';
 import { MemoryDatabase } from './memory-database.js';
 
 const servers: Array<ReturnType<typeof createControlPlane>> = [];
+const testPasswordHash = 'scrypt$16384$8$1$dGVzdC1hdXRoLXNhbHQtMQ$OkZEwwvTyk_BXs8umIBKldU3L-Oit-AkHANDBB81kdN0CCW6-5kqg9cGUwmetGRwxs9g_NiohCkGSni7NtcayQ';
 afterEach(async () => Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve())))));
 
 async function start(overrides: Record<string, string> = {}, gatewayFetcher?:typeof fetch) {
   const database = new MemoryDatabase();
   const email='developer@kai.com';
-  await database.registerIdentity({userId:`usr_${createHash('sha256').update(email).digest('hex').slice(0,20)}`,tenantId:'tenant_kai_com',email,role:'member'},'scrypt$16384$8$1$dGVzdC1hdXRoLXNhbHQtMQ$OkZEwwvTyk_BXs8umIBKldU3L-Oit-AkHANDBB81kdN0CCW6-5kqg9cGUwmetGRwxs9g_NiohCkGSni7NtcayQ',null,false);
-  const config = loadConfig({ NODE_ENV: 'test', COD_DEVELOPMENT_LOGIN_ENABLED: 'true', COD_DEVELOPMENT_LOGIN_EMAIL: 'developer@kai.com', COD_DEVELOPMENT_TOPUP_ENABLED: 'false', ...overrides });
+  await database.registerIdentity({userId:`usr_${createHash('sha256').update(email).digest('hex').slice(0,20)}`,tenantId:'tenant_kai_com',email,role:'member'},testPasswordHash,null,false);
+  const config = loadConfig({ NODE_ENV: 'test', COD_DEMO_MODE: 'true', COD_DEVELOPMENT_LOGIN_ENABLED: 'true', COD_DEVELOPMENT_LOGIN_EMAIL: 'developer@kai.com', COD_DEVELOPMENT_TOPUP_ENABLED: 'false', ...overrides });
   const server = createControlPlane({ config, database, ...(gatewayFetcher?{gateway:new AiGateway(config,gatewayFetcher)}:{}) }); servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address(); if (!address || typeof address === 'string') throw new Error('missing address');
@@ -35,6 +36,9 @@ describe('control-plane production rules', () => {
     expect(config.developmentTopupEnabled).toBe(false);
     expect(config.registrationEnabled).toBe(false);
     expect(config.inviteCodeRequired).toBe(false);
+    expect(loadConfig({ NODE_ENV: 'test' }).demoMode).toBe(false);
+    expect(loadConfig({ NODE_ENV: 'test', COD_DEMO_MODE: 'false' }).demoMode).toBe(false);
+    expect(loadConfig({ NODE_ENV: 'test', COD_DEMO_MODE: 'true' }).demoMode).toBe(true);
 
     for (const name of ['KAI_AI_BASE_URL', 'KAI_AI_CATALOG_URL', 'KAI_AI_STATUS_URL']) {
       expect(() => loadConfig({ ...productionEnvironment, [name]: 'http://ai.kai.com/insecure' })).toThrow(`${name} must use HTTPS in production`);
@@ -80,17 +84,217 @@ describe('control-plane production rules', () => {
     expect(topup.status).toBe(403);
   });
 
-  it('registers with an optional immutable invite binding and issues the 30-day trial once',async()=>{
+  it('revalidates the current role and identity before honoring an existing admin session', async () => {
+    const { base, database } = await start();
+    const adminEmail = 'role-admin@kai.com';
+    const adminPrincipal = {
+      userId: `usr_${createHash('sha256').update(adminEmail).digest('hex').slice(0, 20)}`,
+      tenantId: 'tenant_kai_com',
+      email: adminEmail,
+      role: 'admin' as const,
+    };
+    await database.registerIdentity(adminPrincipal, testPasswordHash, null, false);
+
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: adminEmail, password: 'Password123' }),
+    });
+    const { token } = await login.json() as { token: string };
+    const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+    expect(await (await fetch(`${base}/api/account`, { headers })).json()).toMatchObject({ role: 'admin', billingExempt: true });
+
+    const usage = (idempotencyKey: string) => fetch(`${base}/api/usage`, {
+      method: 'POST', headers, body: JSON.stringify({ idempotencyKey, taskId: 'admin-test', sourceId: 'demo', paymentDirection: 'test', model: 'coder-pro', inputTokens: 1, outputTokens: 1, costCents: 10 }),
+    });
+    const exempt = await usage('admin-before-demotion');
+    expect(exempt.status).toBe(201);
+    expect(await exempt.json()).toMatchObject({ entry: { amountCents: 0, paymentDirection: '管理员测试免计费' } });
+    const malformed = await fetch(`${base}/api/usage`, {
+      method: 'POST', headers, body: JSON.stringify({ idempotencyKey: 'invalid-admin-usage', taskId: 'admin-test', sourceId: 'demo', paymentDirection: 'test', model: 'coder-pro', inputTokens: -1, outputTokens: 1, costCents: 10 }),
+    });
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toMatchObject({ error: 'invalid_usage' });
+
+    const findIdentity = database.findIdentityByEmail.bind(database);
+    const lookup = vi.spyOn(database, 'findIdentityByEmail').mockImplementation(async (email) => {
+      const identity = await findIdentity(email);
+      return identity?.principal.email === adminEmail
+        ? { ...identity, principal: { ...identity.principal, role: 'member' } }
+        : identity;
+    });
+    const demoted = await usage('admin-after-demotion');
+    expect(demoted.status).toBe(403);
+    expect(await demoted.json()).toMatchObject({ error: 'usage_forbidden' });
+    expect(await (await fetch(`${base}/api/account`, { headers })).json()).toMatchObject({ role: 'member', billingExempt: false });
+    const demotedAdminCompute=await fetch(`${base}/api/admin/compute/requests`,{headers});
+    expect(demotedAdminCompute.status).toBe(403);expect(await demotedAdminCompute.json()).toMatchObject({error:'admin_required'});
+    const billedChat = await fetch(`${base}/v1/sources/demo/chat/completions`, {
+      method: 'POST', headers, body: JSON.stringify({ model: 'coder-pro', messages: [{ role: 'user', content: 'demoted billing check' }] }),
+    });
+    expect(billedChat.status).toBe(200);
+    expect(await billedChat.json()).toMatchObject({ cod_charge_cents: 1, cod_payment_direction: '测试钱包 → COD Demo' });
+    expect(await database.getCreditSummary(adminPrincipal)).toMatchObject({ availableCents: 999 });
+    expect((await database.getLedger(adminPrincipal))[0]).toMatchObject({ type: 'usage', amountCents: -1, creditAmountCents: -1 });
+
+    lookup.mockImplementation(async (email) => {
+      const identity = await findIdentity(email);
+      return identity?.principal.email === adminEmail
+        ? { ...identity, principal: { ...identity.principal, userId: 'usr_reassigned' } }
+        : identity;
+    });
+    const reassigned = await fetch(`${base}/api/account`, { headers });
+    expect(reassigned.status).toBe(401);
+    expect(await reassigned.json()).toEqual({ error: 'unauthorized' });
+  });
+
+  it('keeps member-owned resources private even from a billing-exempt admin who guesses every identifier', async () => {
+    const { base, database } = await start({ COD_PAYMENT_WEBHOOK_SECRET: 'test-payment-adapter' });
+    const memberLogin = await fetch(`${base}/api/auth/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com', password: 'Password123' }),
+    });
+    const memberToken = (await memberLogin.json() as { token: string }).token;
+    const memberHeaders = { authorization: `Bearer ${memberToken}`, 'content-type': 'application/json' };
+    const device = await (await fetch(`${base}/api/devices`, { method: 'POST', headers: memberHeaders, body: JSON.stringify({ name: 'Member workstation', platform: 'linux' }) })).json() as { id: string };
+    const task = await (await fetch(`${base}/api/tasks`, { method: 'POST', headers: memberHeaders, body: JSON.stringify({ title: 'Member private task', deviceId: device.id }) })).json() as { id: string; version: number };
+    const computeBody = { kind: 'rental', offerId: 'cod-h100-pcie-card-hour', company: 'Member Company', contactName: 'Member', contactPhone: '13800138000', city: '上海', gpuModel: 'NVIDIA H100 PCIe 80GB', quantity: 1, durationHours: 10, requirements: 'private requirement' };
+    const compute = await (await fetch(`${base}/api/compute/requests`, { method: 'POST', headers: { ...memberHeaders, 'idempotency-key': 'member-compute' }, body: JSON.stringify(computeBody) })).json() as { id: string };
+    const order = await (await fetch(`${base}/api/payment-orders`, { method: 'POST', headers: { ...memberHeaders, 'idempotency-key': 'member-order' }, body: JSON.stringify({ amountCents: 1200, channel: 'wechat' }) })).json() as { id: string };
+
+    const adminEmail = 'isolation-admin@kai.com';
+    const adminPrincipal = { userId: `usr_${createHash('sha256').update(adminEmail).digest('hex').slice(0, 20)}`, tenantId: 'tenant_kai_com', email: adminEmail, role: 'admin' as const };
+    await database.registerIdentity(adminPrincipal, testPasswordHash, null, false);
+    const adminLogin = await fetch(`${base}/api/auth/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: adminEmail, password: 'Password123' }),
+    });
+    const adminToken = (await adminLogin.json() as { token: string }).token;
+    const adminHeaders = { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' };
+    expect(await (await fetch(`${base}/api/account`, { headers: adminHeaders })).json()).toMatchObject({ role: 'admin', billingExempt: true });
+
+    const attacks = [
+      fetch(`${base}/api/devices/${device.id}/heartbeat`, { method: 'POST', headers: adminHeaders }),
+      fetch(`${base}/api/tasks`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ title: 'stolen device', deviceId: device.id }) }),
+      fetch(`${base}/api/tasks/${task.id}/status`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ status: 'running', expectedVersion: task.version }) }),
+      fetch(`${base}/api/tasks/${task.id}/cancel`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ expectedVersion: task.version }) }),
+      fetch(`${base}/api/agent-sessions`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ taskId: task.id, sourceId: 'demo', model: 'coder-pro' }) }),
+      fetch(`${base}/v1/tasks/${task.id}/sources/demo/chat/completions`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ model: 'coder-pro', messages: [{ role: 'user', content: 'steal task' }] }) }),
+      fetch(`${base}/api/payment-orders/${order.id}`, { headers: adminHeaders }),
+    ];
+    const attackResponses = await Promise.all(attacks);
+    expect(attackResponses.map((response) => response.status)).toEqual([404, 404, 404, 404, 404, 404, 404]);
+    expect(await (await fetch(`${base}/api/devices`, { headers: adminHeaders })).json()).toEqual([]);
+    expect(await (await fetch(`${base}/api/tasks`, { headers: adminHeaders })).json()).toEqual([]);
+    expect(await (await fetch(`${base}/api/events?cursor=0`, { headers: adminHeaders })).json()).toEqual([]);
+    expect(await (await fetch(`${base}/api/compute/requests`, { headers: adminHeaders })).json()).toEqual([]);
+    expect(JSON.stringify(await (await fetch(`${base}/api/audit`, { headers: adminHeaders })).json())).not.toContain(task.id);
+    expect(JSON.stringify(await (await fetch(`${base}/api/ledger`, { headers: adminHeaders })).json())).not.toContain(order.id);
+
+    expect(await database.getTask({ userId: (await database.findIdentityByEmail('developer@kai.com'))!.principal.userId, tenantId: 'tenant_kai_com', email: 'developer@kai.com', role: 'member' }, task.id)).toMatchObject({ status: 'draft', version: 1 });
+    expect((await database.listComputeRequests({ userId: (await database.findIdentityByEmail('developer@kai.com'))!.principal.userId, tenantId: 'tenant_kai_com', email: 'developer@kai.com', role: 'member' })).map((item) => item.id)).toEqual([compute.id]);
+    expect(await (await fetch(`${base}/api/payment-orders/${order.id}`, { headers: memberHeaders })).json()).toMatchObject({ id: order.id, status: 'pending' });
+  });
+
+  it('returns client errors for malformed device, task, status, and usage payloads', async () => {
+    const { base, database } = await start({ COD_PAYMENT_WEBHOOK_SECRET: 'test-payment-adapter' });
+    expect((await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: 'null' })).status).toBe(400);
+    expect((await fetch(`${base}/api/auth/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: 'null' })).status).toBe(400);
+    const adminEmail = 'validation-admin@kai.com';
+    const adminPrincipal = { userId: `usr_${createHash('sha256').update(adminEmail).digest('hex').slice(0, 20)}`, tenantId: 'tenant_kai_com', email: adminEmail, role: 'admin' as const };
+    await database.registerIdentity(adminPrincipal, testPasswordHash, null, false);
+    const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: adminEmail, password: 'Password123' }) });
+    const token = (await login.json() as { token: string }).token;
+    const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+
+    const invalidDevice = await fetch(`${base}/api/devices`, { method: 'POST', headers, body: JSON.stringify({ name: 42, platform: 'linux' }) });
+    const invalidTask = await fetch(`${base}/api/tasks`, { method: 'POST', headers, body: 'null' });
+    const device = await (await fetch(`${base}/api/devices`, { method: 'POST', headers, body: JSON.stringify({ name: 'Validation device', platform: 'linux' }) })).json() as { id: string };
+    const task = await (await fetch(`${base}/api/tasks`, { method: 'POST', headers, body: JSON.stringify({ title: 'Validation task', deviceId: device.id }) })).json() as { id: string };
+    const invalidVersion = await fetch(`${base}/api/tasks/${task.id}/status`, { method: 'POST', headers, body: JSON.stringify({ status: 'running', expectedVersion: '1' }) });
+    const invalidUsage = await fetch(`${base}/api/usage`, { method: 'POST', headers, body: 'null' });
+    const invalidUsageKey = await fetch(`${base}/api/usage`, { method: 'POST', headers, body: JSON.stringify({ idempotencyKey: 42, taskId: 'test', sourceId: 'demo', paymentDirection: 'test', model: 'coder-pro', inputTokens: 1, outputTokens: 1, costCents: 1 }) });
+    const invalidAgent = await fetch(`${base}/api/agent-sessions`, { method: 'POST', headers, body: 'null' });
+    const invalidPayment = await fetch(`${base}/api/payment-orders`, { method: 'POST', headers: { ...headers, 'idempotency-key': 'malformed-payment' }, body: 'null' });
+    const invalidPaymentAmount = await fetch(`${base}/api/payment-orders`, { method: 'POST', headers: { ...headers, 'idempotency-key': 'string-payment' }, body: JSON.stringify({ amountCents: '1200', channel: 'wechat' }) });
+    const invalidPaymentChannel = await fetch(`${base}/api/payment-orders`, { method: 'POST', headers: { ...headers, 'idempotency-key': 'invalid-channel' }, body: JSON.stringify({ amountCents: 1200, channel: 'card' }) });
+    const invalidCancel = await fetch(`${base}/api/tasks/${task.id}/cancel`, { method: 'POST', headers, body: 'null' });
+    const invalidStatus = await fetch(`${base}/api/tasks/${task.id}/status`, { method: 'POST', headers, body: 'null' });
+    const invalidChat = await fetch(`${base}/v1/chat/completions`, { method: 'POST', headers, body: 'null' });
+    const invalidPath = await fetch(`${base}/api/products/%ZZ/launch`, { method: 'POST', headers });
+
+    expect([invalidDevice, invalidTask, invalidVersion, invalidUsage, invalidUsageKey, invalidAgent, invalidPayment, invalidPaymentAmount, invalidPaymentChannel, invalidCancel, invalidStatus, invalidChat, invalidPath].map((response) => response.status)).toEqual(Array(13).fill(400));
+    expect(await invalidDevice.json()).toMatchObject({ error: 'invalid_device' });
+    expect(await invalidTask.json()).toMatchObject({ error: 'invalid_task' });
+    expect(await invalidVersion.json()).toMatchObject({ error: 'invalid_task_version' });
+    expect(await invalidUsage.json()).toMatchObject({ error: 'invalid_usage' });
+    expect(await invalidUsageKey.json()).toMatchObject({ error: 'invalid_idempotency_key' });
+    expect(await invalidPaymentAmount.json()).toMatchObject({ error: 'invalid_payment_amount' });
+    expect(await invalidPaymentChannel.json()).toMatchObject({ error: 'invalid_payment_channel' });
+    expect(await invalidPath.json()).toMatchObject({ error: 'invalid_path' });
+  });
+
+  it('does not expose the legacy email-and-password registration shortcut',async()=>{
     const {base,database}=await start();const email='developer@kai.com';const principal={userId:`usr_${createHash('sha256').update(email).digest('hex').slice(0,20)}`,tenantId:'tenant_kai_com',email,role:'member' as const};
-    const inviter=await database.getReferralSummary(principal);
-    const weak=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'new@example.com',password:'short1'})});expect(weak.status).toBe(400);
-    const optional=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'unreferred@example.com',password:'Password123'})});expect(optional.status).toBe(201);expect(await optional.json()).toMatchObject({inviteCode:expect.stringMatching(/^KAI-/),referred:false});
-    const invalidInvite=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'new@example.com',password:'Password123',inviteCode:'KAI-NOTFOUND'})});expect(invalidInvite.status).toBe(400);
-    const registration=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'new@example.com',password:'Password123',inviteCode:inviter.inviteCode})});expect(registration.status).toBe(201);
-    const registered=await registration.json() as {token:string;inviteCode:string;referred:boolean};expect(registered).toMatchObject({inviteCode:expect.stringMatching(/^KAI-/),referred:true});
-    const credits=await (await fetch(`${base}/api/credit-packs`,{headers:{authorization:`Bearer ${registered.token}`}})).json() as {summary:{availableCents:number;grants:Array<{packId:string}>}};expect(credits.summary.availableCents).toBe(1000);expect(credits.summary.grants.filter((grant)=>grant.packId==='trial')).toHaveLength(1);
-    const duplicate=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'new@example.com',password:'AnotherPass123'})});expect(duplicate.status).toBe(409);
-    expect((await database.getReferralSummary(principal)).referredUsers).toBe(1);
+    const direct=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'new@example.com',password:'Password123'})});
+    expect(direct.status).toBe(503);expect(await direct.json()).toMatchObject({error:'registration_unavailable'});expect(await database.findIdentityByEmail('new@example.com')).toBeNull();expect((await database.getReferralSummary(principal)).referredUsers).toBe(0);
+  });
+
+  it('allows only the configured passwordless pilot identity to migrate while public registration is closed', async () => {
+    const legacyAccessCode = 'Legacy-Pilot-Code-2026';
+    const configuredEmail = 'configured-pilot@kai.com';
+    const { base, database } = await start({
+      COD_REGISTRATION_ENABLED: 'false',
+      COD_DEVELOPMENT_LOGIN_ENABLED: 'true',
+      COD_DEVELOPMENT_LOGIN_EMAIL: configuredEmail,
+      COD_PILOT_ACCESS_CODE_HASH: createHash('sha256').update(legacyAccessCode).digest('hex'),
+    });
+    const configuredPilot = {
+      userId: `usr_${createHash('sha256').update(configuredEmail).digest('hex').slice(0, 20)}`,
+      tenantId: 'tenant_kai_com',
+      email: configuredEmail,
+      role: 'member' as const,
+    };
+    const otherLegacyEmail = 'other-pilot@kai.com';
+    const otherPilot = {
+      userId: `usr_${createHash('sha256').update(otherLegacyEmail).digest('hex').slice(0, 20)}`,
+      tenantId: 'tenant_kai_com',
+      email: otherLegacyEmail,
+      role: 'member' as const,
+    };
+    await database.ensurePrincipal(configuredPilot);
+    await database.ensurePrincipal(otherPilot);
+
+    const capabilitiesBefore = await (await fetch(`${base}/api/capabilities`)).json();
+    expect(capabilitiesBefore).toMatchObject({ authentication: { registrationEnabled: false, legacyMigrationEnabled: true } });
+    const migrate = (email: string, accessCode: string, password = 'MigratedPass123') => fetch(`${base}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email, password, legacyAccessCode: accessCode }),
+    });
+
+    const wrongCode = await migrate(configuredEmail, 'wrong-code');
+    const arbitraryNewEmail = await migrate('new-pilot@kai.com', legacyAccessCode);
+    const unconfiguredLegacy = await migrate(otherLegacyEmail, legacyAccessCode);
+    expect([wrongCode.status, arbitraryNewEmail.status, unconfiguredLegacy.status]).toEqual([503, 503, 503]);
+    for (const response of [wrongCode, arbitraryNewEmail, unconfiguredLegacy]) {
+      expect(await response.json()).toMatchObject({ error: 'registration_unavailable' });
+    }
+    expect((await database.findIdentityByEmail(configuredEmail))?.passwordHash).toBeNull();
+    expect((await database.findIdentityByEmail(otherLegacyEmail))?.passwordHash).toBeNull();
+    expect(await database.findIdentityByEmail('new-pilot@kai.com')).toBeNull();
+
+    const migrated = await migrate(configuredEmail, legacyAccessCode);
+    expect(migrated.status).toBe(200);
+    expect(await migrated.json()).toMatchObject({ user: { id: configuredPilot.userId, email: configuredEmail } });
+    expect((await database.findIdentityByEmail(configuredEmail))?.passwordHash).toEqual(expect.any(String));
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: configuredEmail, password: 'MigratedPass123' }),
+    });
+    expect(login.status).toBe(200);
+    expect(await login.json()).toMatchObject({ user: { id: configuredPilot.userId, email: configuredEmail } });
+    expect(await (await fetch(`${base}/api/capabilities`)).json()).toMatchObject({ authentication: { registrationEnabled: false, legacyMigrationEnabled: false } });
+    expect((await database.listAudit(configuredPilot, 20)).filter((entry) => entry.action === 'auth.legacy_migrated')).toHaveLength(1);
+
+    const replay = await migrate(configuredEmail, legacyAccessCode, 'AnotherPass123');
+    expect(replay.status).toBe(503);
+    expect(await replay.json()).toMatchObject({ error: 'registration_unavailable' });
   });
 
   it('fails closed when registration or payment ordering is unavailable',async()=>{
@@ -108,7 +312,7 @@ describe('control-plane production rules', () => {
   it('reports integration capabilities and rejects invalid JSON and origins', async () => {
     const { base } = await start({ COD_ALLOWED_ORIGINS: 'https://cod.example' });
     const capabilities = await fetch(`${base}/api/capabilities`);
-    expect(await capabilities.json()).toMatchObject({ authentication: { registrationEnabled: true, inviteCodeRequired: false }, ai: { mode: 'demo', streamingMode: 'buffered-sse' }, payments: { topupEnabled: false, orderApi: false } });
+    expect(await capabilities.json()).toMatchObject({ authentication: { registrationEnabled: false, inviteCodeRequired: false, verificationMethods:['email_otp','sms_otp'],registrationWebOnly:true,publicRegistrationUrl:null }, ai: { mode: 'demo', streamingMode: 'buffered-sse' }, payments: { topupEnabled: false, orderApi: false } });
     const malformed = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{' });
     expect(malformed.status).toBe(400);
     expect(await malformed.json()).toMatchObject({ error: 'invalid_json' });
@@ -243,9 +447,9 @@ describe('control-plane production rules', () => {
       if(url.endsWith('/chat/completions')){upstreamKeys.push(new Headers(init?.headers).get('idempotency-key')??'');return Response.json({choices:[{message:{role:'assistant',content:'isolated'},finish_reason:'stop'}],usage:{prompt_tokens:2,completion_tokens:1}});}
       throw new Error(`Unexpected provider request: ${url}`);
     });
-    const {base}=await start({KAI_API_KEY:'test-key',KAI_AI_BASE_URL:'https://shared.example/v1',KAI_AI_CATALOG_URL:'https://shared.example/api/pricing',KAI_AI_STATUS_URL:'https://shared.example/api/status'},fetcher as typeof fetch);
+    const {base,database}=await start({KAI_API_KEY:'test-key',KAI_AI_BASE_URL:'https://shared.example/v1',KAI_AI_CATALOG_URL:'https://shared.example/api/pricing',KAI_AI_STATUS_URL:'https://shared.example/api/status'},fetcher as typeof fetch);
     const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com',password:'Password123'})});const firstToken=(await login.json() as {token:string}).token;
-    const registration=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'second@example.com',password:'Password123'})});expect(registration.status).toBe(201);const secondToken=(await registration.json() as {token:string}).token;
+    const secondEmail='second@example.com';await database.registerIdentity({userId:`usr_${createHash('sha256').update(secondEmail).digest('hex').slice(0,20)}`,tenantId:'tenant_example_com',email:secondEmail,role:'member'},testPasswordHash,null,false);const secondLogin=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:secondEmail,password:'Password123'})});expect(secondLogin.status).toBe(200);const secondToken=(await secondLogin.json() as {token:string}).token;
     const body=JSON.stringify({source:'ai-kai',model:'shared-model',messages:[{role:'user',content:'same'}]});const request=(token:string)=>fetch(`${base}/v1/chat/completions`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','x-request-id':'cross-account-replay'},body});
     expect((await request(firstToken)).status).toBe(200);expect((await request(secondToken)).status).toBe(200);expect((await request(firstToken)).status).toBe(200);
     expect(upstreamKeys).toHaveLength(2);expect(upstreamKeys.every((key)=>/^cod-[a-f0-9]{48}$/.test(key))).toBe(true);expect(new Set(upstreamKeys).size).toBe(2);
@@ -296,6 +500,7 @@ describe('control-plane production rules', () => {
     const issued=await issuedResponse.json() as {token:string;expiresAt:string;scope:{taskId:string;sourceId:string;model:string}};expect(issued.scope).toEqual({taskId:created.id,sourceId:'demo',model:'coder-pro'});expect(new Date(issued.expiresAt).getTime()-before).toBeGreaterThan(59*60*1000);expect(new Date(issued.expiresAt).getTime()-before).toBeLessThanOrEqual(60*60*1000+1000);
     const agent={authorization:`Bearer ${issued.token}`,'content-type':'application/json'};
     expect((await fetch(`${base}/api/account`,{headers:agent})).status).toBe(403);
+    expect((await fetch(`${base}/api/admin/compute/requests`,{headers:agent})).status).toBe(403);
     expect((await fetch(`${base}/v1/tasks/${created.id}/sources/other/chat/completions`,{method:'POST',headers:agent,body:JSON.stringify({model:'coder-pro',messages:[{role:'user',content:'x'}]})})).status).toBe(403);
     const wrongModel=await fetch(`${base}/v1/tasks/${created.id}/sources/demo/chat/completions`,{method:'POST',headers:agent,body:JSON.stringify({model:'writer-pro',messages:[{role:'user',content:'x'}]})});expect(wrongModel.status).toBe(403);expect(await wrongModel.json()).toMatchObject({error:'agent_scope_forbidden'});
     const chatBody=JSON.stringify({model:'coder-pro',messages:[{role:'user',content:'scoped'}]});expect((await fetch(`${base}/v1/tasks/${created.id}/sources/demo/chat/completions`,{method:'POST',headers:agent,body:chatBody})).status).toBe(200);expect((await fetch(`${base}/v1/tasks/${created.id}/sources/demo/chat/completions`,{method:'POST',headers:agent,body:chatBody})).status).toBe(200);
@@ -330,6 +535,114 @@ describe('control-plane production rules', () => {
     const principal = { userId: user.id, tenantId: 'tenant_kai_com', email: user.email, role: 'member' as const };
     expect(await database.getLedger(principal)).toHaveLength(2);
     expect((await database.getCreditSummary(principal)).availableCents).toBe(999);
+  });
+
+  it('aborts a taskless provider request and releases its reservation when the client disconnects', async () => {
+    let markProviderStarted: () => void = () => undefined;
+    const providerStarted = new Promise<void>((resolve) => { markProviderStarted = resolve; });
+    let markProviderAborted: () => void = () => undefined;
+    const providerAborted = new Promise<void>((resolve) => { markProviderAborted = resolve; });
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      if (url.endsWith('/api/pricing')) return Response.json({ data: [{ model_name: 'slow-model', quota_type: 0, model_ratio: 1, completion_ratio: 1, supported_endpoint_types: ['openai'] }] });
+      if (url.endsWith('/api/status')) return Response.json({ data: { quota_per_unit: 500000, price: 7 } });
+      if (url.endsWith('/models')) return Response.json({ data: [{ id: 'slow-model' }] });
+      if (url.endsWith('/chat/completions')) {
+        markProviderStarted();
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          const abort = () => {
+            markProviderAborted();
+            reject(signal?.reason);
+          };
+          if (signal?.aborted) abort();
+          else signal?.addEventListener('abort', abort, { once: true });
+        });
+      }
+      throw new Error(`Unexpected provider request: ${url}`);
+    });
+    const { base, database } = await start({
+      KAI_API_KEY: 'test-key',
+      KAI_AI_BASE_URL: 'https://provider.example/v1',
+      KAI_AI_CATALOG_URL: 'https://provider.example/api/pricing',
+      KAI_AI_STATUS_URL: 'https://provider.example/api/status',
+    }, fetcher as typeof fetch);
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com', password: 'Password123' }),
+    });
+    const { token, user } = await login.json() as { token: string; user: { id: string; email: string } };
+    const client = new AbortController();
+    const chat = fetch(`${base}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-request-id': 'taskless-client-disconnect' },
+      body: JSON.stringify({ source: 'ai-kai', model: 'slow-model', messages: [{ role: 'user', content: 'disconnect me' }] }),
+      signal: client.signal,
+    });
+
+    await providerStarted;
+    client.abort();
+    await expect(chat).rejects.toThrow();
+    await providerAborted;
+
+    const principal = { userId: user.id, tenantId: 'tenant_kai_com', email: user.email, role: 'member' as const };
+    await vi.waitFor(async () => {
+      expect((await database.getCreditSummary(principal)).availableCents).toBe(1000);
+      expect(await database.getLedger(principal)).toHaveLength(1);
+    });
+    expect((await database.listAudit(principal, 20)).filter((entry) => entry.action === 'chat.complete')).toHaveLength(0);
+  });
+
+  it('does not call or charge the provider when a taskless client disconnects during preflight', async () => {
+    let releaseModelLookup: () => void = () => undefined;
+    const modelLookupGate = new Promise<void>((resolve) => { releaseModelLookup = resolve; });
+    let markPreflightStarted: () => void = () => undefined;
+    const preflightStarted = new Promise<void>((resolve) => { markPreflightStarted = resolve; });
+    let providerCalls = 0;
+    const fetcher = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+      const url = String(input);
+      if (url.endsWith('/api/pricing')) return Response.json({ data: [{ model_name: 'slow-model', quota_type: 0, model_ratio: 1, completion_ratio: 1, supported_endpoint_types: ['openai'] }] });
+      if (url.endsWith('/api/status')) return Response.json({ data: { quota_per_unit: 500000, price: 7 } });
+      if (url.endsWith('/models')) {
+        markPreflightStarted();
+        await modelLookupGate;
+        return Response.json({ data: [{ id: 'slow-model' }] });
+      }
+      if (url.endsWith('/chat/completions')) {
+        providerCalls += 1;
+        return Response.json({ choices: [{ message: { role: 'assistant', content: 'too late' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } });
+      }
+      throw new Error(`Unexpected provider request: ${url}`);
+    });
+    const { base, database } = await start({
+      KAI_API_KEY: 'test-key',
+      KAI_AI_BASE_URL: 'https://preflight.example/v1',
+      KAI_AI_CATALOG_URL: 'https://preflight.example/api/pricing',
+      KAI_AI_STATUS_URL: 'https://preflight.example/api/status',
+    }, fetcher as typeof fetch);
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com', password: 'Password123' }),
+    });
+    const { token, user } = await login.json() as { token: string; user: { id: string; email: string } };
+    const client = new AbortController();
+    const chat = fetch(`${base}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-request-id': 'early-taskless-disconnect' },
+      body: JSON.stringify({ source: 'ai-kai', model: 'slow-model', messages: [{ role: 'user', content: 'stop during preflight' }] }),
+      signal: client.signal,
+    });
+
+    await preflightStarted;
+    client.abort();
+    await expect(chat).rejects.toThrow();
+    releaseModelLookup();
+
+    const principal = { userId: user.id, tenantId: 'tenant_kai_com', email: user.email, role: 'member' as const };
+    await vi.waitFor(async () => {
+      expect(providerCalls).toBe(0);
+      expect((await database.getCreditSummary(principal)).availableCents).toBe(1000);
+      expect(await database.getLedger(principal)).toHaveLength(1);
+    });
+    expect((await database.listAudit(principal, 20)).filter((entry) => entry.action === 'chat.complete')).toHaveLength(0);
   });
 
   it('cancels an in-flight task, aborts its provider request, and restores the full reservation',async()=>{
@@ -435,6 +748,8 @@ describe('control-plane production rules', () => {
     const created = await first.json() as { id: string; status: string; quantity: number };
     expect(await second.json()).toMatchObject({ id: created.id });
     expect(created).toMatchObject({ status: 'submitted', quantity: 2 });
+    const conflicting = await fetch(`${base}/api/compute/requests`, { method: 'POST', headers, body: JSON.stringify({ ...JSON.parse(body), quantity: 3 }) });
+    expect(conflicting.status).toBe(409); expect(await conflicting.json()).toMatchObject({ error: 'idempotency_conflict' });
     const listed = await (await fetch(`${base}/api/compute/requests`, { headers: { authorization: `Bearer ${token}` } })).json() as Array<{ id: string }>;
     expect(listed).toHaveLength(1); expect(listed[0]?.id).toBe(created.id);
     const invalid = await fetch(`${base}/api/compute/requests`, { method: 'POST', headers: { ...headers, 'idempotency-key': 'compute-invalid' }, body: JSON.stringify({ ...JSON.parse(body), contactPhone: 'x' }) });
@@ -442,7 +757,53 @@ describe('control-plane production rules', () => {
     const wechat = await fetch(`${base}/api/compute/requests`, { method: 'POST', headers: { ...headers, 'idempotency-key': 'compute-wechat' }, body: JSON.stringify({ ...JSON.parse(body), contactPhone: 'kai_compute_2026' }) });
     expect(wechat.status).toBe(201);
     const principal = { userId: user.id, tenantId: 'tenant_kai_com', email: user.email, role: 'member' as const };
-    expect((await database.listAudit(principal, 10)).some((entry) => entry.action === 'compute.request.created')).toBe(true);
+    expect((await database.listAudit(principal, 10)).filter((entry) => entry.action === 'compute.request.created' && entry.entityId === created.id)).toHaveLength(1);
+  });
+
+  it('stores third-party GPU hosting requests idempotently and keeps each account isolated', async () => {
+    const { base, database } = await start();
+    const memberLogin = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'developer@kai.com', password: 'Password123' }) });
+    const { token: memberToken, user: memberUser } = await memberLogin.json() as { token: string; user: { id: string; email: string } };
+    const body = {
+      kind: 'hosting', company: '设备持有方有限公司', contactName: '李经理', contactPhone: 'hosting_owner_2026', city: '深圳',
+      gpuModel: 'NVIDIA H100 SXM 80GB', quantity: 16, requirements: '产权资料线下审核', hostingPeriodMonths: 24,
+      rackUnits: 8, powerKilowatts: 15.5, networkMbps: 2000, availabilityNotes: '设备可于两周内入场',
+      settlementPreference: '与实际第三方托管服务商按月结算', hostingRequirements: '合规机房、双路供电、7x24 远程运维与书面 SLA',
+    };
+    const memberHeaders = { authorization: `Bearer ${memberToken}`, 'content-type': 'application/json', 'idempotency-key': 'hosting-request-1' };
+    const first = await fetch(`${base}/api/compute/requests`, { method: 'POST', headers: memberHeaders, body: JSON.stringify(body) });
+    const second = await fetch(`${base}/api/compute/requests`, { method: 'POST', headers: memberHeaders, body: JSON.stringify(body) });
+    expect(first.status).toBe(201); expect(second.status).toBe(201);
+    const created = await first.json() as { id: string; status: string; fulfillmentMode: string; hostingPeriodMonths: number; powerKilowatts: number };
+    expect(await second.json()).toMatchObject({ id: created.id });
+    expect(created).toMatchObject({ status: 'submitted', fulfillmentMode: 'third-party-manual-match', hostingPeriodMonths: 24, powerKilowatts: 15.5 });
+    const conflict = await fetch(`${base}/api/compute/requests`, { method: 'POST', headers: memberHeaders, body: JSON.stringify({ ...body, networkMbps: 10_000 }) });
+    expect(conflict.status).toBe(409); expect(await conflict.json()).toMatchObject({ error: 'idempotency_conflict' });
+
+    const missingTerms = await fetch(`${base}/api/compute/requests`, {
+      method: 'POST', headers: { ...memberHeaders, 'idempotency-key': 'hosting-invalid' }, body: JSON.stringify({ ...body, settlementPreference: '' }),
+    });
+    expect(missingTerms.status).toBe(400); expect(await missingTerms.json()).toMatchObject({ error: 'invalid_compute_hosting_terms' });
+
+    const adminEmail = 'hosting-admin@kai.com';
+    const adminPrincipal = { userId: `usr_${createHash('sha256').update(adminEmail).digest('hex').slice(0, 20)}`, tenantId: 'tenant_kai_com', email: adminEmail, role: 'admin' as const };
+    await database.registerIdentity(adminPrincipal, testPasswordHash, null, false);
+    const adminLogin = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: adminEmail, password: 'Password123' }) });
+    const adminToken = (await adminLogin.json() as { token: string }).token;
+    expect(await (await fetch(`${base}/api/compute/requests`, { headers: { authorization: `Bearer ${adminToken}` } })).json()).toEqual([]);
+    const adminCreated = await (await fetch(`${base}/api/compute/requests`, {
+      method: 'POST', headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'idempotency-key': 'hosting-request-1' }, body: JSON.stringify(body),
+    })).json() as { id: string };
+    expect(adminCreated.id).not.toBe(created.id);
+    expect((await (await fetch(`${base}/api/compute/requests`, { headers: { authorization: `Bearer ${memberToken}` } })).json() as Array<{ id: string }>).map((item) => item.id)).toEqual([created.id]);
+    expect((await (await fetch(`${base}/api/compute/requests`, { headers: { authorization: `Bearer ${adminToken}` } })).json() as Array<{ id: string }>).map((item) => item.id)).toEqual([adminCreated.id]);
+
+    const memberPrincipal = { userId: memberUser.id, tenantId: 'tenant_kai_com', email: memberUser.email, role: 'member' as const };
+    const memberAudit = await database.listAudit(memberPrincipal, 10);
+    expect(memberAudit).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'compute.request.created', entityId: created.id, data: expect.objectContaining({ kind: 'hosting', fulfillmentMode: 'third-party-manual-match' }) }),
+    ]));
+    expect(memberAudit.filter((entry) => entry.action === 'compute.request.created' && entry.entityId === created.id)).toHaveLength(1);
   });
 
   it('exposes readiness, version, and Prometheus metrics', async () => {
@@ -453,5 +814,115 @@ describe('control-plane production rules', () => {
     const metrics = await (await fetch(`${base}/metrics`)).text();
     expect(metrics).toContain('cod_database_ready 1');
     expect(metrics).toContain('cod_http_requests_total');
+  });
+});
+
+describe('platform compute request administration',()=>{
+  it('paginates and filters every tenant for admins while denying anonymous and member access',async()=>{
+    const {base,database}=await start();
+    const memberEmail='compute-owner@other.example';
+    const memberPrincipal={userId:`usr_${createHash('sha256').update(memberEmail).digest('hex').slice(0,20)}`,tenantId:'tenant_other_example',email:memberEmail,role:'member' as const};
+    const adminEmail='compute-platform-admin@kai.com';
+    const adminPrincipal={userId:`usr_${createHash('sha256').update(adminEmail).digest('hex').slice(0,20)}`,tenantId:'tenant_kai_com',email:adminEmail,role:'admin' as const};
+    await database.registerIdentity(memberPrincipal,testPasswordHash,null,false);
+    await database.registerIdentity(adminPrincipal,testPasswordHash,null,false);
+    const login=async(email:string)=>{
+      const response=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email,password:'Password123'})});
+      expect(response.status).toBe(200);return (await response.json() as {token:string}).token;
+    };
+    const primaryToken=await login('developer@kai.com');const memberToken=await login(memberEmail);const adminToken=await login(adminEmail);
+    const primaryHeaders={authorization:`Bearer ${primaryToken}`,'content-type':'application/json'};
+    const memberHeaders={authorization:`Bearer ${memberToken}`,'content-type':'application/json'};
+    const adminHeaders={authorization:`Bearer ${adminToken}`,'content-type':'application/json'};
+    const rentalBody={kind:'rental',offerId:'cod-h100-pcie-card-hour',company:'跨租户甲公司',contactName:'甲联系人',contactPhone:'13800138001',city:'北京',gpuModel:'NVIDIA H100 PCIe 80GB',quantity:2,durationHours:120,requirements:'模型训练'};
+    const hostingBody={kind:'hosting',company:'跨租户乙公司',contactName:'乙联系人',contactPhone:'compute_owner_2026',city:'深圳',gpuModel:'NVIDIA L40S',quantity:8,requirements:'第三方验机',hostingPeriodMonths:24,rackUnits:4,powerKilowatts:8,networkMbps:1000,availabilityNotes:'九月进场',settlementPreference:'按月结算',hostingRequirements:'双路供电与书面 SLA'};
+    const rental=await (await fetch(`${base}/api/compute/requests`,{method:'POST',headers:{...primaryHeaders,'idempotency-key':'admin-rental'},body:JSON.stringify(rentalBody)})).json() as {id:string};
+    const hosting=await (await fetch(`${base}/api/compute/requests`,{method:'POST',headers:{...memberHeaders,'idempotency-key':'admin-hosting'},body:JSON.stringify(hostingBody)})).json() as {id:string};
+
+    const anonymous=await Promise.all([
+      fetch(`${base}/api/admin/compute/requests`),
+      fetch(`${base}/api/admin/compute/requests/search`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({q:'深圳'})}),
+      fetch(`${base}/api/admin/compute/requests/${rental.id}`),
+      fetch(`${base}/api/admin/compute/requests/${rental.id}/status`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({status:'contacting'})}),
+    ]);
+    expect(anonymous.map((response)=>response.status)).toEqual([401,401,401,401]);
+    const memberDenied=await Promise.all([
+      fetch(`${base}/api/admin/compute/requests`,{headers:memberHeaders}),
+      fetch(`${base}/api/admin/compute/requests/search`,{method:'POST',headers:memberHeaders,body:'not-json'}),
+      fetch(`${base}/api/admin/compute/requests/${rental.id}`,{headers:memberHeaders}),
+      fetch(`${base}/api/admin/compute/requests/${rental.id}/status`,{method:'PATCH',headers:memberHeaders,body:'null'}),
+      fetch(`${base}/api/admin/compute/requests?status=invalid`,{headers:memberHeaders}),
+      fetch(`${base}/api/admin/compute/requests/not-a-uuid`,{headers:memberHeaders}),
+    ]);
+    expect(memberDenied.map((response)=>response.status)).toEqual([403,403,403,403,403,403]);
+    expect(await memberDenied[0].json()).toMatchObject({error:'admin_required'});
+
+    const firstPage=await (await fetch(`${base}/api/admin/compute/requests?limit=1`,{headers:adminHeaders})).json() as {items:Array<{id:string}>;nextCursor:string|null};
+    expect(firstPage.items).toHaveLength(1);expect(firstPage.nextCursor).toEqual(expect.any(String));
+    const secondPage=await (await fetch(`${base}/api/admin/compute/requests?limit=1&cursor=${encodeURIComponent(firstPage.nextCursor!)}`,{headers:adminHeaders})).json() as {items:Array<{id:string}>;nextCursor:string|null};
+    expect(new Set([...firstPage.items,...secondPage.items].map((item)=>item.id))).toEqual(new Set([rental.id,hosting.id]));expect(secondPage.nextCursor).toBeNull();
+    const search=(body:unknown)=>fetch(`${base}/api/admin/compute/requests/search`,{method:'POST',headers:adminHeaders,body:JSON.stringify(body)});
+    const filtered=await (await search({status:'submitted',kind:'hosting',q:'深圳'})).json() as {items:Array<{id:string;company:string;gpuModel:string}>};
+    expect(filtered.items).toEqual([expect.objectContaining({id:hosting.id,company:'跨租户乙公司',gpuModel:'NVIDIA L40S'})]);
+    expect(JSON.stringify(filtered)).not.toContain(memberEmail);expect(JSON.stringify(filtered)).not.toContain('compute_owner_2026');expect(JSON.stringify(filtered)).not.toContain('乙联系人');expect(JSON.stringify(filtered)).not.toContain('双路供电与书面 SLA');
+    const idSearch=await (await search({q:rental.id.toUpperCase()})).json() as {items:Array<{id:string}>};
+    expect(idSearch.items.map((item)=>item.id)).toEqual([rental.id]);
+    const searchPageOne=await (await search({q:'跨租户',limit:1})).json() as {items:Array<{id:string}>;nextCursor:string|null};
+    const searchPageTwo=await (await search({q:'跨租户',limit:1,cursor:searchPageOne.nextCursor})).json() as {items:Array<{id:string}>;nextCursor:string|null};
+    expect(new Set([...searchPageOne.items,...searchPageTwo.items].map((item)=>item.id))).toEqual(new Set([rental.id,hosting.id]));expect(searchPageTwo.nextCursor).toBeNull();
+
+    const invalidQueries=await Promise.all([
+      fetch(`${base}/api/admin/compute/requests?status=deleted`,{headers:adminHeaders}),
+      fetch(`${base}/api/admin/compute/requests?kind=other`,{headers:adminHeaders}),
+      fetch(`${base}/api/admin/compute/requests?limit=0`,{headers:adminHeaders}),
+      fetch(`${base}/api/admin/compute/requests?limit=101`,{headers:adminHeaders}),
+      fetch(`${base}/api/admin/compute/requests?cursor=bad`,{headers:adminHeaders}),
+      fetch(`${base}/api/admin/compute/requests?q=${'x'.repeat(101)}`,{headers:adminHeaders}),
+      fetch(`${base}/api/admin/compute/requests?status=submitted&status=closed`,{headers:adminHeaders}),
+      fetch(`${base}/api/admin/compute/requests?tenantId=tenant_other_example`,{headers:adminHeaders}),
+    ]);
+    expect(invalidQueries.map((response)=>response.status)).toEqual(Array(8).fill(400));
+    const invalidSearches=await Promise.all([
+      fetch(`${base}/api/admin/compute/requests/search`,{method:'POST',headers:adminHeaders,body:'null'}),
+      search([]),
+      search({q:'深圳',extra:true}),
+      search({q:''}),
+      search({q:'x'.repeat(101)}),
+      search({q:'深圳',cursor:'bad'}),
+      search({q:'深圳',status:'deleted'}),
+      search({q:'深圳',kind:'other'}),
+      search({q:'深圳',limit:0}),
+      search({q:'深圳',limit:1.5}),
+    ]);
+    expect(invalidSearches.map((response)=>response.status)).toEqual(Array(10).fill(400));
+    expect((await fetch(`${base}/api/admin/compute/requests/not-a-uuid`,{headers:adminHeaders})).status).toBe(400);
+    expect((await fetch(`${base}/api/admin/compute/requests/not-a-uuid/status`,{method:'PATCH',headers:adminHeaders,body:JSON.stringify({status:'contacting',expectedStatus:'submitted'})})).status).toBe(400);
+    const missingId='00000000-0000-4000-8000-000000000000';
+    expect((await fetch(`${base}/api/admin/compute/requests/${missingId}`,{headers:adminHeaders})).status).toBe(404);
+    expect((await fetch(`${base}/api/admin/compute/requests/${missingId}/status`,{method:'PATCH',headers:adminHeaders,body:JSON.stringify({status:'contacting',expectedStatus:'submitted'})})).status).toBe(404);
+    const malformedStatusBodies=await Promise.all(['null','[]',JSON.stringify({status:'contacting'}),JSON.stringify({status:'contacting',expectedStatus:'submitted',extra:true})].map((body)=>fetch(`${base}/api/admin/compute/requests/${rental.id}/status`,{method:'PATCH',headers:adminHeaders,body})));
+    expect(malformedStatusBodies.map((response)=>response.status)).toEqual([400,400,400,400]);
+
+    const detail=await fetch(`${base}/api/admin/compute/requests/${rental.id}`,{headers:adminHeaders});expect(detail.status).toBe(200);expect(await detail.json()).toMatchObject({id:rental.id,email:'developer@kai.com',contactName:'甲联系人',contactPhone:'13800138001'});
+    const patch=async(status:unknown,expectedStatus:unknown)=>fetch(`${base}/api/admin/compute/requests/${rental.id}/status`,{method:'PATCH',headers:adminHeaders,body:JSON.stringify({status,expectedStatus})});
+    expect(await (await patch('contacting','submitted')).json()).toMatchObject({status:'contacting'});
+    expect(await (await patch('contacting','submitted')).json()).toMatchObject({status:'contacting'});
+    const stale=await patch('closed','submitted');expect(stale.status).toBe(409);expect(await stale.json()).toMatchObject({error:'compute_request_status_conflict'});
+    const invalidStatus=await patch('unknown','contacting');expect(invalidStatus.status).toBe(400);expect(await invalidStatus.json()).toMatchObject({error:'invalid_compute_request_status'});
+    const backwards=await patch('submitted','contacting');expect(backwards.status).toBe(409);expect(await backwards.json()).toMatchObject({error:'invalid_compute_request_transition'});
+    expect(await (await patch('quoted','contacting')).json()).toMatchObject({status:'quoted'});
+    expect(await (await patch('closed','quoted')).json()).toMatchObject({status:'closed'});
+    const reopened=await patch('quoted','closed');expect(reopened.status).toBe(409);expect(await reopened.json()).toMatchObject({error:'invalid_compute_request_transition'});
+    expect(await (await fetch(`${base}/api/compute/requests`,{headers:primaryHeaders})).json()).toEqual([expect.objectContaining({id:rental.id,status:'closed'})]);
+    expect(await (await fetch(`${base}/api/compute/requests`,{headers:memberHeaders})).json()).toEqual([expect.objectContaining({id:hosting.id,status:'submitted'})]);
+
+    const audit=await database.listAudit(adminPrincipal,100);const statusAudits=audit.filter((entry)=>entry.action==='compute.request.admin.status');
+    expect(statusAudits).toHaveLength(4);expect(statusAudits).toEqual(expect.arrayContaining([
+      expect.objectContaining({entityId:rental.id,data:{previousStatus:'submitted',status:'contacting',changed:true}}),
+      expect.objectContaining({entityId:rental.id,data:{previousStatus:'contacting',status:'contacting',changed:false}}),
+      expect.objectContaining({entityId:rental.id,data:{previousStatus:'contacting',status:'quoted',changed:true}}),
+      expect.objectContaining({entityId:rental.id,data:{previousStatus:'quoted',status:'closed',changed:true}}),
+    ]));
+    expect(JSON.stringify(audit)).not.toContain(memberEmail);expect(JSON.stringify(audit)).not.toContain('13800138001');expect(JSON.stringify(audit)).not.toContain('甲联系人');
   });
 });

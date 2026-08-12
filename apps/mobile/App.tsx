@@ -1,16 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { BackHandler, KeyboardAvoidingView, Linking, Platform, StyleSheet, useColorScheme } from 'react-native';
+import { AppState, BackHandler, KeyboardAvoidingView, Linking, Platform, StyleSheet, Text, useColorScheme, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Clipboard from 'expo-clipboard';
+import Constants, { AppOwnership } from 'expo-constants';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import CodWorkspace, { type CodWorkspaceRef } from './src/CodWorkspace.dom';
+import { createDomBootstrap } from './src/dom-bootstrap';
 import { forwardNativeBack } from './src/native-back';
+import { shouldObscureWorkspace } from './src/privacy-state';
 import type { NativeHttpRequest, NativeHttpResponse } from '../web/src/runtime';
 
 const controlPlaneUrl = process.env.EXPO_PUBLIC_COD_CONTROL_PLANE_URL ?? 'https://cod.kai.com';
 const hostPlatform = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : undefined;
 const domBootstrap = hostPlatform ? createDomBootstrap(hostPlatform, controlPlaneUrl) : undefined;
+const isExpoGo = Constants.appOwnership === AppOwnership.Expo;
 
 function parseHttpUrl(value: string): URL {
   const url = new URL(value);
@@ -19,31 +23,13 @@ function parseHttpUrl(value: string): URL {
   return url;
 }
 
-function createDomBootstrap(platform: 'android' | 'ios', apiUrl: string): string {
-  // Expo Go 57.0.3 ships React Native WebView without ExpoDomWebView's native ViewManager.
-  // Its fallback WebView also omits injectedObjectJson on some Android WebView builds, so
-  // polyfill the exact JSON hook that Expo's generated DOM HTML reads at document start.
-  const initialProps = {
-    names: ['nativeRequest', 'cancelNativeRequest', 'openExternalUrl', 'copyText', 'setNativeColorMode', 'setNativeBackAvailable'],
-    props: { controlPlaneUrl: apiUrl, hostPlatform: platform },
-  };
-  const injectedObjectJson = JSON.stringify({
-    EXPO_DOM_HOST_OS: platform,
-    initialProps,
-  });
-  return [
-    "if (!window.ReactNativeWebView) { throw new Error('React Native WebView bridge is unavailable'); }",
-    `if (typeof window.ReactNativeWebView.injectedObjectJson !== 'function') { Object.defineProperty(window.ReactNativeWebView, 'injectedObjectJson', { configurable: true, value: function () { return ${JSON.stringify(injectedObjectJson)}; } }); }`,
-    'true;',
-  ].join('\n');
-}
-
 export default function App() {
   const requestControllers = useRef(new Map<string, AbortController>());
   const workspaceRef = useRef<CodWorkspaceRef>(null);
   const nativeBackAvailableRef = useRef(false);
   const systemColorScheme = useColorScheme();
   const [workspaceColorMode, setWorkspaceColorMode] = useState<'light' | 'dark'>(systemColorScheme === 'dark' ? 'dark' : 'light');
+  const [workspaceObscured, setWorkspaceObscured] = useState(() => shouldObscureWorkspace(AppState.currentState));
 
   const nativeRequest = useCallback(async (request: NativeHttpRequest): Promise<NativeHttpResponse> => {
     const requestUrl = parseHttpUrl(request.url);
@@ -92,6 +78,13 @@ export default function App() {
     return () => subscription.remove();
   }, []);
 
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (state) => {
+      setWorkspaceObscured(shouldObscureWorkspace(state));
+    });
+    return () => subscription.remove();
+  }, []);
+
   return (
     <SafeAreaProvider>
       <SafeAreaView
@@ -102,6 +95,8 @@ export default function App() {
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           style={styles.keyboardAvoiding}
+          accessibilityElementsHidden={workspaceObscured}
+          importantForAccessibility={workspaceObscured ? 'no-hide-descendants' : 'auto'}
         >
           <CodWorkspace
             ref={workspaceRef}
@@ -114,7 +109,7 @@ export default function App() {
             setNativeColorMode={setNativeColorMode}
             setNativeBackAvailable={setNativeBackAvailable}
             dom={{
-              useExpoDOMWebView: false,
+              useExpoDOMWebView: !isExpoGo,
               scrollEnabled: false,
               contentInsetAdjustmentBehavior: 'never',
               injectedJavaScriptBeforeContentLoaded: domBootstrap,
@@ -122,6 +117,17 @@ export default function App() {
             }}
           />
         </KeyboardAvoidingView>
+        {workspaceObscured && (
+          <View
+            accessibilityLabel="COD 已隐藏工作区"
+            accessibilityRole="text"
+            style={[styles.privacyCover, workspaceColorMode === 'dark' && styles.privacyCoverDark]}
+          >
+            <View style={styles.privacyMark}><Text style={styles.privacyMarkText}>C</Text></View>
+            <Text style={[styles.privacyTitle, workspaceColorMode === 'dark' && styles.privacyTextDark]}>COD 工作区已隐藏</Text>
+            <Text style={[styles.privacyCaption, workspaceColorMode === 'dark' && styles.privacyTextDark]}>回到应用后继续</Text>
+          </View>
+        )}
       </SafeAreaView>
     </SafeAreaProvider>
   );
@@ -141,5 +147,46 @@ const styles = StyleSheet.create({
   workspace: {
     flex: 1,
     alignSelf: 'stretch',
+  },
+  privacyCover: {
+    alignItems: 'center',
+    backgroundColor: '#fbfdfd',
+    bottom: 0,
+    justifyContent: 'center',
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    zIndex: 100,
+  },
+  privacyCoverDark: {
+    backgroundColor: '#0b1416',
+  },
+  privacyMark: {
+    alignItems: 'center',
+    backgroundColor: '#0d7f82',
+    borderRadius: 18,
+    height: 56,
+    justifyContent: 'center',
+    marginBottom: 18,
+    width: 56,
+  },
+  privacyMarkText: {
+    color: '#ffffff',
+    fontSize: 26,
+    fontWeight: '800',
+  },
+  privacyTitle: {
+    color: '#102a2d',
+    fontSize: 17,
+    fontWeight: '700',
+  },
+  privacyCaption: {
+    color: '#627477',
+    fontSize: 13,
+    marginTop: 7,
+  },
+  privacyTextDark: {
+    color: '#e9f3f3',
   },
 });

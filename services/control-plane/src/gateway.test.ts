@@ -4,6 +4,16 @@ import { AiGateway } from './gateway.js';
 import { tokenRetailDomains, tokenRetailSourceId } from './token-retail-directory.js';
 
 describe('model source gateway', () => {
+  it('never invents a demo source unless demo mode is explicitly enabled', async () => {
+    const unavailableGateway = new AiGateway(loadConfig({ NODE_ENV: 'development' }));
+    expect(await unavailableGateway.listSources()).toEqual([]);
+    expect(await unavailableGateway.mode()).toBe('unavailable');
+
+    const demoGateway = new AiGateway(loadConfig({ NODE_ENV: 'development', COD_DEMO_MODE: 'true' }));
+    expect(await demoGateway.listSources()).toMatchObject([{ id: 'demo', status: 'demo', callable: true }]);
+    expect(await demoGateway.mode()).toBe('demo');
+  });
+
   it('routes every display source through ai.kai.com and retries an empty answer', async () => {
     let chatAttempts = 0;
     const fetcher = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {

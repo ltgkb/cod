@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import {
@@ -134,4 +135,11 @@ test('desktop development cannot be launched with a production environment', () 
     () => resolveDesktopDevelopmentProcessEnvironments({ NODE_ENV: 'production' }),
     /cannot run with NODE_ENV=production/,
   );
+});
+
+test('packaging does not claim a native callback scheme before callback forwarding exists', async () => {
+  const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.equal('protocols' in packageJson.build, false);
+  assert.match(packageJson.scripts['package:linux'], /--platform=linux --arch=x64[\s\S]*--x64/);
+  assert.match(packageJson.scripts['package:win'], /--platform=win32 --arch=x64[\s\S]*--x64/);
 });

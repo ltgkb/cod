@@ -10,3 +10,25 @@ export function isAllowedDevelopmentNavigation(rawUrl: string, rawDevelopmentUrl
     return false;
   }
 }
+
+function isLoopbackHostname(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]';
+}
+
+/**
+ * Links in model output, knowledge results, and payment checkout are opened in
+ * the user's default browser. Keep custom protocols and credential-bearing
+ * URLs out of shell.openExternal, while allowing ordinary HTTPS destinations.
+ * Loopback HTTP is useful for local development documentation without making
+ * clear-text remote navigation available in the packaged client.
+ */
+export function isSafeExternalUrl(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    if (url.username || url.password) return false;
+    if (url.protocol === 'https:') return true;
+    return url.protocol === 'http:' && isLoopbackHostname(url.hostname);
+  } catch {
+    return false;
+  }
+}

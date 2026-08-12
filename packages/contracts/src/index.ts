@@ -27,8 +27,8 @@ export interface AccountSummary {
   balanceCents: number;
   currency: 'CNY';
   plan: 'developer' | 'team';
-  role?: 'member' | 'admin';
-  billingExempt?: boolean;
+  role: 'member' | 'admin';
+  billingExempt: boolean;
 }
 
 export interface UsageEvent {
@@ -43,6 +43,74 @@ export interface UsageEvent {
   costCents: number;
   commissionRateBps?: number;
   commissionCents?: number;
+}
+
+export type ComputeRequestKind = 'rental' | 'supply' | 'installment' | 'hosting';
+
+export type ComputeRequestStatus = 'submitted' | 'contacting' | 'quoted' | 'closed';
+
+export type ComputeFulfillmentMode = 'manual-confirmation' | 'third-party-manual-match';
+
+/**
+ * A manually reviewed compute-market request. Hosting requests describe
+ * hardware that the customer wants an independent provider to host; they do
+ * not represent acceptance, custody, financing, or a service commitment by
+ * COD.
+ */
+export interface ComputeRequestInput {
+  kind: ComputeRequestKind;
+  offerId?: string | null;
+  company: string;
+  contactName: string;
+  contactPhone: string;
+  city: string;
+  gpuModel: string;
+  quantity: number;
+  durationHours?: number | null;
+  termMonths?: number | null;
+  requirements: string;
+  hostingPeriodMonths?: number | null;
+  rackUnits?: number | null;
+  powerKilowatts?: number | null;
+  networkMbps?: number | null;
+  availabilityNotes?: string | null;
+  settlementPreference?: string | null;
+  hostingRequirements?: string | null;
+}
+
+export interface ComputeRequest extends ComputeRequestInput {
+  id: string;
+  email: string;
+  offerId: string | null;
+  durationHours: number | null;
+  termMonths: number | null;
+  hostingPeriodMonths: number | null;
+  rackUnits: number | null;
+  powerKilowatts: number | null;
+  networkMbps: number | null;
+  availabilityNotes: string | null;
+  settlementPreference: string | null;
+  hostingRequirements: string | null;
+  fulfillmentMode: ComputeFulfillmentMode;
+  status: ComputeRequestStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AdminComputeRequestSummary {
+  id: string;
+  kind: ComputeRequestKind;
+  company: string;
+  gpuModel: string;
+  quantity: number;
+  status: ComputeRequestStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AdminComputeRequestPage {
+  items: AdminComputeRequestSummary[];
+  nextCursor: string | null;
 }
 
 export interface DeviceRecord {
@@ -75,6 +143,7 @@ export interface AgentGatewayConfig {
   sourceId: string;
   modelId: string;
   taskId: string;
+  root: string;
 }
 
 export interface DesktopBridge {
