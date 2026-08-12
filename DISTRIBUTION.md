@@ -38,6 +38,18 @@ The desktop packaging command automatically selects the Goose binary matching th
 
 GitHub Actions builds desktop installers on native runners and validates both Expo platform bundles. CI Expo bundles are compile-test artifacts; public mobile distribution still goes through EAS Build and the relevant store.
 
+The manually dispatched `Publish installers` GitHub Actions workflow publishes a versioned GitHub prerelease containing:
+
+- macOS ARM installer (`.dmg`) and portable archive (`.zip`)
+- Windows installer (`.exe`)
+- Linux AppImage and Debian package
+- Android and iOS Expo compile-test bundles
+
+Packages are uploaded directly to the draft release, so they do not consume
+GitHub Actions artifact storage. The mobile bundles prove Metro compilation but are not APK, AAB, IPA, or `.app` packages. The draft is published only after every build
+and verification job succeeds. If a job fails, the incomplete draft remains
+private until the workflow is rerun or the draft is removed.
+
 ## Signing boundary
 
 Local or CI artifacts built without credentials are test artifacts. Public distribution additionally requires:

@@ -3,7 +3,13 @@ name: build-and-package
 on:
   push:
     branches: [main]
-  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-and-package-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   security:
@@ -13,7 +19,6 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-          cache: npm
       - run: npm ci
       - run: node --test scripts/check-npm-audit.test.mjs
       - run: node scripts/check-npm-audit.mjs
@@ -26,7 +31,6 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-          cache: npm
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
@@ -43,7 +47,6 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-          cache: npm
       - run: npm ci
       - run: npm run build
       - name: Package desktop
@@ -60,11 +63,6 @@ jobs:
         run: |
           codesign --verify --deep --strict --verbose=2 apps/desktop/release/mac-arm64/cod.app
           hdiutil verify apps/desktop/release/COD-*-mac-arm64.dmg
-      - uses: actions/upload-artifact@v7
-        with:
-          name: cod-desktop-${{ runner.os }}
-          path: apps/desktop/release/*
-          if-no-files-found: error
 
   android:
     needs: security
@@ -74,15 +72,9 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-          cache: npm
       - run: npm ci
       - run: npm run doctor -w @cod/mobile
       - run: npm run export:android
-      - uses: actions/upload-artifact@v7
-        with:
-          name: cod-android-expo-bundle
-          path: apps/mobile/release/android
-          if-no-files-found: error
 
   ios:
     needs: security
@@ -92,11 +84,5 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-          cache: npm
       - run: npm ci
       - run: npm run export:ios
-      - uses: actions/upload-artifact@v7
-        with:
-          name: cod-ios-expo-bundle
-          path: apps/mobile/release/ios
-          if-no-files-found: error
