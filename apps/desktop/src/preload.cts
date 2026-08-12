@@ -26,6 +26,10 @@ const bridge: DesktopBridge = {
   runCommand: (root, command) => ipcRenderer.invoke('cod:run-command', root, command),
   getGooseAcpUrl: (config) => ipcRenderer.invoke('cod:get-goose-acp-url', config),
   stopGoose: () => ipcRenderer.invoke('cod:stop-goose'),
+  getTaskboardUrl: () => ipcRenderer.invoke('cod:get-taskboard-url'),
+  getDesktopPetStatus: () => ipcRenderer.invoke('cod:get-desktop-pet-status'),
+  launchDesktopPet: (config) => ipcRenderer.invoke('cod:launch-desktop-pet', config),
+  stopDesktopPet: () => ipcRenderer.invoke('cod:stop-desktop-pet'),
 };
 
 contextBridge.exposeInMainWorld('codDesktop', bridge);

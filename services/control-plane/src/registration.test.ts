@@ -21,7 +21,7 @@ async function startRegistrationServer(overrides:Record<string,string>={}){
   const database=new MemoryDatabase();const delivery=new CapturingDelivery();let timestamp=Date.parse('2026-08-12T00:00:00.000Z');
   const turnstile=vi.fn(async(_input:RequestInfo|URL,init?:RequestInit)=>{const action=new URLSearchParams(String(init?.body)).get('response')?.includes('phone')?'cod_registration_phone':'cod_registration_email';return Response.json({success:true,hostname:'test.localhost',action});});
   const config=loadConfig({NODE_ENV:'test',COD_DEMO_MODE:'true',COD_REGISTRATION_ENABLED:'true',COD_REGISTRATION_HMAC_KEY:'r'.repeat(32),COD_TURNSTILE_SITE_KEY:'test-site-key',COD_TURNSTILE_SECRET_KEY:'test-secret-key',COD_PUBLIC_REGISTRATION_URL:'http://127.0.0.1:5173/?auth=register',...overrides});
-  const server=createControlPlane({config,database,registrationDelivery:delivery,registrationFetcher:turnstile as typeof fetch,registrationEndpointValidator:async()=>undefined,now:()=>new Date(timestamp)});servers.push(server);
+  const server=createControlPlane({config,database,registrationDelivery:delivery,registrationPinnedFetcher:((url:string,_ip:string,init:{method:string;headers:Record<string,string>;body:string})=>turnstile(url,init as unknown as RequestInit)) as unknown as import('./registration-verification.js').PinnedFetcher,registrationEndpointValidator:async()=> '203.0.113.99',now:()=>new Date(timestamp)});servers.push(server);
   await new Promise<void>((resolve)=>server.listen(0,'127.0.0.1',resolve));const address=server.address();if(!address||typeof address==='string')throw new Error('missing address');
   return{base:`http://127.0.0.1:${address.port}`,database,delivery,turnstile,advance:(milliseconds:number)=>{timestamp+=milliseconds;}};
 }
@@ -92,6 +92,29 @@ describe('dual OTP registration HTTP lifecycle',()=>{
     for(const body of bodies){expect(body).toMatchObject({challengeId:expect.stringMatching(/^[0-9a-f-]{36}$/),maskedDestination:expect.any(String),expiresAt:expect.any(String),resendAt:expect.any(String),notice:expect.stringContaining('迁移')});expect(body).not.toHaveProperty('error');}
     expect(delivery.emails).toHaveLength(1);
     const capabilities=await (await fetch(`${base}/api/capabilities`)).json();expect(capabilities).toMatchObject({authentication:{legacyMigrationEnabled:true}});
+  });
+
+  it('mirrors resend cooldown and resendAt for new vs existing emails so they cannot be enumerated',async()=>{
+    const {base,database,delivery}=await startRegistrationServer();
+    const existingEmail='enumerable-registered@example.com';
+    await database.registerIdentity({userId:'usr_enumeration',tenantId:'tenant_example_com',email:existingEmail,role:'member'},'stored-password-hash',null,false);
+    const freshEmail='enumerable-fresh@example.com';
+
+    // First start: both return 202 with the same resendAt (now + resendSeconds).
+    const freshFirst=await post(base,'/api/auth/registration/email/start',{email:freshEmail,humanChallengeToken:'human-ok'});
+    const existingFirst=await post(base,'/api/auth/registration/email/start',{email:existingEmail,humanChallengeToken:'human-ok'});
+    expect(freshFirst.status).toBe(202);expect(existingFirst.status).toBe(202);
+    const freshBody=await freshFirst.json() as {resendAt:string};const existingBody=await existingFirst.json() as {resendAt:string};
+    expect(Math.abs(Date.parse(freshBody.resendAt)-Date.parse(existingBody.resendAt))).toBeLessThan(1000);
+
+    // Repeat start inside the resend window: both return 429 retry-after:60.
+    const freshRepeat=await post(base,'/api/auth/registration/email/start',{email:freshEmail,humanChallengeToken:'human-ok'});
+    const existingRepeat=await post(base,'/api/auth/registration/email/start',{email:existingEmail,humanChallengeToken:'human-ok'});
+    expect(freshRepeat.status).toBe(429);expect(existingRepeat.status).toBe(429);
+    expect(freshRepeat.headers.get('retry-after')).toBe('60');expect(existingRepeat.headers.get('retry-after')).toBe('60');
+
+    // Only the fresh, deliverable account received a code; the decoy never sent.
+    expect(delivery.emails).toHaveLength(1);
   });
 
   it('returns the same public phone-start contract when a phone is already registered',async()=>{

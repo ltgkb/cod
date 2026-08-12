@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { adminComputeRequestIndexMigration, chatRequestSchemaMigration, computeRequestHostingMigration, ledgerAllocationBackfillMigration, ledgerTypeConstraintMigration, legacyInviteCodeBackfillMigration, taskExecutionLeaseSchemaMigration, userEmailGlobalUniqueIndexMigration, walletOpeningBalanceMigration } from './database.js';
+import { adminComputeRequestIndexMigration, chatRequestSchemaMigration, computeRequestHostingMigration, computeRequestLifecycleMigration, ledgerAllocationBackfillMigration, ledgerTypeConstraintMigration, legacyInviteCodeBackfillMigration, taskExecutionLeaseSchemaMigration, userEmailGlobalUniqueIndexMigration, walletOpeningBalanceMigration } from './database.js';
 
 describe('production-safe migrations and rate limits', () => {
   it('backfills only legacy unallocated ledger rows and enforces the accounting invariant', () => {
@@ -88,6 +88,15 @@ describe('production-safe migrations and rate limits', () => {
     expect(adminComputeRequestIndexMigration).toContain('CREATE INDEX CONCURRENTLY IF NOT EXISTS');
     expect(adminComputeRequestIndexMigration).toContain('cod_compute_requests_admin_created_idx ON cod_compute_requests(created_at DESC, id DESC)');
     expect(databaseSource).not.toContain('CREATE INDEX IF NOT EXISTS cod_compute_requests_admin_created_idx');
+  });
+
+  it('widens the compute lifecycle constraint without rewriting customer requests', () => {
+    expect(computeRequestLifecycleMigration).toContain("position('approved' in pg_get_constraintdef(oid))=0");
+    expect(computeRequestLifecycleMigration).toContain("position('action_required' in pg_get_constraintdef(oid))=0");
+    expect(computeRequestLifecycleMigration).toContain("'deploying','running','action_required','completed'");
+    expect(computeRequestLifecycleMigration).toContain('NOT VALID');
+    expect(computeRequestLifecycleMigration).toContain('VALIDATE CONSTRAINT cod_compute_requests_status_check');
+    expect(computeRequestLifecycleMigration).not.toContain('UPDATE cod_compute_requests');
   });
 
   it('adds execution fencing without exposing or storing reusable lease secrets',()=>{

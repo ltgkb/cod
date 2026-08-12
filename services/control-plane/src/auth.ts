@@ -1,7 +1,8 @@
 import { createHmac, randomBytes, scrypt as nodeScrypt, timingSafeEqual, type ScryptOptions } from 'node:crypto';
 
 const scrypt=(password:string,salt:Buffer,keyLength:number,options:ScryptOptions)=>new Promise<Buffer>((resolve,reject)=>nodeScrypt(password,salt,keyLength,options,(error,derived)=>error?reject(error):resolve(derived)));
-const passwordPattern = /^(?=.*\p{L})(?=.*\d).{10,128}$/u;
+export const MINIMUM_PASSWORD_LENGTH = 6;
+const passwordPattern = /^(?=.*\p{L})(?=.*\d).{6,128}$/u;
 
 interface TokenPrincipal {
   sub: string;
@@ -34,7 +35,7 @@ const encode = (value: string) => Buffer.from(value).toString('base64url');
 
 export function validatePassword(password: unknown): string {
   if (typeof password !== 'string' || !passwordPattern.test(password)) {
-    throw new Error('密码须为 10-128 位，并同时包含字母和数字');
+    throw new Error('密码须为 6-128 位，并同时包含字母和数字');
   }
   return password;
 }

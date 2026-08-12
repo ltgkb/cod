@@ -47,9 +47,78 @@ export interface UsageEvent {
 
 export type ComputeRequestKind = 'rental' | 'supply' | 'installment' | 'hosting';
 
-export type ComputeRequestStatus = 'submitted' | 'contacting' | 'quoted' | 'closed';
+export type ComputeRequestStatus =
+  | 'submitted'
+  | 'contacting'
+  | 'quoted'
+  | 'approved'
+  | 'deploying'
+  | 'running'
+  | 'action_required'
+  | 'completed'
+  | 'closed';
 
 export type ComputeFulfillmentMode = 'manual-confirmation' | 'third-party-manual-match';
+
+export interface ComputeQuote {
+  amountCents: number;
+  currency: 'CNY';
+  cardHoursMilli: number | null;
+  validUntil: string;
+  terms: string;
+  createdAt: string;
+}
+
+export interface ComputeQuoteInput {
+  amountCents: number;
+  cardHoursMilli?: number | null;
+  validUntil: string;
+  terms: string;
+}
+
+export type ComputeQuoteDecision = 'accepted' | 'declined';
+
+export interface ComputeImageOption {
+  id: string;
+  name: string;
+  frameworkVersion: string;
+  pythonVersion: string;
+  cudaVersion: string;
+}
+
+export interface ComputeHardwareSpecs {
+  cpuModel: string;
+  cpuCores: number;
+  memoryGb: number;
+  systemDiskGb: number;
+  dataDiskGb: number;
+  expandableDataDiskGb: number;
+  driverVersion: string;
+  cudaMaxVersion: string;
+}
+
+export interface ComputeOffer {
+  id: string;
+  title: string;
+  gpuModel: string;
+  gpuMemoryGb: number;
+  gpuCount: number;
+  region: string;
+  provider: string;
+  priceCents: number | null;
+  priceUnit: 'card-hour' | 'server-hour' | 'month' | 'quote';
+  minimumUnits: number;
+  delivery: string;
+  network: string;
+  availability: 'ready' | 'limited' | 'quote';
+  inventoryCards: number | null;
+  verified: boolean;
+  tags: string[];
+  specs: ComputeHardwareSpecs;
+  images: ComputeImageOption[];
+  supportedPeriods: Array<'hour' | 'day' | 'month'>;
+  fulfillmentMode: ComputeFulfillmentMode;
+}
 
 /**
  * A manually reviewed compute-market request. Hosting requests describe
@@ -60,6 +129,7 @@ export type ComputeFulfillmentMode = 'manual-confirmation' | 'third-party-manual
 export interface ComputeRequestInput {
   kind: ComputeRequestKind;
   offerId?: string | null;
+  imageId?: string | null;
   company: string;
   contactName: string;
   contactPhone: string;
@@ -82,6 +152,7 @@ export interface ComputeRequest extends ComputeRequestInput {
   id: string;
   email: string;
   offerId: string | null;
+  imageId: string | null;
   durationHours: number | null;
   termMonths: number | null;
   hostingPeriodMonths: number | null;
@@ -92,6 +163,9 @@ export interface ComputeRequest extends ComputeRequestInput {
   settlementPreference: string | null;
   hostingRequirements: string | null;
   fulfillmentMode: ComputeFulfillmentMode;
+  quote: ComputeQuote | null;
+  quoteDecision: ComputeQuoteDecision | null;
+  quoteDecisionAt: string | null;
   status: ComputeRequestStatus;
   createdAt: string;
   updatedAt: string;
@@ -148,6 +222,30 @@ export interface AgentGatewayConfig {
   leaseToken: string;
 }
 
+export type DesktopPetStatusReason = 'ready' | 'not-installed' | 'integrity-failed' | 'unsupported';
+
+export interface DesktopPetStatus {
+  supported: boolean;
+  installed: boolean;
+  verified: boolean;
+  running: boolean;
+  version: string | null;
+  publisherVerified: boolean;
+  reason: DesktopPetStatusReason;
+}
+
+export interface DesktopPetLaunchConfig {
+  token: string;
+  sourceId: string;
+  modelId: string;
+}
+
+export interface DesktopPetLaunchResult {
+  status: DesktopPetStatus;
+  started: boolean;
+  focusedExisting: boolean;
+}
+
 export interface DesktopBridge {
   platform: string;
   controlPlaneUrl: string;
@@ -158,6 +256,10 @@ export interface DesktopBridge {
   runCommand(root: string, command: string): Promise<TerminalResult>;
   getGooseAcpUrl(config: AgentGatewayConfig): Promise<string | null>;
   stopGoose(): Promise<void>;
+  getTaskboardUrl?(): Promise<string | null>;
+  getDesktopPetStatus?(): Promise<DesktopPetStatus>;
+  launchDesktopPet?(config: DesktopPetLaunchConfig): Promise<DesktopPetLaunchResult>;
+  stopDesktopPet?(): Promise<DesktopPetStatus>;
 }
 
 declare global {

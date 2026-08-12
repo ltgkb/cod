@@ -1,9 +1,10 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { Pool, type PoolClient } from 'pg';
-import type { AccountSummary, AdminComputeRequestPage, AdminComputeRequestSummary, ComputeRequestKind, ComputeRequestStatus, DeviceRecord, TaskStatus, UsageEvent } from '@cod/contracts';
+import type { AccountSummary, AdminComputeRequestPage, AdminComputeRequestSummary, ComputeQuote, ComputeQuoteDecision, ComputeQuoteInput, ComputeRequestKind, ComputeRequestStatus, DeviceRecord, TaskStatus, UsageEvent } from '@cod/contracts';
 import { HttpError } from './errors.js';
 import type { ComputeRequest, ComputeRequestInput } from './compute-market.js';
 import { recordUsageReservationsReaped } from './metrics.js';
+import { centsToCardHoursMilli } from './card-hours.js';
 
 export interface Principal {
   userId: string;
@@ -138,6 +139,7 @@ export interface CreditPackDefinition {
   name: string;
   priceCents: number;
   creditCents: number;
+  cardHoursMilli: number;
   bonusPercent: number;
   validityDays: 180;
 }
@@ -148,6 +150,8 @@ export interface CreditGrant {
   name: string;
   originalCents: number;
   remainingCents: number;
+  originalCardHoursMilli?: number;
+  remainingCardHoursMilli?: number;
   purchasedAt: string;
   expiresAt: string;
   status: 'active' | 'depleted' | 'expired';
@@ -155,15 +159,21 @@ export interface CreditGrant {
 
 export interface CreditSummary {
   availableCents: number;
+  availableCardHoursMilli: number;
   grants: CreditGrant[];
 }
 
-export const creditPackCatalog: readonly CreditPackDefinition[] = [
-  { id: 'starter', name: 'AI.KAI.COM 入门额度包', priceCents: 2_000, creditCents: 2_000, bonusPercent: 0, validityDays: 180 },
-  { id: 'standard', name: 'AI.KAI.COM 标准额度包', priceCents: 10_000, creditCents: 10_400, bonusPercent: 4, validityDays: 180 },
-  { id: 'pro', name: 'AI.KAI.COM 进阶额度包', priceCents: 20_000, creditCents: 21_200, bonusPercent: 6, validityDays: 180 },
-  { id: 'team', name: 'AI.KAI.COM 团队额度包', priceCents: 40_000, creditCents: 43_600, bonusPercent: 9, validityDays: 180 },
+const creditPackSeed = [
+  { id: 'starter', name: 'COD 入门卡时包', priceCents: 2_000, creditCents: 2_000, bonusPercent: 0, validityDays: 180 },
+  { id: 'standard', name: 'COD 标准卡时包', priceCents: 10_000, creditCents: 10_400, bonusPercent: 4, validityDays: 180 },
+  { id: 'pro', name: 'COD 进阶卡时包', priceCents: 20_000, creditCents: 21_200, bonusPercent: 6, validityDays: 180 },
+  { id: 'team', name: 'COD 团队卡时包', priceCents: 40_000, creditCents: 43_600, bonusPercent: 9, validityDays: 180 },
 ] as const;
+
+export const creditPackCatalog: readonly CreditPackDefinition[] = creditPackSeed.map((pack) => ({
+  ...pack,
+  cardHoursMilli: centsToCardHoursMilli(pack.creditCents),
+}));
 
 export interface TopupRequest {
   idempotencyKey: string;
@@ -276,6 +286,8 @@ export interface ComputeRequestStatusUpdateResult {
   changed: boolean;
 }
 
+export interface ComputeRequestQuoteUpdateResult extends ComputeRequestStatusUpdateResult {}
+
 export interface ComputeRequestCursor {
   createdAt: string;
   id: string;
@@ -330,6 +342,8 @@ export interface CodDatabase {
   listAdminComputeRequests(principal: Principal, query?: AdminComputeRequestQuery): Promise<AdminComputeRequestPage>;
   getAdminComputeRequest(principal: Principal, requestId: string): Promise<ComputeRequest>;
   updateAdminComputeRequestStatus(principal: Principal, requestId: string, status: ComputeRequestStatus, expectedStatus: ComputeRequestStatus): Promise<ComputeRequestStatusUpdateResult>;
+  quoteAdminComputeRequest(principal: Principal, requestId: string, quote: ComputeQuoteInput, expectedStatus: ComputeRequestStatus): Promise<ComputeRequestQuoteUpdateResult>;
+  decideComputeRequestQuote(principal: Principal, requestId: string, decision: ComputeQuoteDecision, expectedStatus: ComputeRequestStatus): Promise<ComputeRequestStatusUpdateResult>;
   listDevices(principal: Principal): Promise<DeviceRecord[]>;
   registerDevice(principal: Principal, input: Pick<DeviceRecord, 'name' | 'platform'>): Promise<DeviceRecord>;
   heartbeat(principal: Principal, deviceId: string, taskLease?: TaskLeaseHeartbeat): Promise<DeviceRecord>;
@@ -368,12 +382,17 @@ const taskTransitions: Record<TaskStatus, ReadonlySet<TaskStatus>> = {
   cancelled: new Set(['running']),
 };
 
-const computeRequestStatuses = new Set<ComputeRequestStatus>(['submitted', 'contacting', 'quoted', 'closed']);
+const computeRequestStatuses = new Set<ComputeRequestStatus>(['submitted', 'contacting', 'quoted', 'approved', 'deploying', 'running', 'action_required', 'completed', 'closed']);
 const computeRequestKinds = new Set<ComputeRequestKind>(['rental', 'supply', 'installment', 'hosting']);
 const computeRequestTransitions: Record<ComputeRequestStatus, ReadonlySet<ComputeRequestStatus>> = {
   submitted: new Set(['contacting', 'closed']),
-  contacting: new Set(['quoted', 'closed']),
+  contacting: new Set(['closed']),
   quoted: new Set(['closed']),
+  approved: new Set(['deploying', 'action_required', 'closed']),
+  deploying: new Set(['running', 'action_required', 'closed']),
+  running: new Set(['completed', 'action_required', 'closed']),
+  action_required: new Set(['deploying', 'running', 'closed']),
+  completed: new Set(),
   closed: new Set(),
 };
 
@@ -514,6 +533,7 @@ export function usageMatchesLedger(entry: LedgerEntry, event: UsageEvent): boole
 export function computeRequestMatchesInput(request: ComputeRequest, input: ComputeRequestInput): boolean {
   return request.kind === input.kind
     && request.offerId === (input.offerId ?? null)
+    && request.imageId === (input.imageId ?? null)
     && request.company === input.company
     && request.contactName === input.contactName
     && request.contactPhone === input.contactPhone
@@ -677,6 +697,32 @@ BEGIN
     ALTER TABLE cod_compute_requests VALIDATE CONSTRAINT cod_compute_requests_kind_check;
   END IF;
 END $compute_request_hosting$;
+`;
+
+export const computeRequestLifecycleMigration = `
+DO $compute_request_lifecycle$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='cod_compute_requests'::regclass AND conname='cod_compute_requests_status_check'
+      AND (position('approved' in pg_get_constraintdef(oid))=0 OR position('action_required' in pg_get_constraintdef(oid))=0)
+  ) THEN
+    ALTER TABLE cod_compute_requests DROP CONSTRAINT cod_compute_requests_status_check;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='cod_compute_requests'::regclass AND conname='cod_compute_requests_status_check'
+  ) THEN
+    ALTER TABLE cod_compute_requests ADD CONSTRAINT cod_compute_requests_status_check
+      CHECK (status IN ('submitted','contacting','quoted','approved','deploying','running','action_required','completed','closed')) NOT VALID;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='cod_compute_requests'::regclass AND conname='cod_compute_requests_status_check' AND NOT convalidated
+  ) THEN
+    ALTER TABLE cod_compute_requests VALIDATE CONSTRAINT cod_compute_requests_status_check;
+  END IF;
+END $compute_request_lifecycle$;
 `;
 
 export const taskExecutionLeaseSchemaMigration = `
@@ -909,6 +955,7 @@ CREATE TABLE IF NOT EXISTS cod_compute_requests (
   UNIQUE (tenant_id,user_id,idempotency_key)
 );
 ${computeRequestHostingMigration}
+${computeRequestLifecycleMigration}
 CREATE TABLE IF NOT EXISTS cod_devices (
   id uuid PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL, name text NOT NULL, platform text NOT NULL,
   status text NOT NULL, last_seen_at timestamptz NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
@@ -962,7 +1009,10 @@ const identityFromRow = (row: Record<string, unknown>): IdentityRecord => ({
   referralCodeUsed: row.referral_code_used ? String(row.referral_code_used) : null,
 });
 const ledgerFromRow = (row: Record<string, unknown>): LedgerEntry => ({ id: String(row.id), type: row.type as LedgerEntry['type'], amountCents: Number(row.amount_cents), walletAmountCents: Number(row.wallet_amount_cents ?? 0), creditAmountCents: Number(row.credit_amount_cents ?? 0), reference: String(row.reference), sourceId: row.source_id ? String(row.source_id) : null, upstreamSourceId: row.upstream_source_id ? String(row.upstream_source_id) : null, model: row.model_id ? String(row.model_id) : null, paymentDirection: row.payment_direction ? String(row.payment_direction) : null, commissionRateBps: Number(row.commission_rate_bps ?? 0), commissionCents: Number(row.commission_cents ?? 0), createdAt: new Date(String(row.created_at)).toISOString() });
-const creditGrantFromRow = (row: Record<string, unknown>): CreditGrant => ({ id: String(row.id), packId: String(row.pack_id), name: String(row.name), originalCents: Number(row.original_cents), remainingCents: Number(row.remaining_cents), purchasedAt: new Date(String(row.purchased_at)).toISOString(), expiresAt: new Date(String(row.expires_at)).toISOString(), status: row.status as CreditGrant['status'] });
+const creditGrantFromRow = (row: Record<string, unknown>): CreditGrant => {
+  const originalCents=Number(row.original_cents);const remainingCents=Number(row.remaining_cents);
+  return { id: String(row.id), packId: String(row.pack_id), name: String(row.name), originalCents, remainingCents, originalCardHoursMilli:centsToCardHoursMilli(originalCents), remainingCardHoursMilli:centsToCardHoursMilli(remainingCents), purchasedAt: new Date(String(row.purchased_at)).toISOString(), expiresAt: new Date(String(row.expires_at)).toISOString(), status: row.status as CreditGrant['status'] };
+};
 interface GrantAllocation { grantId: string; amountCents: number }
 interface FundsAllocation { walletCents: number; grantAllocations: GrantAllocation[] }
 const parseGrantAllocations = (value: unknown): GrantAllocation[] => Array.isArray(value) ? value.flatMap((item) => {
@@ -972,17 +1022,21 @@ const parseGrantAllocations = (value: unknown): GrantAllocation[] => Array.isArr
   return grantId && Number.isInteger(amountCents) && amountCents > 0 ? [{ grantId, amountCents }] : [];
 }) : [];
 const paymentOrderFromRow = (row: Record<string, unknown>): PaymentOrder => ({ id: String(row.id), amountCents: Number(row.amount_cents), currency: 'CNY', channel: row.channel as PaymentOrder['channel'], status: row.status as PaymentOrder['status'], providerPaymentId: row.provider_payment_id ? String(row.provider_payment_id) : null, createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString() });
+type StoredComputePayload = ComputeRequestInput & { quote?: ComputeQuote | null; quoteDecision?: ComputeQuoteDecision | null; quoteDecisionAt?: string | null };
 const computeRequestFromRow = (row: Record<string, unknown>): ComputeRequest => {
-  const payload = row.payload && typeof row.payload === 'object' ? row.payload as ComputeRequestInput : {} as ComputeRequestInput;
+  const payload:StoredComputePayload = row.payload && typeof row.payload === 'object' ? row.payload as StoredComputePayload : {} as StoredComputePayload;
   return {
     ...payload,
-    id: String(row.id), email: String(row.email), kind: row.kind as ComputeRequest['kind'], offerId: row.offer_id ? String(row.offer_id) : null,
+    id: String(row.id), email: String(row.email), kind: row.kind as ComputeRequest['kind'], offerId: row.offer_id ? String(row.offer_id) : null, imageId: payload.imageId ?? null,
     durationHours: payload.durationHours ?? null, termMonths: payload.termMonths ?? null,
     hostingPeriodMonths: payload.hostingPeriodMonths ?? null, rackUnits: payload.rackUnits ?? null,
     powerKilowatts: payload.powerKilowatts ?? null, networkMbps: payload.networkMbps ?? null,
     availabilityNotes: payload.availabilityNotes ?? null, settlementPreference: payload.settlementPreference ?? null,
     hostingRequirements: payload.hostingRequirements ?? null,
     fulfillmentMode: row.kind === 'hosting' ? 'third-party-manual-match' : 'manual-confirmation',
+    quote: payload.quote ?? null,
+    quoteDecision: payload.quoteDecision ?? null,
+    quoteDecisionAt: payload.quoteDecisionAt ?? null,
     status: row.status as ComputeRequest['status'], createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString(),
   };
 };
@@ -1308,7 +1362,8 @@ export class PostgresDatabase implements CodDatabase {
     await this.pool.query(`UPDATE cod_credit_grants SET status='expired' WHERE tenant_id=$1 AND user_id=$2 AND status='active' AND expires_at<=now()`,[p.tenantId,p.userId]);
     const { rows } = await this.pool.query(`SELECT * FROM cod_credit_grants WHERE tenant_id=$1 AND user_id=$2 ORDER BY expires_at,purchased_at`,[p.tenantId,p.userId]);
     const grants=rows.map(creditGrantFromRow);
-    return { availableCents: grants.filter((grant)=>grant.status==='active').reduce((total,grant)=>total+grant.remainingCents,0), grants };
+    const availableCents=grants.filter((grant)=>grant.status==='active').reduce((total,grant)=>total+grant.remainingCents,0);
+    return { availableCents, availableCardHoursMilli:centsToCardHoursMilli(availableCents), grants };
   }
   async purchaseCreditPack(p: Principal, packId: string, idempotencyKey: string) {
     const pack=creditPackCatalog.find((item)=>item.id===packId);
@@ -1609,6 +1664,36 @@ export class PostgresDatabase implements CodDatabase {
       const request=changed?computeRequestFromRow((await client.query('UPDATE cod_compute_requests SET status=$2,updated_at=now() WHERE id=$1 RETURNING *',[id,status])).rows[0]):current;
       await client.query('INSERT INTO cod_audit (id,tenant_id,user_id,action,entity_type,entity_id,data) VALUES ($1,$2,$3,$4,$5,$6,$7)',[randomUUID(),p.tenantId,p.userId,'compute.request.admin.status','compute_request',id,JSON.stringify({previousStatus:current.status,status:request.status,changed})]);
       return{request,previousStatus:current.status,changed};
+    });
+  }
+  async quoteAdminComputeRequest(p:Principal,id:string,quote:ComputeQuoteInput,expectedStatus:ComputeRequestStatus) {
+    requireAdmin(p);validateComputeRequestId(id);validateComputeRequestStatus(expectedStatus);
+    return this.transaction(async(client)=>{
+      const currentResult=await client.query('SELECT * FROM cod_compute_requests WHERE id=$1 FOR UPDATE',[id]);
+      if(!currentResult.rows[0])throw new HttpError('Compute request not found',404,'compute_request_not_found');
+      const current=computeRequestFromRow(currentResult.rows[0]);
+      if(current.status!==expectedStatus)throw new HttpError('Compute request status changed; reload and confirm the latest state',409,'compute_request_status_conflict');
+      if(current.status!=='contacting')throw new HttpError('Compute request must be contacting before it can be quoted',409,'invalid_compute_request_transition');
+      const createdAt=new Date().toISOString();const normalizedQuote:ComputeQuote={...quote,currency:'CNY',cardHoursMilli:quote.cardHoursMilli??null,createdAt};
+      const payload=JSON.stringify({quote:normalizedQuote,quoteDecision:null,quoteDecisionAt:null});
+      const request=computeRequestFromRow((await client.query(`UPDATE cod_compute_requests SET payload=payload||$2::jsonb,status='quoted',updated_at=now() WHERE id=$1 RETURNING *`,[id,payload])).rows[0]);
+      await client.query('INSERT INTO cod_audit (id,tenant_id,user_id,action,entity_type,entity_id,data) VALUES ($1,$2,$3,$4,$5,$6,$7)',[randomUUID(),p.tenantId,p.userId,'compute.request.admin.quote','compute_request',id,JSON.stringify({previousStatus:current.status,status:request.status,amountCents:quote.amountCents,cardHoursMilli:quote.cardHoursMilli??null,validUntil:quote.validUntil})]);
+      return{request,previousStatus:current.status,changed:true};
+    });
+  }
+  async decideComputeRequestQuote(p:Principal,id:string,decision:ComputeQuoteDecision,expectedStatus:ComputeRequestStatus) {
+    validateComputeRequestId(id);validateComputeRequestStatus(expectedStatus);if(decision!=='accepted'&&decision!=='declined')throw new HttpError('Compute quote decision is invalid',400,'invalid_compute_quote_decision');
+    return this.transaction(async(client)=>{
+      const currentResult=await client.query('SELECT * FROM cod_compute_requests WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE',[id,p.tenantId,p.userId]);
+      if(!currentResult.rows[0])throw new HttpError('Compute request not found',404,'compute_request_not_found');
+      const current=computeRequestFromRow(currentResult.rows[0]);
+      if(current.status!==expectedStatus)throw new HttpError('Compute request status changed; reload and confirm the latest state',409,'compute_request_status_conflict');
+      if(current.status!=='quoted'||!current.quote)throw new HttpError('Compute request has no quote awaiting confirmation',409,'invalid_compute_request_transition');
+      if(new Date(current.quote.validUntil).getTime()<=Date.now())throw new HttpError('Compute quote has expired',409,'compute_quote_expired');
+      const quoteDecisionAt=new Date().toISOString();const status=decision==='accepted'?'approved':'closed';const payload=JSON.stringify({quoteDecision:decision,quoteDecisionAt});
+      const request=computeRequestFromRow((await client.query('UPDATE cod_compute_requests SET payload=payload||$2::jsonb,status=$3,updated_at=now() WHERE id=$1 RETURNING *',[id,payload,status])).rows[0]);
+      await client.query('INSERT INTO cod_audit (id,tenant_id,user_id,action,entity_type,entity_id,data) VALUES ($1,$2,$3,$4,$5,$6,$7)',[randomUUID(),p.tenantId,p.userId,'compute.request.quote.decision','compute_request',id,JSON.stringify({previousStatus:current.status,status,decision})]);
+      return{request,previousStatus:current.status,changed:true};
     });
   }
 

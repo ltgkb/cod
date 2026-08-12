@@ -1033,19 +1033,23 @@ describe('platform compute request administration',()=>{
     const stale=await patch('closed','submitted');expect(stale.status).toBe(409);expect(await stale.json()).toMatchObject({error:'compute_request_status_conflict'});
     const invalidStatus=await patch('unknown','contacting');expect(invalidStatus.status).toBe(400);expect(await invalidStatus.json()).toMatchObject({error:'invalid_compute_request_status'});
     const backwards=await patch('submitted','contacting');expect(backwards.status).toBe(409);expect(await backwards.json()).toMatchObject({error:'invalid_compute_request_transition'});
-    expect(await (await patch('quoted','contacting')).json()).toMatchObject({status:'quoted'});
-    expect(await (await patch('closed','quoted')).json()).toMatchObject({status:'closed'});
+    const validUntil=new Date(Date.now()+86400000).toISOString();
+    const quote=await fetch(`${base}/api/admin/compute/requests/${rental.id}/quote`,{method:'PUT',headers:adminHeaders,body:JSON.stringify({expectedStatus:'contacting',quote:{amountCents:24000,cardHoursMilli:120000,validUntil,terms:'确认后安排 H100 交付'}})});
+    expect(quote.status).toBe(200);expect(await quote.json()).toMatchObject({status:'quoted',quote:{amountCents:24000,cardHoursMilli:120000,terms:'确认后安排 H100 交付'}});
+    const wrongOwner=await fetch(`${base}/api/compute/requests/${rental.id}/quote-decision`,{method:'PATCH',headers:memberHeaders,body:JSON.stringify({decision:'accepted',expectedStatus:'quoted'})});expect(wrongOwner.status).toBe(404);
+    const accepted=await fetch(`${base}/api/compute/requests/${rental.id}/quote-decision`,{method:'PATCH',headers:primaryHeaders,body:JSON.stringify({decision:'accepted',expectedStatus:'quoted'})});expect(accepted.status).toBe(200);expect(await accepted.json()).toMatchObject({status:'approved',quoteDecision:'accepted'});
+    expect(await (await patch('closed','approved')).json()).toMatchObject({status:'closed'});
     const reopened=await patch('quoted','closed');expect(reopened.status).toBe(409);expect(await reopened.json()).toMatchObject({error:'invalid_compute_request_transition'});
     expect(await (await fetch(`${base}/api/compute/requests`,{headers:primaryHeaders})).json()).toEqual([expect.objectContaining({id:rental.id,status:'closed'})]);
     expect(await (await fetch(`${base}/api/compute/requests`,{headers:memberHeaders})).json()).toEqual([expect.objectContaining({id:hosting.id,status:'submitted'})]);
 
     const audit=await database.listAudit(adminPrincipal,100);const statusAudits=audit.filter((entry)=>entry.action==='compute.request.admin.status');
-    expect(statusAudits).toHaveLength(4);expect(statusAudits).toEqual(expect.arrayContaining([
+    expect(statusAudits).toHaveLength(3);expect(statusAudits).toEqual(expect.arrayContaining([
       expect.objectContaining({entityId:rental.id,data:{previousStatus:'submitted',status:'contacting',changed:true}}),
       expect.objectContaining({entityId:rental.id,data:{previousStatus:'contacting',status:'contacting',changed:false}}),
-      expect.objectContaining({entityId:rental.id,data:{previousStatus:'contacting',status:'quoted',changed:true}}),
-      expect.objectContaining({entityId:rental.id,data:{previousStatus:'quoted',status:'closed',changed:true}}),
+      expect.objectContaining({entityId:rental.id,data:{previousStatus:'approved',status:'closed',changed:true}}),
     ]));
+    expect(audit).toEqual(expect.arrayContaining([expect.objectContaining({action:'compute.request.admin.quote',entityId:rental.id})]));
     expect(JSON.stringify(audit)).not.toContain(memberEmail);expect(JSON.stringify(audit)).not.toContain('13800138001');expect(JSON.stringify(audit)).not.toContain('甲联系人');
   });
 });

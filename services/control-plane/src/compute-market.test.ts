@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { HttpError } from './errors.js';
-import { validateComputeRequest } from './compute-market.js';
+import { validateComputeQuote, validateComputeRequest } from './compute-market.js';
 
 const hostingRequest = {
   kind: 'hosting',
@@ -36,6 +36,7 @@ describe('third-party GPU hosting request validation', () => {
     expect(validateComputeRequest(hostingRequest)).toEqual({
       ...hostingRequest,
       offerId: null,
+      imageId: null,
       durationHours: null,
       termMonths: null,
     });
@@ -65,12 +66,21 @@ describe('third-party GPU hosting request validation', () => {
 
   it('keeps existing request kinds valid while rejecting coerced numeric fields', () => {
     const rental = {
-      kind: 'rental', offerId: 'cod-h100-pcie-card-hour', company: '测试企业', contactName: 'Kai', contactPhone: 'kai_compute_2026',
+      kind: 'rental', offerId: 'cod-h100-pcie-card-hour', imageId: 'pytorch-2-9', company: '测试企业', contactName: 'Kai', contactPhone: 'kai_compute_2026',
       city: '北京', gpuModel: 'NVIDIA H100 PCIe 80GB', quantity: 2, durationHours: 100, requirements: '模型微调',
     };
     expect(validateComputeRequest(rental)).toMatchObject({ kind: 'rental', quantity: 2, durationHours: 100 });
     expectInvalid({ ...rental, quantity: '2' }, 'invalid_compute_quantity');
     expectInvalid({ ...rental, durationHours: '100' }, 'invalid_compute_duration');
+  });
+
+  it('defaults the image for older clients and rejects unknown images', () => {
+    const rental = {
+      kind: 'rental', offerId: 'cod-h100-pcie-card-hour', company: '测试企业', contactName: 'Kai', contactPhone: 'kai_compute_2026',
+      city: '北京', gpuModel: 'NVIDIA H100 PCIe 80GB', quantity: 1, durationHours: 10, requirements: '',
+    };
+    expect(validateComputeRequest(rental)).toMatchObject({ imageId: 'pytorch-2-9' });
+    expectInvalid({ ...rental, imageId: 'unknown-image' }, 'invalid_compute_image');
   });
 
   it('drops fields that do not belong to the selected request kind', () => {
@@ -88,5 +98,19 @@ describe('third-party GPU hosting request validation', () => {
 
     const hosting = validateComputeRequest({ ...hostingRequest, offerId: 'cod-h100-pcie-card-hour', durationHours: 100, termMonths: 36 });
     expect(hosting).toMatchObject({ kind: 'hosting', offerId: null, durationHours: null, termMonths: null, hostingPeriodMonths: 24 });
+  });
+});
+
+describe('compute quote validation',()=>{
+  const now=new Date('2026-08-12T00:00:00.000Z');
+  it('keeps exact cents and thousandths of a card-hour',()=>{
+    expect(validateComputeQuote({amountCents:10020,cardHoursMilli:100000,validUntil:'2026-08-19T00:00:00.000Z',terms:'七天内确认'},now)).toEqual({amountCents:10020,cardHoursMilli:100000,validUntil:'2026-08-19T00:00:00.000Z',terms:'七天内确认'});
+  });
+  it('rejects expired, coerced, and over-posted quotes',()=>{
+    for(const input of [
+      {amountCents:'10020',cardHoursMilli:100000,validUntil:'2026-08-19T00:00:00.000Z',terms:'七天内确认'},
+      {amountCents:10020,cardHoursMilli:100000,validUntil:'2026-08-11T00:00:00.000Z',terms:'七天内确认'},
+      {amountCents:10020,validUntil:'2026-08-19T00:00:00.000Z',terms:'七天内确认',status:'approved'},
+    ])expect(()=>validateComputeQuote(input,now)).toThrow();
   });
 });

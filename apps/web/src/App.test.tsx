@@ -691,6 +691,63 @@ describe('COD workspace', () => {
     expect(composer).toHaveValue('这是我的第一条消息');
   });
 
+  it('opens a discovered loopback taskboard inside the desktop workspace', async () => {
+    const taskboardUrl='http://127.0.0.1:47823/runtime-token/';
+    window.codDesktop={platform:'darwin',controlPlaneUrl:'https://cod.example',selectProject:vi.fn(async()=>null),listFiles:vi.fn(async()=>[]),gitDiff:vi.fn(async()=>''),readTextFile:vi.fn(async()=>''),runCommand:vi.fn(async(_root,command)=>({command,output:'',exitCode:0})),getGooseAcpUrl:vi.fn(async()=>null),stopGoose:vi.fn(async()=>undefined),getTaskboardUrl:vi.fn(async()=>taskboardUrl)};
+    vi.stubGlobal('fetch',vi.fn(async()=>json(capabilities)));
+    render(<App />);const entry=await screen.findByTitle('任务看板');fireEvent.click(entry);
+    const dialog=await screen.findByRole('dialog',{name:'任务看板'});
+    expect(within(dialog).getByTitle('Dashi Taskboard')).toHaveAttribute('src',taskboardUrl);
+    fireEvent.click(within(dialog).getByRole('button',{name:'关闭'}));
+    expect(screen.queryByRole('dialog',{name:'任务看板'})).not.toBeInTheDocument();
+  });
+
+  it('discovers a taskboard started after COD and removes the entry when it stops', async () => {
+    const taskboardUrl='http://127.0.0.1:47823/runtime-token/';
+    const getTaskboardUrl=vi.fn<()=>Promise<string|null>>().mockResolvedValueOnce(null).mockResolvedValueOnce(taskboardUrl).mockResolvedValueOnce(null);
+    window.codDesktop={platform:'darwin',controlPlaneUrl:'https://cod.example',selectProject:vi.fn(async()=>null),listFiles:vi.fn(async()=>[]),gitDiff:vi.fn(async()=>''),readTextFile:vi.fn(async()=>''),runCommand:vi.fn(async(_root,command)=>({command,output:'',exitCode:0})),getGooseAcpUrl:vi.fn(async()=>null),stopGoose:vi.fn(async()=>undefined),getTaskboardUrl};
+    vi.stubGlobal('fetch',vi.fn(async()=>json(capabilities)));render(<App />);
+    await waitFor(()=>expect(getTaskboardUrl).toHaveBeenCalledTimes(1));expect(screen.queryByTitle('任务看板')).not.toBeInTheDocument();
+    fireEvent.focus(window);const entry=await screen.findByTitle('任务看板');fireEvent.click(entry);
+    expect(await screen.findByRole('dialog',{name:'任务看板'})).toBeInTheDocument();
+    fireEvent.focus(window);await waitFor(()=>expect(screen.queryByTitle('任务看板')).not.toBeInTheDocument());
+    expect(screen.queryByRole('dialog',{name:'任务看板'})).not.toBeInTheDocument();
+  });
+
+  it('starts the audited desktop pet with the current COD model and can stop the owned process', async () => {
+    window.localStorage.setItem('cod.session.token','pet-user-token');
+    const readyStatus={supported:true,installed:true,verified:true,running:false,version:'0.7.0',publisherVerified:false,reason:'ready' as const};
+    const runningStatus={...readyStatus,running:true};
+    const getDesktopPetStatus=vi.fn(async()=>readyStatus);
+    const launchDesktopPet=vi.fn(async()=>({status:runningStatus,started:true,focusedExisting:false}));
+    const stopDesktopPet=vi.fn(async()=>readyStatus);
+    window.codDesktop={platform:'darwin',controlPlaneUrl:'https://cod.example',selectProject:vi.fn(async()=>null),listFiles:vi.fn(async()=>[]),gitDiff:vi.fn(async()=>''),readTextFile:vi.fn(async()=>''),runCommand:vi.fn(async(_root,command)=>({command,output:'',exitCode:0})),getGooseAcpUrl:vi.fn(async()=>null),stopGoose:vi.fn(async()=>undefined),getDesktopPetStatus,launchDesktopPet,stopDesktopPet};
+    const source={id:'ai-kai',label:'AI.KAI.COM',status:'live',callable:true,paymentDirection:'钱包 → ai.kai.com',note:'已连接',models:[{id:'pet-model',label:'桌宠模型',contextWindow:128000,inputPricePerMillionCents:100,outputPricePerMillionCents:200}]};
+    const account={userId:'pet-user',displayName:'pet user',balanceCents:5000,currency:'CNY',plan:'developer',role:'member',billingExempt:false};
+    const fetchMock=vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{
+      const url=String(input);
+      if(url.endsWith('/api/capabilities'))return json({...capabilities,ai:{...capabilities.ai,mode:'live'}});
+      if(url.endsWith('/api/model-catalog')||url.endsWith('/api/model-sources'))return json([source]);
+      if(url.endsWith('/api/account'))return json(account);
+      if(url.endsWith('/api/devices')&&init?.method==='POST')return json({id:'pet-desktop',name:'COD Desktop',platform:'macos',status:'online',lastSeenAt:new Date().toISOString()},201);
+      if(url.endsWith('/api/devices'))return json([]);
+      if(url.endsWith('/api/tasks')||url.endsWith('/api/products')||url.endsWith('/api/ledger')||url.endsWith('/api/compute/offers')||url.endsWith('/api/compute/requests'))return json([]);
+      if(url.endsWith('/api/credit-packs'))return json(creditPacks);
+      if(url.endsWith('/api/referrals'))return json({inviteCode:'PET',referredUsers:0,commissionRateBps:0,pendingCommissionCents:0,settledCommissionCents:0});
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal('fetch',fetchMock);render(<App/>);
+    await waitFor(()=>expect(screen.getByTitle('账户')).toBeInTheDocument());
+    fireEvent.click(screen.getByTitle('命令面板'));
+    fireEvent.click(await screen.findByRole('button',{name:/桌面伙伴/}));
+    const dialog=await screen.findByRole('dialog',{name:'COD 桌面伙伴'});
+    fireEvent.click(within(dialog).getByRole('button',{name:/连接并启动/}));
+    await waitFor(()=>expect(launchDesktopPet).toHaveBeenCalledWith({token:'pet-user-token',sourceId:'ai-kai',modelId:'pet-model'}));
+    expect(await within(dialog).findByText('正在运行')).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button',{name:/停止桌宠/}));
+    await waitFor(()=>expect(stopDesktopPet).toHaveBeenCalledTimes(1));
+  });
+
   it('closes the topmost Web UI before releasing Android back navigation', async () => {
     const setNativeTopmostUiVisible = vi.fn(async () => undefined);
     configureCodRuntime({ setNativeTopmostUiVisible });
@@ -897,8 +954,8 @@ describe('COD workspace', () => {
     fireEvent.change(emailCode, { target: { value: '123456' } });
     fireEvent.click(within(dialog).getByRole('button', { name: '验证邮箱' }));
     await within(dialog).findByLabelText('手机号');
-    await waitFor(() => expect(renderTurnstile).toHaveBeenCalledTimes(2));
-    expect(renderTurnstile.mock.calls[1]?.[1]).toMatchObject({ sitekey: 'site-key', action: 'cod_registration_phone' });
+    await waitFor(() => expect(renderTurnstile.mock.calls.some(([, options]) => options.action === 'cod_registration_phone')).toBe(true));
+    expect(renderTurnstile.mock.calls.at(-1)?.[1]).toMatchObject({ sitekey: 'site-key', action: 'cod_registration_phone' });
   });
 
   it('hands native registration to the secure web flow without calling OTP endpoints', async () => {
@@ -1523,6 +1580,12 @@ describe('COD workspace', () => {
         requests[index] = { ...requests[index], status: body.status, updatedAt: '2026-08-11T09:00:00.000Z' };
         return json(requests[index]);
       }
+      if (parsed.pathname === '/api/admin/compute/requests/compute-hosting-1/quote' && method === 'PUT') {
+        const body=JSON.parse(String(init?.body)) as {expectedStatus:ComputeRequest['status'];quote:{amountCents:number;cardHoursMilli:number|null;validUntil:string;terms:string}};
+        const index=requests.findIndex((request)=>request.id==='compute-hosting-1');
+        if(hostingPatchMode==='conflict'){requests[index]={...requests[index],status:'closed',updatedAt:'2026-08-11T10:00:00.000Z'};return json({error:'compute_request_status_conflict',message:'申请状态已变更'},409);}
+        requests[index]={...requests[index],status:'quoted',quote:{...body.quote,currency:'CNY',createdAt:'2026-08-11T09:00:00.000Z'},quoteDecision:null,quoteDecisionAt:null,updatedAt:'2026-08-11T09:00:00.000Z'};return json(requests[index]);
+      }
       if ((parsed.pathname === '/api/admin/compute/requests' && method === 'GET') || (parsed.pathname === '/api/admin/compute/requests/search' && method === 'POST')) {
         const filters = method === 'POST'
           ? JSON.parse(String(init?.body)) as { limit: number; cursor?: string; kind?: string; status?: string; q?: string }
@@ -1566,7 +1629,7 @@ describe('COD workspace', () => {
     await screen.findByRole('heading', { name: '新建或选择任务' });
 
     fireEvent.click(screen.getByTitle('账户'));
-    const accountDialog = await screen.findByRole('dialog', { name: '钱包与额度包' });
+    const accountDialog = await screen.findByRole('dialog', { name: '钱包与卡时' });
     fireEvent.click(within(accountDialog).getByRole('button', { name: /查看用户申请/ }));
     let adminDialog = await screen.findByRole('dialog', { name: '管理员 · 算力申请' });
     expect((await within(adminDialog).findAllByText('星港算力')).length).toBeGreaterThan(0);
@@ -1628,18 +1691,17 @@ describe('COD workspace', () => {
     const searchesBeforeConflict = adminSearches.length;
     const detailReadsBeforeConflict = detailReads;
     hostingPatchMode = 'conflict';
-    fireEvent.change(within(adminDialog).getByLabelText('算力申请状态'), { target: { value: 'quoted' } });
-    fireEvent.click(within(adminDialog).getByRole('button', { name: '更新为已报价' }));
-    const conflictMessage = '申请状态已由其他管理员更新，请确认后重试。';
+    fireEvent.change(within(adminDialog).getByLabelText('报价金额'), { target: { value: '1200' } });
+    fireEvent.click(within(adminDialog).getByRole('button', { name: '发送报价' }));
+    const conflictMessage = '申请已变化，请刷新后重新报价。';
     await waitFor(() => expect(within(adminDialog).getAllByText(conflictMessage).length).toBeGreaterThan(0));
-    expect(hostingPatchBodies.at(-1)).toEqual({ status: 'quoted', expectedStatus: 'contacting' });
     await waitFor(() => expect(adminSearches.length).toBeGreaterThan(searchesBeforeConflict));
     await waitFor(() => expect(detailReads).toBeGreaterThan(detailReadsBeforeConflict));
     expect(await within(adminDialog).findByText('该申请已结束')).toBeInTheDocument();
     expect(within(adminDialog).getAllByText('已关闭').length).toBeGreaterThan(0);
 
     fireEvent.click(within(adminDialog).getByRole('button', { name: '关闭' }));
-    expect(await screen.findByRole('dialog', { name: '钱包与额度包' })).toBeInTheDocument();
+    expect(await screen.findByRole('dialog', { name: '钱包与卡时' })).toBeInTheDocument();
     adminReadMode = 'error';
     fireEvent.click(screen.getByRole('button', { name: /查看用户申请/ }));
     adminDialog = await screen.findByRole('dialog', { name: '管理员 · 算力申请' });
@@ -1658,7 +1720,7 @@ describe('COD workspace', () => {
     fireEvent.click(within(adminDialog).getByRole('button', { name: '重试详情' }));
     expect(await within(adminDialog).findByRole('article', { name: '海岸模型的算力申请详情' })).toBeInTheDocument();
     act(() => { expect(dispatchCodNativeBack()).toBe(true); });
-    expect(await screen.findByRole('dialog', { name: '钱包与额度包' })).toBeInTheDocument();
+    expect(await screen.findByRole('dialog', { name: '钱包与卡时' })).toBeInTheDocument();
   });
 
   it('does not expose the compute-request administration entry or API to members', async () => {
@@ -1682,7 +1744,7 @@ describe('COD workspace', () => {
     render(<App />);
     await screen.findByRole('heading', { name: '新建或选择任务' });
     fireEvent.click(screen.getByTitle('账户'));
-    const accountDialog = await screen.findByRole('dialog', { name: '钱包与额度包' });
+    const accountDialog = await screen.findByRole('dialog', { name: '钱包与卡时' });
     expect(within(accountDialog).queryByRole('button', { name: /查看用户申请/ })).not.toBeInTheDocument();
     expect(adminReads).toEqual([]);
   });
@@ -1720,7 +1782,7 @@ describe('COD workspace', () => {
     await flushPromises();
     expect(screen.getByRole('heading', { name: '新建或选择任务' })).toBeInTheDocument();
     fireEvent.click(screen.getByTitle('账户'));
-    fireEvent.click(within(screen.getByRole('dialog', { name: '钱包与额度包' })).getByRole('button', { name: /查看用户申请/ }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: '钱包与卡时' })).getByRole('button', { name: /查看用户申请/ }));
     await flushPromises();
     expect(screen.getAllByText('owner@example.com').length).toBeGreaterThan(0);
     expect(window.localStorage.getItem('cod.session.token')).toBe('admin-token');
@@ -1733,7 +1795,7 @@ describe('COD workspace', () => {
 
     transientTaskFailure = false; accountRole = 'member';
     await advanceSync();
-    expect(screen.getByRole('dialog', { name: '钱包与额度包' })).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: '钱包与卡时' })).toBeInTheDocument();
     expect(screen.queryByText('owner@example.com')).not.toBeInTheDocument();
     expect(screen.queryByText('wx_gpu_owner')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /查看用户申请/ })).not.toBeInTheDocument();
@@ -1800,7 +1862,7 @@ describe('COD workspace', () => {
     render(<App />);
     await screen.findByRole('heading', { name: '新建或选择任务' });
     fireEvent.click(screen.getByTitle('账户'));
-    fireEvent.click(within(await screen.findByRole('dialog', { name: '钱包与额度包' })).getByRole('button', { name: /查看用户申请/ }));
+    fireEvent.click(within(await screen.findByRole('dialog', { name: '钱包与卡时' })).getByRole('button', { name: /查看用户申请/ }));
     const adminDialog = await screen.findByRole('dialog', { name: '管理员 · 算力申请' });
     expect((await within(adminDialog).findAllByText('星港算力')).length).toBeGreaterThan(0);
     fireEvent.click(within(adminDialog).getByRole('button', { name: '加载更多' }));
@@ -2470,10 +2532,10 @@ describe('COD workspace', () => {
     });
     vi.stubGlobal('fetch', fetchMock); window.localStorage.setItem('cod.session.token', 'test-token');
     render(<App />);
-    expect(await screen.findByText('¥ 6.88')).toBeInTheDocument();
+    expect(await screen.findByText('0.000 卡时')).toBeInTheDocument();
     await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 0)); });
     fireEvent(document, new Event('visibilitychange'));
     await waitFor(() => expect(accountReads).toBeGreaterThanOrEqual(2));
-    expect(await screen.findByText('¥ 2.01')).toBeInTheDocument();
+    expect(await screen.findByText('2.005 卡时')).toBeInTheDocument();
   });
 });

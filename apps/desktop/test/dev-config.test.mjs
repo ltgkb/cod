@@ -108,6 +108,7 @@ test('desktop development clears complete production integration groups without 
     COD_GOOSE_ACP_URL: 'wss://production-goose.example/acp',
     COD_GOOSE_ACP_TOKEN: 'production-goose-token',
     COD_GOOSE_BINARY: '/safe/local/goose',
+    COD_DESKTOP_PET_PATH: '/safe/local/COD桌宠.app',
     VITE_COD_CONTROL_PLANE_URL: 'https://cod.production.example',
     EXPO_PUBLIC_COD_CONTROL_PLANE_URL: 'https://cod.production.example',
     TOKEN_RETAIL_COMMISSION_RATE_BPS: '500',
@@ -117,7 +118,7 @@ test('desktop development clears complete production integration groups without 
 
   const { shared, controlPlane } = resolveDesktopDevelopmentProcessEnvironments(productionLikeEnvironment);
   for (const name of Object.keys(productionLikeEnvironment)) {
-    if (name === 'PATH' || name === 'COD_GOOSE_BINARY') continue;
+    if (name === 'PATH' || name === 'COD_GOOSE_BINARY' || name === 'COD_DESKTOP_PET_PATH') continue;
     assert.equal(name in shared, false, `${name} must not reach renderer or Electron development processes`);
     if (name !== 'COD_SESSION_SECRET') {
       assert.equal(name in controlPlane, false, `${name} must not reach the local control plane`);
@@ -125,7 +126,9 @@ test('desktop development clears complete production integration groups without 
   }
   assert.equal(shared.PATH, '/safe/bin');
   assert.equal(shared.COD_GOOSE_BINARY, '/safe/local/goose');
+  assert.equal(shared.COD_DESKTOP_PET_PATH, '/safe/local/COD桌宠.app');
   assert.equal(controlPlane.COD_GOOSE_BINARY, '/safe/local/goose');
+  assert.equal(controlPlane.COD_DESKTOP_PET_PATH, '/safe/local/COD桌宠.app');
   assert.equal(controlPlane.COD_SESSION_SECRET, 'cod-local-development-secret');
   assert.equal('DATABASE_URL' in controlPlane, false);
 });

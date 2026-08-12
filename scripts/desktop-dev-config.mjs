@@ -7,6 +7,9 @@ const safeInheritedCodDevelopmentNames = new Set([
   // A local executable path is needed to exercise the Goose sidecar in a
   // source checkout. Remote ACP endpoints and credentials are not allowed.
   'COD_GOOSE_BINARY',
+  // The reviewed desktop-pet bundle may live outside the repository during
+  // local integration testing. Packaged builds deliberately ignore it.
+  'COD_DESKTOP_PET_PATH',
 ]);
 
 function isIsolatedApplicationEnvironmentName(name) {

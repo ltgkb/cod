@@ -13,16 +13,16 @@ import { KnowledgeAdapter } from './knowledge.js';
 import { MemoryDatabase } from './memory-database.js';
 import { ProductRegistry } from './products.js';
 import { beginRequest, recordRequest, recordUsageReservationLeaseFailure, renderMetrics } from './metrics.js';
-import { computeOfferCatalog, validateComputeRequest } from './compute-market.js';
+import { computeOfferCatalog, validateComputeQuote, validateComputeRequest } from './compute-market.js';
 import { OfficialPaymentService } from './payments.js';
-import { maskRegistrationDestination, normalizeRegistrationEmail, normalizeRegistrationPhone, RegistrationVerification, registrationDeliveryFromConfig, validateRegistrationChallengeId, validateRegistrationCode, type RegistrationDelivery, type RegistrationEndpointValidator } from './registration-verification.js';
+import { defaultPinnedFetcher, maskRegistrationDestination, normalizeRegistrationEmail, normalizeRegistrationPhone, RegistrationVerification, registrationDeliveryFromConfig, validateRegistrationChallengeId, validateRegistrationCode, type PinnedFetcher, type RegistrationDelivery, type RegistrationEndpointValidator } from './registration-verification.js';
 
 export interface ControlPlaneOptions {
   config?: ControlPlaneConfig;
   database?: CodDatabase;
   gateway?: AiGateway;
   registrationDelivery?: RegistrationDelivery;
-  registrationFetcher?: typeof fetch;
+  registrationPinnedFetcher?: PinnedFetcher;
   registrationEndpointValidator?: RegistrationEndpointValidator;
   now?: () => Date;
   reservationKeepaliveIntervalMs?: number;
@@ -62,6 +62,18 @@ function publicModelCatalog(sources: ModelSourceInfo[]): PublicModelSourceInfo[]
 const dummyPasswordHash='scrypt$16384$8$1$MDEyMzQ1Njc4OWFiY2RlZg$vNLqtxxHxO9XlDJYZk-T6OzryI7HSubiscMSJDaWZtd0bu3h2vmmdlKsAZpCn3V20q-R_KOLJgJl9mHX32LDiA';
 const emailRegistrationNotice='若该邮箱可注册，验证码将发送至邮箱；已有账号请登录，旧试点账号请使用迁移入口。';
 const phoneRegistrationNotice='若该手机号可用于注册，验证码将发送至手机；已有账号请登录。';
+// Defense-in-depth timing mask for the decoy (already-registered) start path.
+// The decoy skips delivery, so without a delay it would return measurably faster
+// than a real start. A small jittered delay narrows (but cannot fully close)
+// the timing side-channel; the 429/resendAt parity below is the strong signal.
+const decoyResendDelayMs = 64;
+function jitteredDecoyDelay():Promise<void>{return new Promise((resolve)=>setTimeout(resolve,decoyResendDelayMs+Math.floor(Math.random()*decoyResendDelayMs)));}
+// The decoy start path must mirror the real start's resend semantics: a first
+// start in a resend window returns 202 with resendAt=now+resendSeconds, and a
+// repeat start inside the window returns 429. Without this, an attacker could
+// distinguish a new account (429 on repeat) from an existing one (always 202).
+const consumeDecoyResendCooldown=(database:CodDatabase,registration:RegistrationVerification,scope:string,destination:string,instant:Date,resendSeconds:number):Promise<void>=>
+  database.consumeRegistrationRateLimit({scope:`${scope}:decoy:destination`,keyHash:registration.rateLimitKey(`${scope}:decoy:destination`,destination),now:instant,windowSeconds:resendSeconds,limit:1});
 const privateRegistrationVerificationErrors=new Set([
   'invalid_registration_challenge','invalid_verification_code','registration_challenge_consumed',
   'registration_challenge_locked','registration_challenge_expired','registration_email_verification_required',
@@ -352,9 +364,9 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
   const knowledge = new KnowledgeAdapter(config);
   const products = new ProductRegistry(config);
   const officialPayments = new OfficialPaymentService(config);
-  const registrationFetcher = options.registrationFetcher ?? fetch;
-  const registrationDelivery = options.registrationDelivery ?? registrationDeliveryFromConfig(config.registrationVerification, registrationFetcher,options.registrationEndpointValidator);
-  const registration = new RegistrationVerification(config.registrationVerification, registrationDelivery, registrationFetcher,options.registrationEndpointValidator);
+  const registrationPinnedFetcher = options.registrationPinnedFetcher ?? defaultPinnedFetcher;
+  const registrationDelivery = options.registrationDelivery ?? registrationDeliveryFromConfig(config.registrationVerification, registrationPinnedFetcher,options.registrationEndpointValidator);
+  const registration = new RegistrationVerification(config.registrationVerification, registrationDelivery, registrationPinnedFetcher,options.registrationEndpointValidator);
   const now = options.now ?? (() => new Date());
   const requireRegistration = () => {
     if (!config.registrationEnabled || !registration.available) throw new HttpError('账号注册暂未开放', 503, 'registration_unavailable');
@@ -461,7 +473,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         let challenge;
         try{challenge=await database.startEmailRegistration({challengeId,email,codeHash:generated.hash,now:instant,expiresAt,resendAfter:resendAt,maxSends:config.registrationVerification.maxSendsPerChannel});}
         catch(error){
-          if(error instanceof HttpError&&(error.code==='email_registered'||error.code==='legacy_migration_required'))return sendJson(response,202,{challengeId,maskedDestination:maskRegistrationDestination('email',email),expiresAt:expiresAt.toISOString(),resendAt:resendAt.toISOString(),notice:emailRegistrationNotice});
+          if(error instanceof HttpError&&(error.code==='email_registered'||error.code==='legacy_migration_required')){await consumeDecoyResendCooldown(database,registration,'registration-email-start',email,instant,config.registrationVerification.resendSeconds);await jitteredDecoyDelay();return sendJson(response,202,{challengeId,maskedDestination:maskRegistrationDestination('email',email),expiresAt:expiresAt.toISOString(),resendAt:resendAt.toISOString(),notice:emailRegistrationNotice});}
           throw error;
         }
         try { await registration.deliver('email',{challengeId:challenge.challengeId,destination:email,code:generated.code,expiresAt:challenge.expiresAt}); }
@@ -487,7 +499,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         let challenge;
         try{challenge=await database.startPhoneRegistration({challengeId,email,phone,codeHash:generated.hash,now:instant,expiresAt,resendAfter:resendAt,maxSends:config.registrationVerification.maxSendsPerChannel});}
         catch(error){
-          if(error instanceof HttpError&&(error.code==='phone_registered'||error.code==='phone_registration_pending'))return sendJson(response,202,{challengeId,maskedDestination:maskRegistrationDestination('phone',phone),expiresAt:expiresAt.toISOString(),resendAt:resendAt.toISOString(),notice:phoneRegistrationNotice});
+          if(error instanceof HttpError&&(error.code==='phone_registered'||error.code==='phone_registration_pending')){await consumeDecoyResendCooldown(database,registration,'registration-phone-start',phone,instant,config.registrationVerification.resendSeconds);await jitteredDecoyDelay();return sendJson(response,202,{challengeId,maskedDestination:maskRegistrationDestination('phone',phone),expiresAt:expiresAt.toISOString(),resendAt:resendAt.toISOString(),notice:phoneRegistrationNotice});}
           throw error;
         }
         try { await registration.deliver('phone',{challengeId:challenge.challengeId,destination:phone,code:generated.code,expiresAt:challenge.expiresAt}); }
@@ -655,12 +667,27 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         const id=decodePathSegment(adminComputeStatus[1]);validateComputeRequestId(id);const result=await database.updateAdminComputeRequestStatus(principal,id,status,expectedStatus);
         return sendJson(response,200,result.request);
       }
+      const adminComputeQuote=url.pathname.match(/^\/api\/admin\/compute\/requests\/([^/]+)\/quote$/);
+      if(request.method==='PUT'&&adminComputeQuote){
+        requireAdmin(principal);const body=await readJson<unknown>(request);
+        if(!body||typeof body!=='object'||Array.isArray(body)||Object.keys(body).some((key)=>key!=='quote'&&key!=='expectedStatus'))throw new HttpError('Compute quote update is invalid',400,'invalid_compute_quote');
+        const expectedStatus=(body as {expectedStatus?:unknown}).expectedStatus;validateComputeRequestStatus(expectedStatus);
+        const quote=validateComputeQuote((body as {quote?:unknown}).quote);const id=decodePathSegment(adminComputeQuote[1]);validateComputeRequestId(id);
+        const result=await database.quoteAdminComputeRequest(principal,id,quote,expectedStatus);return sendJson(response,200,result.request);
+      }
       if (request.method === 'GET' && url.pathname === '/api/compute/requests') return sendJson(response,200,await database.listComputeRequests(principal));
       if (request.method === 'POST' && url.pathname === '/api/compute/requests') {
         const key=String(request.headers['idempotency-key']??'');if(!key)throw new HttpError('idempotency-key is required',400,'idempotency_required');
         const input=validateComputeRequest(await readJson(request));const result=await database.createComputeRequest(principal,input,key);
         if(result.created)await database.audit(principal,'compute.request.created','compute_request',result.request.id,{kind:result.request.kind,offerId:result.request.offerId,gpuModel:result.request.gpuModel,quantity:result.request.quantity,fulfillmentMode:result.request.fulfillmentMode});
         return sendJson(response,201,result.request);
+      }
+      const computeQuoteDecision=url.pathname.match(/^\/api\/compute\/requests\/([^/]+)\/quote-decision$/);
+      if(request.method==='PATCH'&&computeQuoteDecision){
+        const body=await readJson<unknown>(request);if(!body||typeof body!=='object'||Array.isArray(body)||Object.keys(body).some((key)=>key!=='decision'&&key!=='expectedStatus'))throw new HttpError('Compute quote decision is invalid',400,'invalid_compute_quote_decision');
+        const decision=(body as {decision?:unknown}).decision;if(decision!=='accepted'&&decision!=='declined')throw new HttpError('Compute quote decision is invalid',400,'invalid_compute_quote_decision');
+        const expectedStatus=(body as {expectedStatus?:unknown}).expectedStatus;validateComputeRequestStatus(expectedStatus);const id=decodePathSegment(computeQuoteDecision[1]);validateComputeRequestId(id);
+        const result=await database.decideComputeRequestQuote(principal,id,decision,expectedStatus);return sendJson(response,200,result.request);
       }
       if (request.method === 'GET' && url.pathname === '/api/credit-packs') return sendJson(response,200,{packs:creditPackCatalog,summary:await database.getCreditSummary(principal)});
       if (request.method === 'POST' && url.pathname.match(/^\/api\/credit-packs\/[^/]+\/purchase$/)) {

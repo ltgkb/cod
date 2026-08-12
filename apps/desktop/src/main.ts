@@ -7,11 +7,12 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import type { AgentGatewayConfig, TerminalResult } from '@cod/contracts';
+import type { AgentGatewayConfig, DesktopPetLaunchConfig, DesktopPetLaunchResult, DesktopPetStatus, TerminalResult } from '@cod/contracts';
 import { startAcpProxy, type AcpProxy } from './acp-proxy.js';
 import { mintAgentSession } from './agent-session.js';
 import { commandPathCandidates, commandPolicyViolation, isWithinRoot, parseCommand, validateCommandPath } from './command-policy.js';
 import { commandTimedOut, executeGitCommand } from './git-command.js';
+import { desktopPetEnvironment, discoverDesktopPet, type DesktopPetInstallation } from './desktop-pet.js';
 import { collectUntrackedDiff, stagedGitDiffArguments, unstagedGitDiffArguments } from './git-diff.js';
 import { minimalGooseEnvironment } from './goose-environment.js';
 import { forceTerminateChildProcess, GooseLaunchCoordinator, terminateChildProcess } from './goose-lifecycle.js';
@@ -20,6 +21,8 @@ import { isAllowedDevelopmentNavigation, isSafeExternalUrl } from './navigation-
 import { resolveCommandInvocation } from './platform-command.js';
 import { loadApprovedProjectRoots, maximumApprovedProjectRoots, saveApprovedProjectRoots } from './project-roots.js';
 import { defaultDesktopControlPlaneUrl, defaultDesktopDevelopmentUrl, isTrustedRendererUrl, resolveDesktopRuntimeUrls } from './runtime-policy.js';
+import { resolveTaskboardUrl } from './taskboard-url.js';
+import { startPetChatProxy, type PetChatProxy } from './pet-chat-proxy.js';
 import { collectWorkspaceFiles, readWorkspaceTextFile } from './workspace-files.js';
 
 const execFileAsync = promisify(execFile);
@@ -44,6 +47,8 @@ let gooseAcpProxy: AcpProxy | null = null;
 let gooseAcpUrl: string | null = null;
 let gooseConfigurationKey: string | null = null;
 let gooseAgentTokenExpiresAt = 0;
+let desktopPetProcess: ChildProcess | null = null;
+let desktopPetProxy: PetChatProxy | null = null;
 const gooseLaunchCoordinator = new GooseLaunchCoordinator();
 
 function trustedRendererWebSocketOrigins(): string[] {
@@ -300,6 +305,89 @@ function invalidateAndStopGooseSidecar(): Promise<void> {
   return gooseLaunchCoordinator.invalidate(stopGooseSidecar);
 }
 
+function desktopPetIsRunning(): boolean {
+  return Boolean(desktopPetProcess && desktopPetProcess.exitCode === null && desktopPetProcess.signalCode === null);
+}
+
+async function desktopPetDiscovery(): Promise<{ installation: DesktopPetInstallation | null; status: DesktopPetStatus }> {
+  const result = await discoverDesktopPet({
+    platform: process.platform,
+    homeDirectory: app.getPath('home'),
+    resourcesPath: process.resourcesPath,
+    environment: process.env,
+    developmentOverride: app.isPackaged ? undefined : process.env.COD_DESKTOP_PET_PATH,
+  });
+  return { ...result, status: { ...result.status, running: desktopPetIsRunning() } };
+}
+
+async function stopDesktopPet(): Promise<DesktopPetStatus> {
+  const processToStop = desktopPetProcess;
+  const proxyToStop = desktopPetProxy;
+  desktopPetProcess = null;
+  desktopPetProxy = null;
+  await terminateChildProcess(processToStop);
+  if (proxyToStop) await proxyToStop.close().catch(() => undefined);
+  return (await desktopPetDiscovery()).status;
+}
+
+function validateDesktopPetLaunchConfig(config: DesktopPetLaunchConfig): void {
+  if (typeof config?.token !== 'string' || !config.token || config.token.length > 8_192 || /[\0\r\n]/.test(config.token)) {
+    throw new Error('请先登录 COD，再启动桌面伙伴。');
+  }
+  if (typeof config.sourceId !== 'string' || !/^[a-z0-9-]{2,40}$/.test(config.sourceId)) throw new Error('请选择可用的模型源。');
+  if (typeof config.modelId !== 'string' || !config.modelId || config.modelId.length > 200 || /[\0\r\n]/.test(config.modelId)) {
+    throw new Error('请选择可用的模型。');
+  }
+}
+
+async function launchDesktopPet(config: DesktopPetLaunchConfig): Promise<DesktopPetLaunchResult> {
+  validateDesktopPetLaunchConfig(config);
+  const discovery = await desktopPetDiscovery();
+  if (!discovery.installation || !discovery.status.verified) {
+    const message = discovery.status.reason === 'integrity-failed'
+      ? '检测到桌宠文件，但它与已审计的 0.7.0 版本不一致，COD 已拒绝运行。'
+      : '尚未安装已审计的 COD 桌宠 0.7.0。';
+    throw new Error(message);
+  }
+  if (desktopPetIsRunning()) return { status: discovery.status, started: false, focusedExisting: false };
+  await stopDesktopPet();
+  const proxy = await startPetChatProxy({ controlPlaneUrl, ...config });
+  const installation = discovery.installation;
+  let spawned: ChildProcess;
+  try {
+    spawned = spawn(installation.executablePath, [], {
+      cwd: installation.rootPath,
+      stdio: 'ignore',
+      windowsHide: true,
+      env: desktopPetEnvironment(process.env, { url: proxy.url, secret: proxy.secret, model: config.modelId }),
+    });
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error) => { spawned.removeListener('spawn', onSpawn); reject(error); };
+      const onSpawn = () => { spawned.removeListener('error', onError); resolve(); };
+      spawned.once('error', onError);
+      spawned.once('spawn', onSpawn);
+    });
+  } catch (error) {
+    await proxy.close().catch(() => undefined);
+    throw error;
+  }
+  desktopPetProcess = spawned;
+  desktopPetProxy = proxy;
+  const clearDesktopPet = () => {
+    if (desktopPetProcess !== spawned) return;
+    desktopPetProcess = null;
+    const proxyToClose = desktopPetProxy;
+    desktopPetProxy = null;
+    if (proxyToClose) void proxyToClose.close().catch(() => undefined);
+  };
+  spawned.once('exit', clearDesktopPet);
+  spawned.once('error', clearDesktopPet);
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  const running = desktopPetProcess === spawned && spawned.exitCode === null && spawned.signalCode === null;
+  const status = { ...(await desktopPetDiscovery()).status, running };
+  return { status, started: running, focusedExisting: !running && spawned.exitCode === 0 };
+}
+
 async function resolveProjectRoot(root: string): Promise<string> {
   const resolved = await fs.realpath(root);
   const stats = await fs.stat(resolved);
@@ -456,6 +544,27 @@ ipcMain.handle('cod:stop-goose', (event) => {
   assertTrustedIpcSender(event);
   return invalidateAndStopGooseSidecar();
 });
+ipcMain.handle('cod:get-taskboard-url', (event) => {
+  assertTrustedIpcSender(event);
+  return resolveTaskboardUrl({
+    configuredUrl: process.env.COD_TASKBOARD_URL,
+    configuredRuntimeFile: process.env.COD_TASKBOARD_RUNTIME_FILE,
+    homeDirectory: app.getPath('home'),
+    platform: process.platform,
+  });
+});
+ipcMain.handle('cod:get-desktop-pet-status', async (event) => {
+  assertTrustedIpcSender(event);
+  return (await desktopPetDiscovery()).status;
+});
+ipcMain.handle('cod:launch-desktop-pet', (event, config: DesktopPetLaunchConfig) => {
+  assertTrustedIpcSender(event);
+  return launchDesktopPet(config);
+});
+ipcMain.handle('cod:stop-desktop-pet', (event) => {
+  assertTrustedIpcSender(event);
+  return stopDesktopPet();
+});
 
 ipcMain.handle('cod:run-command', async (event, root: string, rawCommand: string): Promise<TerminalResult> => {
   assertTrustedIpcSender(event);
@@ -522,21 +631,23 @@ if (hasSingleInstanceLock) {
 
   app.on('window-all-closed', () => {
     void invalidateAndStopGooseSidecar();
+    void stopDesktopPet();
     if (process.platform !== 'darwin') app.quit();
   });
 
-  app.on('before-quit', () => { void invalidateAndStopGooseSidecar(); });
-  process.once('exit', () => { forceTerminateChildProcess(gooseSidecar); });
+  app.on('before-quit', () => { void invalidateAndStopGooseSidecar(); void stopDesktopPet(); });
+  process.once('exit', () => { forceTerminateChildProcess(gooseSidecar); forceTerminateChildProcess(desktopPetProcess); });
 
   let stoppingForSignal = false;
   for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
     process.once(signal, () => {
       if (stoppingForSignal) {
         forceTerminateChildProcess(gooseSidecar);
+        forceTerminateChildProcess(desktopPetProcess);
         process.exit(1);
       }
       stoppingForSignal = true;
-      void invalidateAndStopGooseSidecar().finally(() => { process.kill(process.pid, signal); });
+      void Promise.all([invalidateAndStopGooseSidecar(), stopDesktopPet()]).finally(() => { process.kill(process.pid, signal); });
     });
   }
 }

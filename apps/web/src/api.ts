@@ -109,6 +109,7 @@ export interface CreditPackDefinition {
   name: string;
   priceCents: number;
   creditCents: number;
+  cardHoursMilli?: number;
   bonusPercent: number;
   validityDays: 180;
 }
@@ -119,6 +120,8 @@ export interface CreditGrant {
   name: string;
   originalCents: number;
   remainingCents: number;
+  originalCardHoursMilli?: number;
+  remainingCardHoursMilli?: number;
   purchasedAt: string;
   expiresAt: string;
   status: 'active' | 'depleted' | 'expired';
@@ -132,7 +135,7 @@ export interface ReferralSummary {
   settledCommissionCents: number;
 }
 
-export interface CreditPackState { packs: CreditPackDefinition[]; summary: { availableCents: number; grants: CreditGrant[] } }
+export interface CreditPackState { packs: CreditPackDefinition[]; summary: { availableCents: number; availableCardHoursMilli?: number; grants: CreditGrant[] } }
 
 export interface PaymentOrder {
   id: string;
@@ -152,21 +155,29 @@ export interface ComputeOffer {
   id: string; title: string; gpuModel: string; gpuMemoryGb: number; gpuCount: number; region: string; provider: string;
   priceCents: number | null; priceUnit: 'card-hour' | 'server-hour' | 'month' | 'quote'; minimumUnits: number;
   delivery: string; network: string; availability: 'ready' | 'limited' | 'quote'; verified: boolean; tags: string[];
+  inventoryCards?: number | null;
+  specs?: { cpuModel: string; cpuCores: number; memoryGb: number; systemDiskGb: number; dataDiskGb: number; expandableDataDiskGb: number; driverVersion: string; cudaMaxVersion: string };
+  images?: Array<{ id: string; name: string; frameworkVersion: string; pythonVersion: string; cudaVersion: string }>;
+  supportedPeriods?: Array<'hour' | 'day' | 'month'>;
+  fulfillmentMode?: 'manual-confirmation' | 'third-party-manual-match';
 }
 
 export interface ComputeRequestInput {
-  kind: 'rental' | 'supply' | 'hosting' | 'installment'; offerId?: string | null; company: string; contactName: string; contactPhone: string;
+  kind: 'rental' | 'supply' | 'hosting' | 'installment'; offerId?: string | null; imageId?: string | null; company: string; contactName: string; contactPhone: string;
   city: string; gpuModel: string; quantity: number; durationHours?: number | null; termMonths?: number | null; requirements: string;
   hostingPeriodMonths?: number | null; rackUnits?: number | null; powerKilowatts?: number | null; networkMbps?: number | null;
   availabilityNotes?: string | null; settlementPreference?: string | null; hostingRequirements?: string | null;
 }
 
 export interface ComputeRequest extends ComputeRequestInput {
-  id: string; email: string; offerId: string | null; durationHours: number | null; termMonths: number | null;
+  id: string; email: string; offerId: string | null; imageId: string | null; durationHours: number | null; termMonths: number | null;
   hostingPeriodMonths: number | null; rackUnits: number | null; powerKilowatts: number | null; networkMbps: number | null;
   availabilityNotes: string | null; settlementPreference: string | null; hostingRequirements: string | null;
   fulfillmentMode: 'manual-confirmation' | 'third-party-manual-match';
-  status: 'submitted' | 'contacting' | 'quoted' | 'closed'; createdAt: string; updatedAt: string;
+  quote: { amountCents: number; currency: 'CNY'; cardHoursMilli: number | null; validUntil: string; terms: string; createdAt: string } | null;
+  quoteDecision: 'accepted' | 'declined' | null;
+  quoteDecisionAt: string | null;
+  status: 'submitted' | 'contacting' | 'quoted' | 'approved' | 'deploying' | 'running' | 'action_required' | 'completed' | 'closed'; createdAt: string; updatedAt: string;
 }
 
 export interface AdminComputeRequestFilters {
@@ -835,6 +846,18 @@ export async function updateAdminComputeRequestStatus(token: string, requestId: 
   return request(`/api/admin/compute/requests/${encodeURIComponent(requestId)}/status`, token, {
     method: 'PATCH',
     body: JSON.stringify({ status, expectedStatus }),
+  });
+}
+
+export async function quoteAdminComputeRequest(token: string, requestId: string, quote: { amountCents: number; cardHoursMilli: number | null; validUntil: string; terms: string }, expectedStatus: ComputeRequest['status']): Promise<ComputeRequest> {
+  return request(`/api/admin/compute/requests/${encodeURIComponent(requestId)}/quote`, token, {
+    method: 'PUT', body: JSON.stringify({ quote, expectedStatus }),
+  });
+}
+
+export async function decideComputeRequestQuote(token: string, requestId: string, decision: 'accepted' | 'declined', expectedStatus: ComputeRequest['status'] = 'quoted'): Promise<ComputeRequest> {
+  return request(`/api/compute/requests/${encodeURIComponent(requestId)}/quote-decision`, token, {
+    method: 'PATCH', body: JSON.stringify({ decision, expectedStatus }),
   });
 }
 

@@ -270,6 +270,24 @@ describe('compute request administration database contract',()=>{
     }
   });
 
+  it('tracks an accepted compute request through deployment, service, attention, and completion', async () => {
+    const database = new MemoryDatabase();
+    const request = (await database.createComputeRequest(other, input, 'compute-lifecycle')).request;
+    const advance = async (status: Parameters<typeof database.updateAdminComputeRequestStatus>[2], expectedStatus: Parameters<typeof database.updateAdminComputeRequestStatus>[3]) =>
+      database.updateAdminComputeRequestStatus(admin, request.id, status, expectedStatus);
+    await advance('contacting', 'submitted');
+    await database.quoteAdminComputeRequest(admin,request.id,{amountCents:120000,cardHoursMilli:null,validUntil:new Date(Date.now()+86400000).toISOString(),terms:'双方签署书面托管合同后生效'},'contacting');
+    await expect(database.decideComputeRequestQuote(principal,request.id,'accepted','quoted')).rejects.toMatchObject({status:404,code:'compute_request_not_found'});
+    await database.decideComputeRequestQuote(other,request.id,'accepted','quoted');
+    await advance('deploying', 'approved');
+    await advance('action_required', 'deploying');
+    await advance('deploying', 'action_required');
+    await advance('running', 'deploying');
+    await advance('completed', 'running');
+    expect(await database.getAdminComputeRequest(admin, request.id)).toMatchObject({ status: 'completed' });
+    await expect(advance('running', 'completed')).rejects.toMatchObject({ status: 409, code: 'invalid_compute_request_transition' });
+  });
+
   it('keeps the in-memory admin view global, paginated, searchable, role-gated, and transition-safe',async()=>{
     const database=new MemoryDatabase();
     const first=(await database.createComputeRequest(principal,input,'compute-admin-first')).request;

@@ -1,6 +1,8 @@
 import { createHmac, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
-import { isIP } from 'node:net';
+import { request as httpRequest, type RequestOptions } from 'node:http';
+import { request as httpsRequest } from 'node:https';
+import { isIP, type LookupFunction } from 'node:net';
 import type { RegistrationVerificationConfig, RegistrationWebhookConfig } from './config.js';
 import { HttpError } from './errors.js';
 
@@ -18,7 +20,24 @@ export interface RegistrationDelivery {
   sendSmsCode(message: RegistrationDeliveryMessage): Promise<void>;
 }
 
-export type RegistrationEndpointValidator=(url:string,allowedHostnames:string[],label:string)=>Promise<void>;
+// Validates an outbound registration endpoint URL and returns the single
+// pinned public IP address that must be used for the subsequent connection.
+// Resolving once and pinning the address closes the DNS-rebinding TOCTOU that
+// would otherwise let a hostname resolve to a public address during validation
+// and to a private address at connect time.
+export type RegistrationEndpointValidator = (url: string, allowedHostnames: string[], label: string) => Promise<string>;
+
+export interface PinnedFetchRequest {
+  method: string;
+  headers: Record<string, string>;
+  body: string;
+  signal?: AbortSignal;
+}
+
+// Connects to the supplied URL using the pinned IP address for the underlying
+// socket while keeping TLS SNI/Host and certificate validation bound to the
+// URL hostname. Redirects are rejected (the prior fetch used redirect:'error').
+export type PinnedFetcher = (url: string, pinnedAddress: string, init: PinnedFetchRequest) => Promise<Response>;
 
 export const REGISTRATION_OTP_DIGITS = 6;
 
@@ -42,13 +61,47 @@ export function isPrivateRegistrationAddress(value:string):boolean{
   return normalized==='::'||normalized==='::1'||normalized.startsWith('fc')||normalized.startsWith('fd')||/^fe[89ab]/.test(normalized)||normalized.startsWith('ff')||normalized.startsWith('fec')||normalized.startsWith('fed')||normalized.startsWith('fee')||normalized.startsWith('fef')||normalized.startsWith('2001:db8');
 }
 
-async function assertSafeRegistrationEndpoint(rawUrl:string,allowedHostnames:string[],label:string):Promise<void>{
+async function assertSafeRegistrationEndpoint(rawUrl:string,allowedHostnames:string[],label:string):Promise<string>{
   let url:URL;try{url=new URL(rawUrl);}catch{throw new Error(`${label} URL is invalid`);}
   const hostname=normalizedHostname(url.hostname.replace(/^\[|\]$/g,''));
   if(url.protocol!=='https:'||url.username||url.password||(url.port&&url.port!=='443')||!allowedHostnames.includes(hostname)||isIP(hostname))throw new Error(`${label} endpoint is not allowed`);
   const addresses=await lookup(hostname,{all:true,verbatim:true});
   if(addresses.length===0||addresses.some(({address})=>isPrivateRegistrationAddress(address)))throw new Error(`${label} endpoint resolved to a private address`);
+  const pinned=addresses.find(({address})=>!isPrivateRegistrationAddress(address));
+  if(!pinned)throw new Error(`${label} endpoint resolved to a private address`);
+  return pinned.address;
 }
+
+// Builds a dns.lookup-compatible callback that always returns the pinned
+// address, so the TCP connection target is fixed regardless of live DNS.
+export function pinnedLookup(pinnedAddress:string):LookupFunction{
+  const family=isIP(pinnedAddress)===6?6:4;
+  return ((_hostname:string,_options:unknown,callback:(err:NodeJS.ErrnoException|null,address:string|Array<unknown>,family?:number)=>void):void=>{
+    callback(null,pinnedAddress,family);
+  }) as unknown as LookupFunction;
+}
+
+export const defaultPinnedFetcher:PinnedFetcher=(url,pinnedAddress,init)=>new Promise((resolve,reject)=>{
+  let parsed:URL;try{parsed=new URL(url);}catch{reject(new Error('invalid pinned URL'));return;}
+  const isTls=parsed.protocol==='https:';
+  if(!isTls){reject(new Error('pinned outbound must use HTTPS'));return;}
+  const options:RequestOptions={method:init.method,headers:init.headers,hostname:parsed.hostname,port:parsed.port||443,path:`${parsed.pathname||''}${parsed.search||''}`,lookup:pinnedLookup(pinnedAddress)};
+  if(init.signal)options.signal=init.signal;
+  const req=httpsRequest(options,(res)=>{
+    if(res.statusCode&&res.statusCode>=300&&res.statusCode<400){res.resume();reject(new Error('redirect not allowed'));return;}
+    const chunks:Buffer[]=[];
+    res.on('data',(chunk:Buffer)=>chunks.push(chunk));
+    res.on('end',()=>{
+      const body=Buffer.concat(chunks);
+      const headers:Record<string,string>={};
+      for(const[key,value]of Object.entries(res.headers))if(value!=null)headers[key]=Array.isArray(value)?value.join(', '):String(value);
+      resolve(new Response(body,{status:res.statusCode??200,headers}));
+    });
+  });
+  req.on('error',reject);
+  if(init.body)req.write(init.body);
+  req.end();
+});
 
 function decodeHmacKey(value: string): Buffer {
   if(value.startsWith('base64url:'))return Buffer.from(value.slice('base64url:'.length),'base64url');
@@ -104,7 +157,7 @@ export class RegistrationVerification {
   constructor(
     readonly config: RegistrationVerificationConfig,
     private readonly delivery: RegistrationDelivery | null,
-    private readonly fetcher: typeof fetch = fetch,
+    private readonly pinnedFetcher: PinnedFetcher = defaultPinnedFetcher,
     private readonly endpointValidator:RegistrationEndpointValidator=assertSafeRegistrationEndpoint,
   ) {
     this.key = config.hmacKey ? decodeHmacKey(config.hmacKey) : null;
@@ -153,13 +206,12 @@ export class RegistrationVerification {
     });
     if (remoteIp) form.set('remoteip', remoteIp);
     try {
-      await this.endpointValidator(this.config.turnstileVerifyUrl,['challenges.cloudflare.com'],'Turnstile');
-      const response = await this.fetcher(this.config.turnstileVerifyUrl, {
+      const pinnedAddress=await this.endpointValidator(this.config.turnstileVerifyUrl,['challenges.cloudflare.com'],'Turnstile');
+      const response = await this.pinnedFetcher(this.config.turnstileVerifyUrl, pinnedAddress, {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body: form.toString(),
         signal: AbortSignal.timeout(8_000),
-        redirect: 'error',
       });
       if (!response.ok) throw new Error('verification provider unavailable');
       const result = await response.json() as { success?: unknown;hostname?:unknown;action?:unknown };
@@ -186,7 +238,7 @@ class WebhookRegistrationDelivery implements RegistrationDelivery {
   constructor(
     private readonly email: RegistrationWebhookConfig,
     private readonly sms: RegistrationWebhookConfig,
-    private readonly fetcher: typeof fetch,
+    private readonly pinnedFetcher: PinnedFetcher,
     private readonly allowedHostnames: string[],
     private readonly endpointValidator:RegistrationEndpointValidator,
   ) {}
@@ -195,18 +247,17 @@ class WebhookRegistrationDelivery implements RegistrationDelivery {
   sendSmsCode(message: RegistrationDeliveryMessage): Promise<void> { return this.send(this.sms, 'sms', message); }
 
   private async send(config: RegistrationWebhookConfig, channel: 'email' | 'sms', message: RegistrationDeliveryMessage): Promise<void> {
-    await this.endpointValidator(config.url,this.allowedHostnames,'Registration webhook');
-    const response = await this.fetcher(config.url, {
+    const pinnedAddress=await this.endpointValidator(config.url,this.allowedHostnames,'Registration webhook');
+    const response = await this.pinnedFetcher(config.url, pinnedAddress, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${config.bearerToken}` },
       body: JSON.stringify({ type: 'cod.registration.otp', channel, ...message }),
       signal: AbortSignal.timeout(8_000),
-      redirect: 'error',
     });
     if (!response.ok) throw new Error('registration delivery rejected');
   }
 }
 
-export function registrationDeliveryFromConfig(config: RegistrationVerificationConfig, fetcher: typeof fetch = fetch,endpointValidator:RegistrationEndpointValidator=assertSafeRegistrationEndpoint): RegistrationDelivery | null {
-  return config.emailWebhook && config.smsWebhook ? new WebhookRegistrationDelivery(config.emailWebhook, config.smsWebhook, fetcher,config.outboundAllowedHostnames,endpointValidator) : null;
+export function registrationDeliveryFromConfig(config: RegistrationVerificationConfig, pinnedFetcher: PinnedFetcher = defaultPinnedFetcher,endpointValidator:RegistrationEndpointValidator=assertSafeRegistrationEndpoint): RegistrationDelivery | null {
+  return config.emailWebhook && config.smsWebhook ? new WebhookRegistrationDelivery(config.emailWebhook, config.smsWebhook, pinnedFetcher,config.outboundAllowedHostnames,endpointValidator) : null;
 }

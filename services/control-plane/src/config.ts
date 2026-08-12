@@ -169,6 +169,7 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
   const databaseUrl = environment.DATABASE_URL ?? null;
   const pilotAccessCodeHash = environment.COD_PILOT_ACCESS_CODE_HASH ?? null;
   const registrationEnabled = environment.COD_REGISTRATION_ENABLED === undefined ? !production : environment.COD_REGISTRATION_ENABLED === 'true';
+  const allowedEmailDomains = (environment.COD_ALLOWED_EMAIL_DOMAINS ?? 'kai.com').split(',').map((value) => value.trim().toLowerCase()).filter(Boolean);
   const allowedOrigins = (environment.COD_ALLOWED_ORIGINS ?? (production
     ? 'https://cod.kai.com,https://localhost,capacitor://localhost,null'
     : 'http://127.0.0.1:5173,http://localhost:5173,null')).split(',').map((value) => value.trim()).filter(Boolean);
@@ -275,6 +276,8 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     if (!databaseUrl) throw new Error('Production requires DATABASE_URL');
     if (developmentLoginEnabled && !pilotAccessCodeHash) throw new Error('Production pilot login requires COD_PILOT_ACCESS_CODE_HASH');
     if (!demoMode && !environment.KAI_API_KEY) throw new Error('Live production mode requires KAI_API_KEY');
+    // An empty COD_ALLOWED_EMAIL_DOMAINS must never silently become "allow all".
+    if (allowedEmailDomains.length === 0) throw new Error('Production requires at least one COD_ALLOWED_EMAIL_DOMAINS entry');
     if (paymentWebhookSecret && Buffer.byteLength(paymentWebhookSecret, 'utf8') < 32) {
       throw new Error('COD_PAYMENT_WEBHOOK_SECRET must contain at least 32 bytes');
     }
@@ -355,7 +358,7 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     port: Number(environment.COD_CONTROL_PORT ?? 8787),
     sessionSecret,
     databaseUrl,
-    allowedEmailDomains: (environment.COD_ALLOWED_EMAIL_DOMAINS ?? 'kai.com').split(',').map((value) => value.trim().toLowerCase()).filter(Boolean),
+    allowedEmailDomains,
     allowedOrigins,
     registrationEnabled,
     registrationVerification,

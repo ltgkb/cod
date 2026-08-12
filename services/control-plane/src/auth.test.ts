@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AGENT_SESSION_TTL_MS, createAgentSessionToken, createSessionToken, verifyAgentSessionToken, verifySessionToken } from './auth.js';
+import { AGENT_SESSION_TTL_MS, createAgentSessionToken, createSessionToken, hashPassword, validatePassword, verifyAgentSessionToken, verifyPassword, verifySessionToken } from './auth.js';
 
 const principal = { sub: 'usr_test', tenantId: 'tenant_test', email: 'user@kai.com', role: 'member' as const };
 const scope = { taskId: '11111111-1111-4111-8111-111111111111', executionId: '22222222-2222-4222-8222-222222222222', sourceId: 'ai-kai', model: 'glm-5.2' };
@@ -23,5 +23,18 @@ describe('scoped agent sessions', () => {
     const token = createAgentSessionToken(principal, scope, secret);
     expect(verifyAgentSessionToken(`${token}x`, secret)).toBeNull();
     expect(verifyAgentSessionToken(token, `${secret}x`)).toBeNull();
+  });
+});
+
+describe('password policy', () => {
+  it('accepts six or more characters when letters and digits are both present', async () => {
+    expect(validatePassword('abc123')).toBe('abc123');
+    expect(validatePassword('密码12ab')).toBe('密码12ab');
+    const encoded = await hashPassword('abc123');
+    expect(await verifyPassword('abc123', encoded)).toBe(true);
+  });
+
+  it.each(['abc12', 'abcdef', '123456', 'a'.repeat(129)])('rejects an invalid password: %s', (password) => {
+    expect(() => validatePassword(password)).toThrow('密码须为 6-128 位，并同时包含字母和数字');
   });
 });
