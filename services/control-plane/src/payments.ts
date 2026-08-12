@@ -28,8 +28,32 @@ interface WechatTransaction {
 
 const paymentDescription = 'COD 钱包充值';
 const merchantRequestTimeoutMs = 15_000;
+const merchantResponseMaximumBytes = 128 * 1024;
 const timestampSeconds = () => Math.floor(Date.now() / 1000);
 const pem = (path: string) => readFileSync(path, 'utf8');
+
+async function readMerchantResponse(response: Response): Promise<string> {
+  const advertisedLength = Number(response.headers.get('content-length') ?? 0);
+  if (Number.isFinite(advertisedLength) && advertisedLength > merchantResponseMaximumBytes) throw new HttpError('支付渠道响应过大', 502, 'payment_response_too_large');
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > merchantResponseMaximumBytes) {
+      await reader.cancel();
+      throw new HttpError('支付渠道响应过大', 502, 'payment_response_too_large');
+    }
+    chunks.push(value);
+  }
+  const body = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
+  return new TextDecoder().decode(body);
+}
 
 function rsaSign(content: string, privateKeyPath: string): string {
   const signer = createSign('RSA-SHA256');
@@ -90,12 +114,12 @@ export class OfficialPaymentService {
     } catch {
       throw new HttpError('微信支付下单超时，请稍后重试', 502, 'wechat_payment_timeout');
     }
-    const rawResponse = await response.text();
+    const rawResponse = await readMerchantResponse(response);
     const responseTimestamp = response.headers.get('wechatpay-timestamp') ?? '';
     const responseNonce = response.headers.get('wechatpay-nonce') ?? '';
     const responseSignature = response.headers.get('wechatpay-signature') ?? '';
     const responseSerial = response.headers.get('wechatpay-serial') ?? '';
-    if (!responseTimestamp || !responseNonce || !responseSignature || responseSerial !== config.platformSerialNo || !rsaVerify(`${responseTimestamp}\n${responseNonce}\n${rawResponse}\n`, responseSignature, config.platformPublicKeyPath)) throw new HttpError('微信支付响应签名无效', 502, 'invalid_wechat_response');
+    if (!/^\d{10}$/.test(responseTimestamp) || Math.abs(timestampSeconds() - Number(responseTimestamp)) > 300 || !responseNonce || !responseSignature || responseSerial !== config.platformSerialNo || !rsaVerify(`${responseTimestamp}\n${responseNonce}\n${rawResponse}\n`, responseSignature, config.platformPublicKeyPath)) throw new HttpError('微信支付响应签名无效', 502, 'invalid_wechat_response');
     let result: { code_url?: string; code?: string; message?: string };
     try { result = JSON.parse(rawResponse) as typeof result; } catch { result = {}; }
     if (!response.ok || !result.code_url) throw new HttpError(result.message ?? '微信支付下单失败', 502, 'wechat_payment_failed');

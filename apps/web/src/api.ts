@@ -177,30 +177,27 @@ export interface AdminComputeRequestFilters {
 }
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number, readonly code: string, readonly retryAfterMs: number | null = null) {
+  constructor(message: string, readonly status: number, readonly code: string, readonly retryAfterMs: number | null = null, readonly sessionCredentialCleared = false) {
     super(message);
   }
 }
 
 const maximumTaskClaimRetryDelayMs = 5_000;
 const fatalTaskLeaseCodes = new Set(['task_lease_expired', 'task_lease_required', 'invalid_task_lease']);
-const taskExecutionLeases = new Map<string, TaskExecutionLease>();
+const maximumStoredSessionTokenLength = 8_192;
+const mobileLogoutPendingStorageKey = 'cod.session.logout-pending';
+const sessionInvalidatedListeners = new Set<(expectedToken: string) => void>();
+let sessionPersistenceQueue: Promise<void> = Promise.resolve();
 
-interface PendingTaskExecutionClaim {
-  claimId: string;
-  leaseToken: string;
-  expectedVersion: number;
+function retryAfterMs(response: Response): number | null {
+  const value=response.headers.get('retry-after')?.trim();
+  if(!value)return null;
+  if(/^\d+$/.test(value))return Number(value)*1_000;
+  const date=Date.parse(value);
+  return Number.isFinite(date)?Math.max(0,date-Date.now()):null;
 }
 
-const pendingTaskExecutionClaims = new Map<string, PendingTaskExecutionClaim>();
-
-function responseRetryAfterMs(response: Response): number | null {
-  const value = response.headers.get('retry-after')?.trim();
-  if (!value) return null;
-  if (/^\d+$/.test(value)) return Number(value) * 1_000;
-  const date = Date.parse(value);
-  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : null;
-}
+function wait(milliseconds:number):Promise<void>{return milliseconds>0?new Promise((resolve)=>setTimeout(resolve,milliseconds)):Promise.resolve();}
 
 function localizedApiErrorMessage(code: string, fallback: string): string {
   if (code === 'invalid_task_claim') return '任务启动凭据无效，请刷新任务后重新执行。';
@@ -218,31 +215,30 @@ function localizedApiErrorMessage(code: string, fallback: string): string {
   return fallback;
 }
 
-function apiError(body: ApiErrorBody, status: number, retryAfterMs: number | null = null): ApiError {
-  const code = body.error ?? 'request_failed';
-  const fallback = body.message ?? `Control plane request failed: ${status}`;
-  return new ApiError(localizedApiErrorMessage(code, fallback), status, code, retryAfterMs);
+export function createClientId(): string {
+  if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
+  if (typeof globalThis.crypto?.getRandomValues === 'function') {
+    const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+    return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
-function wait(milliseconds: number): Promise<void> {
-  return milliseconds > 0 ? new Promise((resolve) => globalThis.setTimeout(resolve, milliseconds)) : Promise.resolve();
-}
+const taskExecutionLeases = new Map<string, TaskExecutionLease>();
+interface PendingTaskExecutionClaim { claimId: string; leaseToken: string; expectedVersion: number }
+const pendingTaskExecutionClaims = new Map<string, PendingTaskExecutionClaim>();
 
 function createSecureTaskToken(): string {
-  if (typeof globalThis.crypto?.getRandomValues !== 'function') {
-    throw new ApiError('当前环境无法安全启动任务，请升级客户端后重试。', 500, 'secure_random_unavailable');
-  }
-  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(32));
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
-  let encoded = '';
-  for (let index = 0; index < bytes.length; index += 3) {
-    const first = bytes[index];
-    const second = bytes[index + 1];
-    const third = bytes[index + 2];
-    encoded += alphabet[first >> 2];
-    encoded += alphabet[((first & 3) << 4) | ((second ?? 0) >> 4)];
-    if (second !== undefined) encoded += alphabet[((second & 15) << 2) | ((third ?? 0) >> 6)];
-    if (third !== undefined) encoded += alphabet[third & 63];
+  if (typeof globalThis.crypto?.getRandomValues !== 'function') throw new ApiError('当前环境无法安全启动任务，请升级客户端后重试。', 500, 'secure_random_unavailable');
+  const bytes=globalThis.crypto.getRandomValues(new Uint8Array(32));
+  const alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  let encoded='';
+  for(let index=0;index<bytes.length;index+=3){
+    const first=bytes[index];const second=bytes[index+1];const third=bytes[index+2];
+    encoded+=alphabet[first>>2];
+    encoded+=alphabet[((first&3)<<4)|((second??0)>>4)];
+    if(second!==undefined)encoded+=alphabet[((second&15)<<2)|((third??0)>>6)];
+    if(third!==undefined)encoded+=alphabet[third&63];
   }
   return encoded;
 }
@@ -263,15 +259,6 @@ export function getTaskExecutionLease(taskId: string): TaskExecutionLease | null
   return taskExecutionLeases.get(taskId) ?? null;
 }
 
-export function createClientId(): string {
-  if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
-  if (typeof globalThis.crypto?.getRandomValues === 'function') {
-    const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
-    return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
-  }
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-}
-
 function storageGet(key: string): string | null {
   try { return window.localStorage.getItem(key); } catch { return null; }
 }
@@ -283,6 +270,263 @@ function storageSet(key: string, value: string | null): void {
   } catch {
     // Private browser contexts may disable storage; the current session still works.
   }
+}
+
+function validStoredSessionToken(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= maximumStoredSessionTokenLength && !/[\0-\x20\x7f]/.test(value);
+}
+
+function logoutRecoveryUnavailable(sessionCredentialCleared = false): ApiError {
+  return new ApiError('安全凭据或本机数据未能清除，且无法记录自动重试。请在系统设置中清除 COD 应用数据后再使用。', 503, 'logout_recovery_unavailable', null, sessionCredentialCleared);
+}
+
+function afterCredentialCleared(error: unknown): ApiError {
+  if (error instanceof ApiError) return new ApiError(error.message, error.status, error.code, error.retryAfterMs, true);
+  return new ApiError('登录凭据已进入安全退出状态，但本机清理尚未完成。应用会保持退出并自动重试。', 503, 'logout_not_completed', null, true);
+}
+
+function removeMobilePlaintextSessionToken(): void {
+  try {
+    window.localStorage.removeItem(sessionStorageKey);
+    if (window.localStorage.getItem(sessionStorageKey) !== null) throw new Error('Session removal was not persisted');
+  } catch {
+    throw new ApiError('无法清除移动端旧登录凭据，请清理应用数据后重新登录。', 503, 'plaintext_session_cleanup_failed');
+  }
+}
+
+function setMobileLogoutPending(pending: boolean): void {
+  try {
+    if (pending) window.localStorage.setItem(mobileLogoutPendingStorageKey, '1');
+    else window.localStorage.removeItem(mobileLogoutPendingStorageKey);
+    const stored = window.localStorage.getItem(mobileLogoutPendingStorageKey);
+    if (pending ? stored !== '1' : stored !== null) throw new Error('Logout marker was not persisted');
+  } catch {
+    throw new ApiError('无法记录本机退出状态，请保持应用打开并重试。', 503, 'logout_marker_unavailable');
+  }
+}
+
+function readMobileLogoutPending(): boolean {
+  try { return window.localStorage.getItem(mobileLogoutPendingStorageKey) !== null; }
+  catch { throw new ApiError('无法读取本机退出状态；为保护账号，本次不会恢复登录。', 503, 'logout_marker_unavailable'); }
+}
+
+function clearLocalStoragePrefix(prefix: string): void {
+  try {
+    const keys: string[] = [];
+    for (let index = 0; index < window.localStorage.length; index += 1) {
+      const key = window.localStorage.key(index);
+      if (key?.startsWith(prefix)) keys.push(key);
+    }
+    for (const key of keys) window.localStorage.removeItem(key);
+    if (keys.some((key) => window.localStorage.getItem(key) !== null)) throw new Error('Local history removal was not persisted');
+  } catch {
+    throw new ApiError('无法清除移动端本机聊天记录，请清理应用数据后再使用。', 503, 'chat_history_cleanup_failed');
+  }
+}
+
+function removeWebSessionToken(expectedToken?: string): boolean {
+  try {
+    const current = window.localStorage.getItem(sessionStorageKey);
+    if (expectedToken !== undefined && current !== null && current !== expectedToken) return false;
+    window.localStorage.removeItem(sessionStorageKey);
+    if (window.localStorage.getItem(sessionStorageKey) !== null) throw new Error('Session removal was not persisted');
+    return true;
+  } catch {
+    throw new ApiError('本机登录凭据未能删除，请检查浏览器存储权限后重试。', 503, 'session_cleanup_failed');
+  }
+}
+
+function serializedSessionPersistence<T>(operation: () => Promise<T>): Promise<T> {
+  const result=sessionPersistenceQueue.then(operation,operation);
+  sessionPersistenceQueue=result.then(()=>undefined,()=>undefined);
+  return result;
+}
+
+function mobileSessionRuntime() {
+  const runtime = getCodRuntime();
+  if (!runtime.hostPlatform) return null;
+  if (!runtime.loadSessionCleanupPending || !runtime.loadSessionToken || !runtime.saveSessionToken || !runtime.clearSessionToken) {
+    throw new ApiError('移动端安全存储桥不可用，请重启应用后重新登录。', 503, 'secure_session_storage_unavailable');
+  }
+  return runtime as Required<Pick<typeof runtime, 'loadSessionCleanupPending' | 'loadSessionToken' | 'saveSessionToken' | 'clearSessionToken'>> & typeof runtime;
+}
+
+type MobileSessionRuntime = NonNullable<ReturnType<typeof mobileSessionRuntime>>;
+
+async function clearMobileSession(
+  runtime: MobileSessionRuntime,
+  expectedToken: string | undefined,
+  clearHistory: boolean,
+  writeAheadMarker = true,
+): Promise<boolean> {
+  let markerWritten = false;
+  let plaintextAlreadyRemoved = false;
+  if(writeAheadMarker){
+    try { setMobileLogoutPending(true); markerWritten = true; }
+    catch {
+      try { removeMobilePlaintextSessionToken(); plaintextAlreadyRemoved = true; }
+      catch { /* The native tombstone can still make logout durable. */ }
+      try { setMobileLogoutPending(true); markerWritten = true; }
+      catch { /* Continue so SecureStore still gets a chance to persist logout. */ }
+    }
+  }
+
+  let cleared: boolean;
+  try { cleared = await runtime.clearSessionToken(expectedToken); }
+  catch (secureStoreError) {
+    if(!writeAheadMarker)throw secureStoreError;
+    if (!markerWritten) {
+      if (!plaintextAlreadyRemoved) {
+        try { removeMobilePlaintextSessionToken(); plaintextAlreadyRemoved = true; }
+        catch { /* Report the unrecoverable combination below. */ }
+      }
+      try { setMobileLogoutPending(true); markerWritten = true; }
+      catch { /* Report the unrecoverable combination below. */ }
+    }
+    if (!markerWritten) throw logoutRecoveryUnavailable();
+    throw secureStoreError;
+  }
+
+  if (!cleared) {
+    if (markerWritten) setMobileLogoutPending(false);
+    return false;
+  }
+
+  let plaintextError: unknown = null;
+  if (!plaintextAlreadyRemoved) {
+    try { removeMobilePlaintextSessionToken(); }
+    catch (error) { plaintextError = error; }
+  }
+  let historyError: unknown = null;
+  if (clearHistory) {
+    try { clearLocalStoragePrefix('cod.messages.'); }
+    catch (error) { historyError = error; }
+  }
+  const localCleanupError = plaintextError ?? historyError;
+  if (localCleanupError) {
+    try { setMobileLogoutPending(true); } catch { /* The SecureStore tombstone is authoritative. */ }
+    throw afterCredentialCleared(localCleanupError);
+  }
+  try { setMobileLogoutPending(false); }
+  catch (error) { throw afterCredentialCleared(error); }
+  return true;
+}
+
+function markMobileCleanupPendingWithoutBridge(clearHistory: boolean): never {
+  let markerWritten = false;
+  try { setMobileLogoutPending(true); }
+  catch { /* Removing a plaintext token may release enough quota to retry. */ }
+  try { markerWritten = readMobileLogoutPending(); } catch { markerWritten = false; }
+  let cleanupError: unknown = null;
+  try { removeMobilePlaintextSessionToken(); }
+  catch (error) { cleanupError = error; }
+  if (!markerWritten) {
+    try { setMobileLogoutPending(true); markerWritten = true; }
+    catch { /* Report the unrecoverable combination below. */ }
+  }
+  if (clearHistory && markerWritten) {
+    try { clearLocalStoragePrefix('cod.messages.'); }
+    catch (error) { cleanupError ??= error; }
+  }
+  if (!markerWritten || cleanupError) throw logoutRecoveryUnavailable();
+  throw new ApiError('移动端安全存储桥不可用；应用会保持退出并在桥恢复后继续清理。', 503, 'secure_session_storage_unavailable');
+}
+
+async function loadPersistedSessionToken(): Promise<string | null> {
+  return serializedSessionPersistence(async()=>{
+    const legacyToken = storageGet(sessionStorageKey);
+    let runtime: MobileSessionRuntime | null;
+    try { runtime = mobileSessionRuntime(); }
+    catch { return markMobileCleanupPendingWithoutBridge(true); }
+    if (!runtime) return validStoredSessionToken(legacyToken) ? legacyToken : null;
+    let logoutPending: boolean;
+    try { logoutPending=readMobileLogoutPending(); }
+    catch (error) {
+      let secureLogoutRecorded=false;
+      try { secureLogoutRecorded=await runtime.clearSessionToken(); } catch { /* Retry through the local marker below. */ }
+      try { removeMobilePlaintextSessionToken(); } catch { /* The native tombstone remains authoritative if it was written. */ }
+      let markerRecorded=false;
+      try { setMobileLogoutPending(true); markerRecorded=true; } catch { /* The marker storage may still be unavailable. */ }
+      try { clearLocalStoragePrefix('cod.messages.'); } catch { /* Keep the original fail-closed marker error. */ }
+      if(!secureLogoutRecorded&&!markerRecorded)throw logoutRecoveryUnavailable();
+      throw error;
+    }
+    let secureLogoutPending: boolean;
+    try { secureLogoutPending=await runtime.loadSessionCleanupPending(); }
+    catch {
+      try { await clearMobileSession(runtime,undefined,true); }
+      catch (cleanupError) { if(cleanupError instanceof ApiError)throw cleanupError; }
+      throw new ApiError('移动端安全存储暂不可用；应用会保持退出并继续重试。',503,'secure_session_storage_unavailable');
+    }
+    if(logoutPending||secureLogoutPending){
+      try {
+        if(!await clearMobileSession(runtime,undefined,true))throw new Error('Pending logout could not clear the secure session');
+        return null;
+      } catch(error) {
+        if(error instanceof ApiError)throw error;
+        throw new ApiError('移动端安全存储暂不可用；应用会保持退出并继续重试。',503,'secure_session_storage_unavailable');
+      }
+    }
+    try {
+      const secureToken = await runtime.loadSessionToken();
+      if (secureToken !== null) {
+        if (!validStoredSessionToken(secureToken)) {
+          await runtime.clearSessionToken().catch(() => false);
+          removeMobilePlaintextSessionToken();
+          throw new ApiError('移动端登录凭据无效，请重新登录。', 401, 'invalid_stored_session');
+        }
+        removeMobilePlaintextSessionToken();
+        return secureToken;
+      }
+      if (!legacyToken) { removeMobilePlaintextSessionToken(); return null; }
+      if (!validStoredSessionToken(legacyToken)) {
+        removeMobilePlaintextSessionToken();
+        return null;
+      }
+      await runtime.saveSessionToken(legacyToken);
+      if (await runtime.loadSessionToken() !== legacyToken) throw new Error('Secure session verification failed');
+      removeMobilePlaintextSessionToken();
+      return legacyToken;
+    } catch (error) {
+      try {
+        if(!await clearMobileSession(runtime,undefined,false))throw logoutRecoveryUnavailable();
+      }
+      catch (cleanupError) {
+        if (cleanupError instanceof ApiError) throw cleanupError;
+      }
+      if (error instanceof ApiError) throw error;
+      throw new ApiError('移动端安全存储暂不可用，请重新登录。', 503, 'secure_session_storage_unavailable');
+    }
+  });
+}
+
+export function observeCodSessionInvalidated(listener: (expectedToken: string) => void): () => void {
+  sessionInvalidatedListeners.add(listener);
+  return () => sessionInvalidatedListeners.delete(listener);
+}
+
+async function invalidateCodSession(expectedToken: string): Promise<void> {
+  let cleared = false;
+  try { cleared = await logoutCod(expectedToken,{writeAheadMarker:false}); }
+  catch (error) {
+    if(error instanceof ApiError&&error.sessionCredentialCleared)cleared=true;
+    else return;
+  }
+  if (!cleared) return;
+  for (const listener of sessionInvalidatedListeners) {
+    try { listener(expectedToken); } catch { /* One UI observer must not prevent secure credential cleanup. */ }
+  }
+}
+
+async function throwResponseError(status: number, body: ApiErrorBody, token: string | undefined, retryDelay: number | null = null): Promise<never> {
+  const code = body.error ?? 'request_failed';
+  const fallback = body.message ?? `Control plane request failed: ${status}`;
+  const error = new ApiError(localizedApiErrorMessage(code, fallback), status, code, retryDelay);
+  // Only COD's authentication middleware may invalidate the local session. A
+  // model provider or webhook can also return 401, but that must never sign the
+  // user out of COD (especially during a multi-model comparison).
+  if (token && status === 401 && body.error === 'unauthorized') await invalidateCodSession(token);
+  throw error;
 }
 
 export function getControlPlaneUrl(): string {
@@ -367,7 +611,7 @@ async function requestOnce<T>(path: string, token?: string, init?: RequestInit):
       }
       if (response.status < 200 || response.status >= 300) {
         const errorBody = body as ApiErrorBody;
-        throw apiError(errorBody, response.status);
+        return throwResponseError(response.status, errorBody, token);
       }
       return body as T;
     } catch (error) {
@@ -385,7 +629,7 @@ async function requestOnce<T>(path: string, token?: string, init?: RequestInit):
   if (init?.signal?.aborted) throw abortReason();
   if (!response.ok) {
     const body = await response.json().catch(() => ({})) as ApiErrorBody;
-    throw apiError(body, response.status, responseRetryAfterMs(response));
+    return throwResponseError(response.status, body, token, retryAfterMs(response));
   }
   return response.json() as Promise<T>;
 }
@@ -415,16 +659,11 @@ export async function listModelSources(token: string, signal?: AbortSignal): Pro
 }
 
 export async function resumeCodSession(): Promise<CodSession | null> {
-  const token = storageGet(sessionStorageKey);
+  const token = await loadPersistedSessionToken();
   if (!token) return null;
   try {
     return await hydrateCodSession(token);
-  } catch (error) {
-    // A stale bootstrap request may finish after a fresh login has already
-    // stored a different token. Never let the old 401 erase the new session.
-    if (error instanceof ApiError && error.status === 401 && storageGet(sessionStorageKey) === token) {
-      storageSet(sessionStorageKey, null);
-    }
+  } catch {
     return null;
   }
 }
@@ -470,14 +709,62 @@ export async function registerCod(input: VerifiedRegistrationInput | LegacyMigra
   return registration.token;
 }
 
-export function persistCodSession(token:string):void{
-  storageSet(sessionStorageKey,token);
+export async function persistCodSession(token:string):Promise<void>{
+  if (!validStoredSessionToken(token)) throw new ApiError('登录凭据格式无效。', 500, 'invalid_session_token');
+  return serializedSessionPersistence(async()=>{
+    let runtime: MobileSessionRuntime | null;
+    try { runtime=mobileSessionRuntime(); }
+    catch { return markMobileCleanupPendingWithoutBridge(false); }
+    if(!runtime){storageSet(sessionStorageKey,token);return;}
+    try{
+      const localCleanupPending=readMobileLogoutPending();
+      const secureCleanupPending=await runtime.loadSessionCleanupPending();
+      if(localCleanupPending||secureCleanupPending){
+        if(!await clearMobileSession(runtime,undefined,true))throw logoutRecoveryUnavailable();
+      }
+      removeMobilePlaintextSessionToken();
+    }catch(error){
+      if(error instanceof ApiError)throw error;
+      throw new ApiError('登录前的本机退出清理尚未完成，请重试。',503,'secure_session_storage_unavailable');
+    }
+    try{
+      await runtime.saveSessionToken(token);
+      if(await runtime.loadSessionToken()!==token)throw new Error('Secure session verification failed');
+    }catch{
+      try {
+        if (!await clearMobileSession(runtime,token,false)) throw logoutRecoveryUnavailable();
+      } catch (cleanupError) {
+        if (cleanupError instanceof ApiError && cleanupError.code !== 'secure_session_storage_unavailable') throw cleanupError;
+      }
+      throw new ApiError('无法安全保存移动端登录状态，请重试。',503,'secure_session_storage_unavailable');
+    }
+  });
 }
 
-export function logoutCod(): void {
-  storageSet(sessionStorageKey, null);
-  taskExecutionLeases.clear();
-  pendingTaskExecutionClaims.clear();
+export async function logoutCod(expectedToken?:string, options: { explicit?: boolean; clearMobileHistory?: boolean; writeAheadMarker?: boolean } = {}): Promise<boolean> {
+  const mobile=Boolean(getCodRuntime().hostPlatform);
+  const clearMobileHistory=options.clearMobileHistory ?? true;
+  if(options.explicit){
+    taskExecutionLeases.clear();
+    pendingTaskExecutionClaims.clear();
+  }
+  return serializedSessionPersistence(async()=>{
+    let cleared: boolean;
+    if (mobile) {
+      let runtime: MobileSessionRuntime | null;
+      try { runtime=mobileSessionRuntime(); }
+      catch { return markMobileCleanupPendingWithoutBridge(clearMobileHistory); }
+      if (!runtime) throw new Error('Mobile runtime unexpectedly missing');
+      cleared=await clearMobileSession(runtime,expectedToken,clearMobileHistory,options.writeAheadMarker??true);
+    } else cleared=removeWebSessionToken(expectedToken);
+    if(!cleared){
+      if(options.explicit)throw new ApiError('安全退出尚未完成，应用会保持退出并继续重试。',409,'logout_not_completed');
+      return false;
+    }
+    taskExecutionLeases.clear();
+    pendingTaskExecutionClaims.clear();
+    return true;
+  });
 }
 
 export async function refreshAccount(token: string): Promise<AccountSummary> {
@@ -564,21 +851,12 @@ export async function registerDevice(token: string, name: string, platform: Devi
 }
 
 export async function heartbeatDevice(token: string, deviceId: string, activeTaskId?: string): Promise<DeviceRecord> {
-  const execution = activeTaskId ? taskExecutionLeases.get(activeTaskId) : undefined;
+  const execution=activeTaskId?taskExecutionLeases.get(activeTaskId):undefined;
+  if(activeTaskId&&!execution)throw new ApiError('任务执行租约已丢失，已停止续租。',409,'task_lease_required');
   try {
-    return await request(`/api/devices/${encodeURIComponent(deviceId)}/heartbeat`, token, {
-      method: 'POST',
-      body: JSON.stringify(activeTaskId && execution ? {
-        taskId: activeTaskId,
-        executionId: execution.executionId,
-        leaseToken: execution.leaseToken,
-      } : {}),
-    });
-  } catch (error) {
-    if (activeTaskId && error instanceof ApiError && fatalTaskLeaseCodes.has(error.code)) {
-      taskExecutionLeases.delete(activeTaskId);
-      pendingTaskExecutionClaims.delete(activeTaskId);
-    }
+    return await request(`/api/devices/${encodeURIComponent(deviceId)}/heartbeat`, token, { method: 'POST', body: JSON.stringify(activeTaskId&&execution?{taskId:activeTaskId,executionId:execution.executionId,leaseToken:execution.leaseToken}:{}) });
+  } catch(error) {
+    if(activeTaskId&&error instanceof ApiError&&fatalTaskLeaseCodes.has(error.code)){taskExecutionLeases.delete(activeTaskId);pendingTaskExecutionClaims.delete(activeTaskId);}
     throw error;
   }
 }
@@ -653,10 +931,11 @@ export async function updateRemoteTask(token: string, task: RemoteTask, status: 
         throw new ApiError('服务端未返回有效的任务执行授权。', 502, 'invalid_task_lease_response');
       }
       taskExecutionLeases.set(task.id, result.execution);
+    } else if (!execution) {
+      pendingTaskExecutionClaims.delete(task.id);
+      taskExecutionLeases.delete(task.id);
+      throw new ApiError('服务端未返回有效的任务执行授权。', 502, 'invalid_task_lease_response');
     }
-    // A legacy control plane accepts the claim fields but does not return an
-    // execution object. Keep that protocol usable and send task chat without
-    // lease headers rather than rejecting an otherwise successful transition.
     pendingTaskExecutionClaims.delete(task.id);
   } else if (status === 'complete' || status === 'failed' || status === 'cancelled') {
     taskExecutionLeases.delete(task.id);
@@ -708,6 +987,7 @@ export async function sendChat(token: string, source: string, model: string, mes
   if (!sanitizedMessages.length) throw new ApiError('消息内容不能为空。', 400, 'empty_messages');
   const requestId = createClientId();
   const execution = options.taskId ? taskExecutionLeases.get(options.taskId) : undefined;
+  if (options.taskId && !execution) throw new ApiError('任务执行租约已失效，请重新执行。', 409, 'task_lease_required');
   let result: { model?: string; choices: Array<{ message: { content: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number; input_tokens?: number; output_tokens?: number }; cod_mode?: 'demo'; cod_source?: string; cod_upstream_source?: string; cod_payment_direction?: string; cod_usage_estimated?: boolean; cod_fallback_used?: boolean } | null = null;
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -732,7 +1012,7 @@ export async function sendChat(token: string, source: string, model: string, mes
         pendingTaskExecutionClaims.delete(options.taskId);
       }
       if(options.signal?.aborted)throw error;
-      const retryable = !(error instanceof ApiError) || error.status === 429 || error.status >= 500;
+      const retryable = !(error instanceof ApiError) || error.status === 429 || (error.status >= 500 && error.code !== 'ai_upstream_auth_failed');
       if (!retryable || attempt === 1) throw error;
       await abortableDelay(500,options.signal);
     } finally { attemptSignal.dispose(); }

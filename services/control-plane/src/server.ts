@@ -5,17 +5,17 @@ import type { ComputeRequestKind, ComputeRequestStatus, TaskStatus, UsageEvent }
 import { AGENT_SESSION_TTL_MS, createAgentSessionToken, createSessionToken, hashPassword, validatePassword, verifyAgentSessionToken, verifyPassword, verifySessionToken } from './auth.js';
 import { BotService, parseBotCommand, parseFeishuWebhook, replyFeishuMessage, verifyWebhookSignature, type BotPlatform } from './bots.js';
 import { loadConfig, type ControlPlaneConfig } from './config.js';
-import { CHAT_RESPONSE_CACHE_MAX_BYTES, creditPackCatalog, decodeComputeRequestCursor, requireAdmin, validateComputeRequestId, validateComputeRequestKind, validateComputeRequestStatus, type AdminComputeRequestQuery, type CodDatabase, type Principal, PostgresDatabase, type TopupRequest } from './database.js';
+import { CHAT_RESPONSE_CACHE_MAX_BYTES, USAGE_RESERVATION_KEEPALIVE_INTERVAL_MS, creditPackCatalog, decodeComputeRequestCursor, requireAdmin, validateComputeRequestId, validateComputeRequestKind, validateComputeRequestStatus, type AdminComputeRequestQuery, type CodDatabase, type Principal, PostgresDatabase, type TopupRequest } from './database.js';
 import { errorResponse, HttpError } from './errors.js';
 import { AiGateway, type ModelSourceInfo } from './gateway.js';
 import { bearerToken, readJson, readText, sendJson, sendText } from './http.js';
 import { KnowledgeAdapter } from './knowledge.js';
 import { MemoryDatabase } from './memory-database.js';
 import { ProductRegistry } from './products.js';
-import { beginRequest, recordRequest, renderMetrics } from './metrics.js';
+import { beginRequest, recordRequest, recordUsageReservationLeaseFailure, renderMetrics } from './metrics.js';
 import { computeOfferCatalog, validateComputeRequest } from './compute-market.js';
 import { OfficialPaymentService } from './payments.js';
-import { maskRegistrationDestination, normalizeRegistrationEmail, normalizeRegistrationPhone, RegistrationVerification, registrationDeliveryFromConfig, validateRegistrationChallengeId, validateRegistrationCode, type RegistrationDelivery } from './registration-verification.js';
+import { maskRegistrationDestination, normalizeRegistrationEmail, normalizeRegistrationPhone, RegistrationVerification, registrationDeliveryFromConfig, validateRegistrationChallengeId, validateRegistrationCode, type RegistrationDelivery, type RegistrationEndpointValidator } from './registration-verification.js';
 
 export interface ControlPlaneOptions {
   config?: ControlPlaneConfig;
@@ -23,10 +23,13 @@ export interface ControlPlaneOptions {
   gateway?: AiGateway;
   registrationDelivery?: RegistrationDelivery;
   registrationFetcher?: typeof fetch;
+  registrationEndpointValidator?: RegistrationEndpointValidator;
   now?: () => Date;
+  reservationKeepaliveIntervalMs?: number;
 }
 
 const validStatuses = new Set<TaskStatus>(['draft', 'running', 'waiting', 'complete', 'failed', 'cancelled']);
+const uuidPattern=/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i;
 const userIdFor = (email: string) => `usr_${createHash('sha256').update(email).digest('hex').slice(0, 20)}`;
 const tenantIdFor = (email: string) => `tenant_${email.split('@')[1]?.replace(/[^a-z0-9]+/g, '_') ?? 'unknown'}`;
 
@@ -42,6 +45,13 @@ async function currentPrincipal(database: CodDatabase, session: { sub: string; t
   return principal;
 }
 
+function pathUuid(raw:string,message:string,code:string):string{
+  let value:string;
+  try{value=decodeURIComponent(raw);}catch{throw new HttpError(message,400,code);}
+  if(!uuidPattern.test(value))throw new HttpError(message,400,code);
+  return value;
+}
+
 type PublicModelSourceInfo = Pick<ModelSourceInfo, 'id' | 'label' | 'upstreamSourceId' | 'status' | 'callable' | 'paymentDirection' | 'models' | 'note'>;
 function publicModelCatalog(sources: ModelSourceInfo[]): PublicModelSourceInfo[] {
   return sources.map(({ id, label, upstreamSourceId, status, callable, paymentDirection, models, note }) => ({
@@ -50,6 +60,18 @@ function publicModelCatalog(sources: ModelSourceInfo[]): PublicModelSourceInfo[]
 }
 
 const dummyPasswordHash='scrypt$16384$8$1$MDEyMzQ1Njc4OWFiY2RlZg$vNLqtxxHxO9XlDJYZk-T6OzryI7HSubiscMSJDaWZtd0bu3h2vmmdlKsAZpCn3V20q-R_KOLJgJl9mHX32LDiA';
+const emailRegistrationNotice='若该邮箱可注册，验证码将发送至邮箱；已有账号请登录，旧试点账号请使用迁移入口。';
+const phoneRegistrationNotice='若该手机号可用于注册，验证码将发送至手机；已有账号请登录。';
+const privateRegistrationVerificationErrors=new Set([
+  'invalid_registration_challenge','invalid_verification_code','registration_challenge_consumed',
+  'registration_challenge_locked','registration_challenge_expired','registration_email_verification_required',
+  'registration_phone_mismatch','registration_verification_required',
+]);
+
+function rethrowPublicRegistrationVerificationError(error:unknown):never{
+  if(error instanceof HttpError&&privateRegistrationVerificationErrors.has(error.code))throw new HttpError('验证码不正确或已失效，请重新开始',400,'registration_verification_failed');
+  throw error;
+}
 
 function validateAuthEmail(raw: unknown): string {
   return normalizeRegistrationEmail(raw);
@@ -75,14 +97,21 @@ function registrationAddressPrefix(value: string): string {
 }
 
 export function registrationRateLimitAddress(socketAddress: string | undefined, xRealIp: string | string[] | undefined): string {
+  return registrationAddressPrefix(registrationObservedAddress(socketAddress,xRealIp));
+}
+
+function registrationObservedAddress(socketAddress:string|undefined,xRealIp:string|string[]|undefined):string{
   const socket=socketAddress??'';
   const forwarded=typeof xRealIp==='string'&&!xRealIp.includes(',')?xRealIp.trim():'';
-  const selected=isLoopbackAddress(socket)&&isIP(forwarded)?forwarded:socket;
-  return registrationAddressPrefix(selected);
+  return isLoopbackAddress(socket)&&isIP(forwarded)?forwarded:socket;
 }
 
 function registrationClientAddress(request: import('node:http').IncomingMessage): string {
   return registrationRateLimitAddress(request.socket.remoteAddress,request.headers['x-real-ip']);
+}
+
+function registrationClientIp(request:import('node:http').IncomingMessage):string|undefined{
+  const observed=registrationObservedAddress(request.socket.remoteAddress,request.headers['x-real-ip']).replace(/^::ffff:/,'');return isIP(observed)?observed:undefined;
 }
 
 function validateIdempotencyKey(raw: unknown): string {
@@ -226,6 +255,16 @@ async function readResponseBuffer(response: Response, maximumBytes = 5 * 1024 * 
   return Buffer.concat(chunks, size);
 }
 
+async function throwUpstreamChatError(response: Response): Promise<void> {
+  // Upstream authentication failures describe COD's provider credential, not
+  // the caller's COD session. Do not expose them as a client-facing 401/403 or
+  // forward provider bodies, which may contain operational details.
+  if (response.status === 401 || response.status === 403) {
+    try { await response.body?.cancel(); } catch { /* Preserve the sanitized gateway error. */ }
+    throw new HttpError('KAI model provider authentication failed', 502, 'ai_upstream_auth_failed');
+  }
+}
+
 function queryInteger(raw: string | null, fallback: number, maximum = Number.MAX_SAFE_INTEGER): number {
   if (raw === null) return fallback;
   const value = Number(raw);
@@ -262,6 +301,50 @@ function adminComputeRequestSearchBody(raw: unknown): AdminComputeRequestQuery {
   return{limit:Number(limit),cursor,status:status as ComputeRequestStatus|null,kind:kind as ComputeRequestKind|null,q};
 }
 
+function startUsageReservationKeepalive(
+  database: CodDatabase,
+  principal: Principal,
+  reservationId: string,
+  controller: AbortController,
+  intervalMs: number,
+  context: { requestId: string; taskId: string | null; sourceId: string },
+): () => Promise<void> {
+  let stopped = false;
+  let renewal: Promise<void> | null = null;
+  let renewalFailure: HttpError | null = null;
+  let failureReported = false;
+  const reportFailure = () => {
+    if (!renewalFailure || failureReported) return;
+    failureReported = true;
+    recordUsageReservationLeaseFailure();
+    console.error(JSON.stringify({ level: 'error', event: 'usage.reservation.renew_failed', requestId: context.requestId, taskId: context.taskId, sourceId: context.sourceId, error: renewalFailure.message }));
+    if (!controller.signal.aborted) controller.abort(renewalFailure);
+  };
+  const timer = setInterval(() => {
+    if (stopped || renewal) return;
+    renewal = database.renewUsageReservation(principal, reservationId)
+      .catch((error: unknown) => {
+        renewalFailure = error instanceof HttpError ? error : new HttpError('Usage reservation lease renewal failed', 503, 'reservation_lease_renewal_failed');
+        if (!stopped) {
+          stopped = true;
+          clearInterval(timer);
+        }
+        reportFailure();
+      })
+      .finally(() => { renewal = null; });
+  }, intervalMs);
+  timer.unref();
+  return async () => {
+    if (!stopped) {
+      stopped = true;
+      clearInterval(timer);
+    }
+    const activeRenewal = renewal;
+    if (activeRenewal) await activeRenewal;
+    reportFailure();
+  };
+}
+
 export function createControlPlane(options: ControlPlaneOptions = {}) {
   const config = options.config ?? loadConfig();
   const database = options.database ?? (config.databaseUrl ? new PostgresDatabase(config.databaseUrl) : new MemoryDatabase());
@@ -270,8 +353,8 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
   const products = new ProductRegistry(config);
   const officialPayments = new OfficialPaymentService(config);
   const registrationFetcher = options.registrationFetcher ?? fetch;
-  const registrationDelivery = options.registrationDelivery ?? registrationDeliveryFromConfig(config.registrationVerification, registrationFetcher);
-  const registration = new RegistrationVerification(config.registrationVerification, registrationDelivery, registrationFetcher);
+  const registrationDelivery = options.registrationDelivery ?? registrationDeliveryFromConfig(config.registrationVerification, registrationFetcher,options.registrationEndpointValidator);
+  const registration = new RegistrationVerification(config.registrationVerification, registrationDelivery, registrationFetcher,options.registrationEndpointValidator);
   const now = options.now ?? (() => new Date());
   const requireRegistration = () => {
     if (!config.registrationEnabled || !registration.available) throw new HttpError('账号注册暂未开放', 503, 'registration_unavailable');
@@ -285,6 +368,9 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       scope: `${scope}:address`, keyHash: registration.rateLimitKey(`${scope}:address`, address), now: instant, windowSeconds: 60 * 60, limit: 20,
     });
   };
+  const reservationKeepaliveIntervalMs = Number.isFinite(options.reservationKeepaliveIntervalMs)
+    ? Math.max(1, Math.trunc(options.reservationKeepaliveIntervalMs!))
+    : USAGE_RESERVATION_KEEPALIVE_INTERVAL_MS;
   const seenFeishuMessages = new Set<string>();
   interface ActiveChatRequest { controller: AbortController; reservationId: string; reservationReady: Promise<void>; state: 'active' | 'settling' | 'settled' }
   const activeChats = new Map<string, Set<ActiveChatRequest>>();
@@ -321,7 +407,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         response.setHeader('access-control-allow-origin', origin);
         response.setHeader('vary', 'Origin');
       }
-      response.setHeader('access-control-allow-headers', 'authorization,content-type,idempotency-key,x-request-id');
+      response.setHeader('access-control-allow-headers', 'authorization,content-type,idempotency-key,x-request-id,x-cod-task-execution,x-cod-task-lease');
       response.setHeader('access-control-allow-methods', 'GET,POST,PATCH,OPTIONS');
       if (request.method === 'OPTIONS') return sendJson(response, 204, null);
       if (request.method === 'GET' && url.pathname === '/health') return sendJson(response, 200, { status: 'ok', service: 'cod-control-plane' });
@@ -365,44 +451,55 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         const body=await readJson<{email?:unknown;humanChallengeToken?:unknown}|null>(request);
         const email=normalizeRegistrationEmail(body?.email);
         const instant=now();
-        await registration.verifyHuman(body?.humanChallengeToken);
+        await registration.verifyHuman(body?.humanChallengeToken,'cod_registration_email',registrationClientIp(request));
+        await database.cleanupRegistrationChallenges(instant);
         await consumeRegistrationLimits(request,'registration-email-start',email,instant);
         const challengeId=randomUUID();
         const expiresAt=new Date(instant.getTime()+config.registrationVerification.otpTtlSeconds*1000);
         const resendAt=new Date(instant.getTime()+config.registrationVerification.resendSeconds*1000);
         const generated=registration.createCode(challengeId,'email',email);
-        const challenge=await database.startEmailRegistration({challengeId,email,codeHash:generated.hash,now:instant,expiresAt,resendAfter:resendAt,maxSends:config.registrationVerification.maxSendsPerChannel});
+        let challenge;
+        try{challenge=await database.startEmailRegistration({challengeId,email,codeHash:generated.hash,now:instant,expiresAt,resendAfter:resendAt,maxSends:config.registrationVerification.maxSendsPerChannel});}
+        catch(error){
+          if(error instanceof HttpError&&(error.code==='email_registered'||error.code==='legacy_migration_required'))return sendJson(response,202,{challengeId,maskedDestination:maskRegistrationDestination('email',email),expiresAt:expiresAt.toISOString(),resendAt:resendAt.toISOString(),notice:emailRegistrationNotice});
+          throw error;
+        }
         try { await registration.deliver('email',{challengeId:challenge.challengeId,destination:email,code:generated.code,expiresAt:challenge.expiresAt}); }
         catch(error){await database.invalidateRegistrationCode({challengeId:challenge.challengeId,channel:'email',codeHash:generated.hash,now:now()});throw error;}
-        return sendJson(response,202,{challengeId:challenge.challengeId,maskedDestination:maskRegistrationDestination('email',email),expiresAt:challenge.expiresAt,resendAt:new Date(instant.getTime()+challenge.retryAfterSeconds*1000).toISOString()});
+        return sendJson(response,202,{challengeId:challenge.challengeId,maskedDestination:maskRegistrationDestination('email',email),expiresAt:challenge.expiresAt,resendAt:new Date(instant.getTime()+challenge.retryAfterSeconds*1000).toISOString(),notice:emailRegistrationNotice});
       }
       if (request.method === 'POST' && url.pathname === '/api/auth/registration/email/verify') {
         requireRegistration();
         const body=await readJson<{challengeId?:unknown;email?:unknown;code?:unknown}|null>(request);
         const challengeId=validateRegistrationChallengeId(body?.challengeId);const email=normalizeRegistrationEmail(body?.email);const code=validateRegistrationCode(body?.code);const instant=now();
         await database.consumeRegistrationRateLimit({scope:'registration-email-verify:address',keyHash:registration.rateLimitKey('registration-email-verify:address',registrationClientAddress(request)),now:instant,windowSeconds:60*60,limit:40});
-        await database.verifyRegistrationEmail({challengeId,email,codeHash:registration.hashCode(challengeId,'email',email,code),now:instant,maxFailures:config.registrationVerification.maxFailedAttempts});
+        try{await database.verifyRegistrationEmail({challengeId,email,codeHash:registration.hashCode(challengeId,'email',email,code),now:instant,maxFailures:config.registrationVerification.maxFailedAttempts});}catch(error){rethrowPublicRegistrationVerificationError(error);}
         return sendJson(response,200,{verified:true});
       }
       if (request.method === 'POST' && url.pathname === '/api/auth/registration/phone/start') {
         requireRegistration();
         const body=await readJson<{challengeId?:unknown;email?:unknown;phone?:unknown;humanChallengeToken?:unknown}|null>(request);
         const challengeId=validateRegistrationChallengeId(body?.challengeId);const email=normalizeRegistrationEmail(body?.email);const phone=normalizeRegistrationPhone(body?.phone);const instant=now();
-        await registration.verifyHuman(body?.humanChallengeToken);
+        await registration.verifyHuman(body?.humanChallengeToken,'cod_registration_phone',registrationClientIp(request));
         await consumeRegistrationLimits(request,'registration-phone-start',phone,instant);
         const expiresAt=new Date(instant.getTime()+config.registrationVerification.otpTtlSeconds*1000);const resendAt=new Date(instant.getTime()+config.registrationVerification.resendSeconds*1000);
         const generated=registration.createCode(challengeId,'phone',phone);
-        const challenge=await database.startPhoneRegistration({challengeId,email,phone,codeHash:generated.hash,now:instant,expiresAt,resendAfter:resendAt,maxSends:config.registrationVerification.maxSendsPerChannel});
+        let challenge;
+        try{challenge=await database.startPhoneRegistration({challengeId,email,phone,codeHash:generated.hash,now:instant,expiresAt,resendAfter:resendAt,maxSends:config.registrationVerification.maxSendsPerChannel});}
+        catch(error){
+          if(error instanceof HttpError&&(error.code==='phone_registered'||error.code==='phone_registration_pending'))return sendJson(response,202,{challengeId,maskedDestination:maskRegistrationDestination('phone',phone),expiresAt:expiresAt.toISOString(),resendAt:resendAt.toISOString(),notice:phoneRegistrationNotice});
+          throw error;
+        }
         try { await registration.deliver('phone',{challengeId:challenge.challengeId,destination:phone,code:generated.code,expiresAt:challenge.expiresAt}); }
         catch(error){await database.invalidateRegistrationCode({challengeId:challenge.challengeId,channel:'phone',codeHash:generated.hash,now:now()});throw error;}
-        return sendJson(response,202,{challengeId:challenge.challengeId,maskedDestination:maskRegistrationDestination('phone',phone),expiresAt:challenge.expiresAt,resendAt:new Date(instant.getTime()+challenge.retryAfterSeconds*1000).toISOString()});
+        return sendJson(response,202,{challengeId:challenge.challengeId,maskedDestination:maskRegistrationDestination('phone',phone),expiresAt:challenge.expiresAt,resendAt:new Date(instant.getTime()+challenge.retryAfterSeconds*1000).toISOString(),notice:phoneRegistrationNotice});
       }
       if (request.method === 'POST' && url.pathname === '/api/auth/registration/phone/verify') {
         requireRegistration();
         const body=await readJson<{challengeId?:unknown;email?:unknown;phone?:unknown;code?:unknown}|null>(request);
         const challengeId=validateRegistrationChallengeId(body?.challengeId);const email=normalizeRegistrationEmail(body?.email);const phone=normalizeRegistrationPhone(body?.phone);const code=validateRegistrationCode(body?.code);const instant=now();
         await database.consumeRegistrationRateLimit({scope:'registration-phone-verify:address',keyHash:registration.rateLimitKey('registration-phone-verify:address',registrationClientAddress(request)),now:instant,windowSeconds:60*60,limit:40});
-        await database.verifyRegistrationPhone({challengeId,email,phone,codeHash:registration.hashCode(challengeId,'phone',phone,code),now:instant,maxFailures:config.registrationVerification.maxFailedAttempts});
+        try{await database.verifyRegistrationPhone({challengeId,email,phone,codeHash:registration.hashCode(challengeId,'phone',phone,code),now:instant,maxFailures:config.registrationVerification.maxFailedAttempts});}catch(error){rethrowPublicRegistrationVerificationError(error);}
         return sendJson(response,200,{verified:true});
       }
       if(request.method==='POST'&&url.pathname==='/api/auth/register'){
@@ -516,18 +613,19 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       if(!principal)return sendJson(response,401,{error:'unauthorized'});
       if(request.method==='POST'&&url.pathname==='/api/agent-sessions'){
         if(!session)throw new HttpError('A full account session is required',403,'agent_scope_forbidden');
-        const body=await readJson<{taskId?:unknown;sourceId?:unknown;model?:unknown}|null>(request);
+        const body=await readJson<{taskId?:unknown;executionId?:unknown;leaseToken?:unknown;sourceId?:unknown;model?:unknown}|null>(request);
         const taskId=typeof body?.taskId==='string'?body.taskId.trim():'';
+        const executionId=typeof body?.executionId==='string'?body.executionId.trim():'';
+        const leaseToken=typeof body?.leaseToken==='string'?body.leaseToken.trim():'';
         const sourceId=typeof body?.sourceId==='string'?body.sourceId.trim():'';
         const model=typeof body?.model==='string'?body.model.trim():'';
-        if(!/^[a-f0-9-]{36}$/i.test(taskId))throw new HttpError('Task ID is invalid',400,'invalid_task_id');
+        if(!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(taskId))throw new HttpError('Task ID is invalid',400,'invalid_task_id');
         if(!/^[a-z0-9-]{2,40}$/.test(sourceId))throw new HttpError('Model source is invalid',400,'invalid_source');
         if(!model||model.length>200)throw new HttpError('Model is invalid',400,'invalid_model');
-        const task=await database.getTask(principal,taskId);
-        if(task.status!=='running'&&task.status!=='waiting')throw new HttpError('Task is not running',409,task.status==='cancelled'?'task_cancelled':'task_not_running');
+        await database.assertTaskLease(principal,taskId,{executionId,leaseToken});
         await gateway.getModel(sourceId,model);
-        const issuedAt=Date.now();const scope={taskId,sourceId,model};const token=createAgentSessionToken({sub:principal.userId,tenantId:principal.tenantId,email:principal.email,role:principal.role},scope,config.sessionSecret,issuedAt);
-        await database.audit(principal,'agent_session.issue','task',taskId,{sourceId,model,expiresAt:new Date(issuedAt+AGENT_SESSION_TTL_MS).toISOString()});
+        const issuedAt=Date.now();const scope={taskId,executionId,sourceId,model};const token=createAgentSessionToken({sub:principal.userId,tenantId:principal.tenantId,email:principal.email,role:principal.role},scope,config.sessionSecret,issuedAt);
+        await database.audit(principal,'agent_session.issue','task',taskId,{executionId,sourceId,model,expiresAt:new Date(issuedAt+AGENT_SESSION_TTL_MS).toISOString()});
         return sendJson(response,201,{token,expiresAt:new Date(issuedAt+AGENT_SESSION_TTL_MS).toISOString(),scope});
       }
       if(request.method==='GET'&&url.pathname==='/api/referrals')return sendJson(response,200,await database.getReferralSummary(principal));
@@ -585,7 +683,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         if (!officialChannel) return sendJson(response,201,order);
         return sendJson(response,201,{order,checkout:await officialPayments.createCheckout(order)});
       }
-      if (request.method === 'GET' && url.pathname.match(/^\/api\/payment-orders\/[^/]+$/)) return sendJson(response,200,await database.getPaymentOrder(principal,url.pathname.split('/')[3]));
+      if (request.method === 'GET' && url.pathname.match(/^\/api\/payment-orders\/[^/]+$/)) return sendJson(response,200,await database.getPaymentOrder(principal,pathUuid(url.pathname.split('/')[3],'Payment order ID is invalid','invalid_payment_order_id')));
       if (request.method === 'GET' && url.pathname === '/api/audit') return sendJson(response, 200, await database.listAudit(principal, queryInteger(url.searchParams.get('limit'), 50, 200)));
       if (request.method === 'GET' && url.pathname === '/api/model-sources') return sendJson(response, 200, await gateway.listSources());
       if (request.method === 'GET' && url.pathname === '/api/models') return sendJson(response, 200, (await gateway.listSources()).flatMap((source) => source.models.map((model) => ({ ...model, sourceId: source.id }))));
@@ -599,11 +697,11 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       if (request.method === 'GET' && url.pathname === '/api/knowledge/search') return sendJson(response, 200, await knowledge.search(url.searchParams.get('q') ?? '', principal));
       if (request.method === 'GET' && url.pathname === '/api/devices') return sendJson(response, 200, await database.listDevices(principal));
       if (request.method === 'POST' && url.pathname === '/api/devices') { const device=await database.registerDevice(principal,await readJson(request)); await database.audit(principal,'device.register','device',device.id); return sendJson(response,201,device); }
-      if (request.method === 'POST' && url.pathname.match(/^\/api\/devices\/[^/]+\/heartbeat$/)) return sendJson(response, 200, await database.heartbeat(principal, url.pathname.split('/')[3]));
+      if (request.method === 'POST' && url.pathname.match(/^\/api\/devices\/[^/]+\/heartbeat$/)) {const deviceId=pathUuid(url.pathname.split('/')[3],'Device ID is invalid','invalid_device_id');const body=await readJson<{taskId?:unknown;executionId?:unknown;leaseToken?:unknown}>(request);const hasLease=body.taskId!==undefined||body.executionId!==undefined||body.leaseToken!==undefined;const taskLease=hasLease?{taskId:typeof body.taskId==='string'?body.taskId:'',executionId:typeof body.executionId==='string'?body.executionId:'',leaseToken:typeof body.leaseToken==='string'?body.leaseToken:''}:undefined;return sendJson(response,200,await database.heartbeat(principal,deviceId,taskLease));}
       if (request.method === 'GET' && url.pathname === '/api/tasks') return sendJson(response, 200, await database.listTasks(principal));
-      if (request.method === 'POST' && url.pathname === '/api/tasks') { const task=await database.createTask(principal,await readJson(request)); await database.audit(principal,'task.create','task',task.id); return sendJson(response,201,task); }
+      if (request.method === 'POST' && url.pathname === '/api/tasks') {const body=await readJson<{title:string;deviceId:string}|null>(request);if(!body||typeof body!=='object')throw new HttpError('Task is invalid',400,'invalid_task');if(typeof body.deviceId!=='string'||!uuidPattern.test(body.deviceId))throw new HttpError('Device ID is invalid',400,'invalid_device_id');const task=await database.createTask(principal,body);await database.audit(principal,'task.create','task',task.id);return sendJson(response,201,task);}
       if (request.method === 'POST' && url.pathname.match(/^\/api\/tasks\/[^/]+\/cancel$/)) {
-        const taskId=decodePathSegment(url.pathname.split('/')[3]);
+        const taskId=pathUuid(url.pathname.split('/')[3],'Task ID is invalid','invalid_task_id');
         const body=await readJson<{expectedVersion?:number}|null>(request);
         if(!Number.isInteger(body?.expectedVersion)||Number(body?.expectedVersion)<1)throw new HttpError('Expected task version is required',400,'invalid_task_version');
         const task=await database.updateTask(principal,taskId,'cancelled',Number(body?.expectedVersion),{result:null,error:null});
@@ -611,7 +709,11 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         await database.audit(principal,'task.cancel','task',task.id,{cancelledRequests});
         return sendJson(response,200,{task,cancelledRequests});
       }
-      if (request.method === 'POST' && url.pathname.match(/^\/api\/tasks\/[^/]+\/status$/)) { const body=await readJson<{status:TaskStatus;expectedVersion:number;result?:string|null;error?:string|null}|null>(request); if(!body||!validStatuses.has(body.status)) throw new HttpError('Invalid task status',400,'invalid_status'); if(!Number.isInteger(body.expectedVersion)||Number(body.expectedVersion)<1)throw new HttpError('Expected task version is required',400,'invalid_task_version'); const task=await database.updateTask(principal,url.pathname.split('/')[3],body.status,body.expectedVersion,{result:body.result,error:body.error}); await database.audit(principal,'task.status','task',task.id,{status:body.status,hasResult:Boolean(body.result),hasError:Boolean(body.error)}); return sendJson(response,200,task); }
+      if (request.method === 'POST' && url.pathname.match(/^\/api\/tasks\/[^/]+\/status$/)) {
+        const body=await readJson<{status:TaskStatus;expectedVersion:number;result?:string|null;error?:string|null;claimId?:string;executionId?:string;leaseToken?:string}|null>(request);if(!body||!validStatuses.has(body.status))throw new HttpError('Invalid task status',400,'invalid_status');if(!Number.isInteger(body.expectedVersion)||body.expectedVersion<1)throw new HttpError('Expected task version is required',400,'invalid_task_version');const taskId=pathUuid(url.pathname.split('/')[3],'Task ID is invalid','invalid_task_id');
+        if(body.status==='running'){const current=await database.getTask(principal,taskId);const isClaim=body.claimId!==undefined||(current.status!=='running'&&current.status!=='waiting');if(isClaim){const claim=await database.claimTask(principal,taskId,body.expectedVersion,{claimId:typeof body.claimId==='string'?body.claimId:'',leaseToken:typeof body.leaseToken==='string'?body.leaseToken:''});if(!claim.replayed)await database.audit(principal,'task.status','task',claim.task.id,{status:'running'});return sendJson(response,200,{...claim.task,execution:{executionId:claim.executionId,leaseToken:claim.leaseToken,leaseExpiresAt:claim.leaseExpiresAt}});}const execution=body.executionId||body.leaseToken?{executionId:body.executionId??'',leaseToken:body.leaseToken??''}:undefined;const task=await database.updateTask(principal,taskId,'running',body.expectedVersion,{result:body.result,error:body.error},execution);await database.audit(principal,'task.status','task',task.id,{status:'running'});return sendJson(response,200,task);}
+        const execution=body.executionId||body.leaseToken?{executionId:body.executionId??'',leaseToken:body.leaseToken??''}:undefined;const task=await database.updateTask(principal,taskId,body.status,body.expectedVersion,{result:body.result,error:body.error},execution);await database.audit(principal,'task.status','task',task.id,{status:body.status,hasResult:Boolean(body.result),hasError:Boolean(body.error)});return sendJson(response,200,task);
+      }
       if (request.method === 'GET' && url.pathname === '/api/events') return sendJson(response, 200, await database.eventsAfter(principal, queryInteger(url.searchParams.get('cursor'), 0)));
       if (request.method === 'POST' && url.pathname === '/api/topups') {
         if (!config.developmentTopupEnabled) throw new HttpError('Direct top-up is disabled; use a verified payment callback', 403, 'topup_disabled');
@@ -641,49 +743,56 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         if(!Array.isArray(body.messages) || body.messages.length === 0 || body.messages.length > 40)throw new HttpError('Chat must contain between 1 and 40 messages',400,'invalid_messages');
         const validMessages = body.messages.every(isValidChatMessage);
         if (!validMessages) throw new HttpError('Chat messages are invalid',400,'invalid_messages');
-        const routeTaskId=chatRoute[1]?decodePathSegment(chatRoute[1]):null;
+        const routeTaskId=chatRoute[1]?pathUuid(chatRoute[1],'Task ID is invalid','invalid_task_id'):null;
         const bodyTaskId=body.task_id===undefined?null:typeof body.task_id==='string'?body.task_id.trim():'';
         if(body.task_id!==undefined&&!bodyTaskId)throw new HttpError('Task ID is invalid',400,'invalid_task_id');
         if(routeTaskId&&bodyTaskId&&routeTaskId!==bodyTaskId)throw new HttpError('Task conflicts with the gateway route',400,'task_conflict');
         const taskId=routeTaskId??bodyTaskId;
-        if(taskId&&(!/^[a-f0-9-]{36}$/i.test(taskId)))throw new HttpError('Task ID is invalid',400,'invalid_task_id');
-        if(taskId){const task=await database.getTask(principal,taskId);if(task.status!=='running'&&task.status!=='waiting')throw new HttpError('Task is not running',409,task.status==='cancelled'?'task_cancelled':'task_not_running');}
+        if(taskId&&!uuidPattern.test(taskId))throw new HttpError('Task ID is invalid',400,'invalid_task_id');
+        let taskExecutionId:string|undefined;
+        if(taskId){if(agentSession){taskExecutionId=agentSession.executionId;await database.assertTaskExecution(principal,taskId,taskExecutionId);}else{const executionId=typeof request.headers['x-cod-task-execution']==='string'?request.headers['x-cod-task-execution']:'';const leaseToken=typeof request.headers['x-cod-task-lease']==='string'?request.headers['x-cod-task-lease']:'';await database.assertTaskLease(principal,taskId,{executionId,leaseToken});taskExecutionId=executionId;}}
         const routeSource = chatRoute[2];
         if (routeSource && body.source && routeSource !== body.source) throw new HttpError('Model source conflicts with the gateway route', 400, 'source_conflict');
         const sourceId=routeSource??body.source??(config.modelSources.some((source)=>source.apiKey)?config.modelSources.find((source)=>source.apiKey)!.id:'demo');
         const model=typeof body.model==='string'?body.model.trim():'';
         if(!model)throw new HttpError('Model is required',400,'model_required');
-        if(agentSession&&(taskId!==agentSession.taskId||sourceId!==agentSession.sourceId||model!==agentSession.model))throw new HttpError('Agent session does not permit this chat request',403,'agent_scope_forbidden');
+        if(agentSession&&(taskId!==agentSession.taskId||taskExecutionId!==agentSession.executionId||sourceId!==agentSession.sourceId||model!==agentSession.model))throw new HttpError('Agent session does not permit this chat request',403,'agent_scope_forbidden');
         const selection=await gateway.getModel(sourceId,model);assertClientConnected();const fallbackCandidate=sourceId==='demo'?null:await gateway.getFallbackModel(sourceId,model);assertClientConnected();
         const maxOutput=Number(body.max_completion_tokens??body.max_tokens??4096);if(!Number.isInteger(maxOutput)||maxOutput<1||maxOutput>20_000)throw new HttpError('Invalid max output tokens; COD allows at most 20000',400,'invalid_max_tokens');
         const {source: _source,task_id: _taskId, ...rawProviderBody}=body;const providerMaxOutput=Math.max(512,maxOutput);const providerBody={...rawProviderBody,stream:false,...(body.max_completion_tokens!==undefined?{max_completion_tokens:providerMaxOutput}:{max_tokens:providerMaxOutput})};
-        const requestFingerprint=createHash('sha256').update(canonicalJson({taskId:taskId??null,sourceId,providerBody})).digest('hex');
+        const requestFingerprint=createHash('sha256').update(canonicalJson({taskId:taskId??null,taskExecutionId:taskExecutionId??null,sourceId,providerBody})).digest('hex');
         const requestKey=agentSession?`agent:${agentSession.jti}:${requestFingerprint}`:requestId;
         const upstreamRequestKey=`cod-${createHash('sha256').update(canonicalJson({tenantId:principal.tenantId,userId:principal.userId,requestKey,requestFingerprint})).digest('hex').slice(0,48)}`;
-        const claim=await database.claimChatRequest(principal,requestKey,requestFingerprint);assertClientConnected();
+        const claim=await database.claimChatRequest(principal,requestKey,requestFingerprint,taskExecutionId);assertClientConnected();
         if(claim.state==='pending')throw new HttpError('An identical chat request is still in progress',409,'chat_request_in_progress');
         if(claim.state==='complete'){sendChatResult(response,claim.responsePayload,clientRequestedStream,requestId);return;}
         const reservationId=randomUUID();const estimatedInput=estimatedInputTokens(providerBody);const reservedCost=Math.max(gateway.costCents(selection.model,estimatedInput,providerMaxOutput),fallbackCandidate?gateway.costCents(fallbackCandidate,estimatedInput,providerMaxOutput):0);
         let markReservationReady:()=>void=()=>undefined;const reservationReady=new Promise<void>((resolve)=>{markReservationReady=resolve;});const activeChat:ActiveChatRequest={controller,reservationId,reservationReady,state:'active'};const unregisterActiveChat=taskId?registerActiveChat(principal,taskId,activeChat):()=>undefined;
+        const leaseKeepalive=taskId&&taskExecutionId?setInterval(()=>{void database.renewTaskExecution(principal,taskId,taskExecutionId).catch((error)=>controller.abort(error));},30_000):null;leaseKeepalive?.unref();
         let chatSettled=false;
-        const failChatClaim=async()=>{try{await database.failChatRequest(principal,requestKey,requestFingerprint);}catch(failure){console.error(JSON.stringify({level:'error',event:'chat.claim.fail_failed',requestId,taskId:taskId??null,sourceId,error:failure instanceof Error?failure.message:String(failure)}));}};
+        let stopReservationKeepalive:(()=>Promise<void>)|null=null;
+        const stopReservationLease=async()=>{const stop=stopReservationKeepalive;stopReservationKeepalive=null;if(stop)await stop();};
+        const failChatClaim=async()=>{try{await database.failChatRequest(principal,requestKey,requestFingerprint,taskExecutionId);}catch(failure){console.error(JSON.stringify({level:'error',event:'chat.claim.fail_failed',requestId,taskId:taskId??null,sourceId,error:failure instanceof Error?failure.message:String(failure)}));}};
         try {
-          await database.reserveUsage(principal,reservationId,reservedCost);markReservationReady();if(controller.signal.aborted)throw controller.signal.reason;
-          let actualModel=model;let actualSelection=selection;let actualProviderBody=providerBody;let fallbackReason:'empty'|'length'|null=null;let upstream=await gateway.proxyChat(sourceId,actualProviderBody,upstreamRequestKey,controller.signal);let raw=await readResponseBuffer(upstream);if(controller.signal.aborted)throw controller.signal.reason;
-          if(!upstream.ok){await database.releaseUsage(principal,reservationId);await failChatClaim();response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}
+          await database.reserveUsage(principal,reservationId,reservedCost,taskId&&taskExecutionId?{taskId,executionId:taskExecutionId}:undefined);markReservationReady();if(controller.signal.aborted)throw controller.signal.reason;
+          stopReservationKeepalive=startUsageReservationKeepalive(database,principal,reservationId,controller,reservationKeepaliveIntervalMs,{requestId,taskId:taskId??null,sourceId});
+          let actualModel=model;let actualSelection=selection;let actualProviderBody=providerBody;let fallbackReason:'empty'|'length'|null=null;let upstream=await gateway.proxyChat(sourceId,actualProviderBody,upstreamRequestKey,controller.signal);await throwUpstreamChatError(upstream);let raw=await readResponseBuffer(upstream);if(controller.signal.aborted)throw controller.signal.reason;
+          if(!upstream.ok){await stopReservationLease();if(controller.signal.aborted)throw controller.signal.reason;await database.releaseUsage(principal,reservationId);await failChatClaim();response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}
           let parsed:unknown;try{parsed=JSON.parse(raw.toString('utf8')) as unknown;}catch{throw new HttpError('Model returned an invalid response',502,'invalid_model_response');}let content=assistantContentFromResponse(parsed);let toolCalls=assistantToolCallsFromResponse(parsed);
           const primaryHasAction=assistantHasAction(parsed);const primaryIncomplete=assistantResponseIsIncomplete(parsed);
-          if((!primaryHasAction||primaryIncomplete)&&fallbackCandidate){fallbackReason=primaryIncomplete?'length':'empty';actualModel=fallbackCandidate.id;actualSelection={source:selection.source,model:fallbackCandidate};actualProviderBody={...providerBody,model:actualModel};upstream=await gateway.proxyChat(sourceId,actualProviderBody,`${upstreamRequestKey}-fallback`,controller.signal);raw=await readResponseBuffer(upstream);if(controller.signal.aborted)throw controller.signal.reason;if(!upstream.ok){await database.releaseUsage(principal,reservationId);await failChatClaim();response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}try{parsed=JSON.parse(raw.toString('utf8')) as unknown;}catch{throw new HttpError('Fallback model returned an invalid response',502,'invalid_model_response');}content=assistantContentFromResponse(parsed);toolCalls=assistantToolCallsFromResponse(parsed);}
+          if((!primaryHasAction||primaryIncomplete)&&fallbackCandidate){fallbackReason=primaryIncomplete?'length':'empty';actualModel=fallbackCandidate.id;actualSelection={source:selection.source,model:fallbackCandidate};actualProviderBody={...providerBody,model:actualModel};upstream=await gateway.proxyChat(sourceId,actualProviderBody,`${upstreamRequestKey}-fallback`,controller.signal);await throwUpstreamChatError(upstream);raw=await readResponseBuffer(upstream);if(controller.signal.aborted)throw controller.signal.reason;if(!upstream.ok){await stopReservationLease();if(controller.signal.aborted)throw controller.signal.reason;await database.releaseUsage(principal,reservationId);await failChatClaim();response.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json'});response.end(raw);return;}try{parsed=JSON.parse(raw.toString('utf8')) as unknown;}catch{throw new HttpError('Fallback model returned an invalid response',502,'invalid_model_response');}content=assistantContentFromResponse(parsed);toolCalls=assistantToolCallsFromResponse(parsed);}
           if(!assistantHasAction(parsed))throw new HttpError('Model returned an empty response after retry and fallback',502,'empty_model_response');if(assistantResponseIsIncomplete(parsed))throw new HttpError('Model output reached its token limit after fallback',502,'incomplete_model_response');const usage=usageFromResponse(parsed,actualProviderBody,content??JSON.stringify(toolCalls));
           const calculatedCostCents=gateway.costCents(actualSelection.model,usage.inputTokens,usage.outputTokens);const billingExempt=principal.role==='admin';const costCents=billingExempt?0:calculatedCostCents;const commissionRateBps=billingExempt?0:actualSelection.source.commissionRateBps;const commissionCents=billingExempt?0:Math.round(costCents*commissionRateBps/10_000);const paymentDirection=billingExempt?'管理员测试免计费':actualSelection.source.paymentDirection;
           const result={...(parsed as Record<string,unknown>),model:actualModel,usage:{...((parsed as {usage?:Record<string,unknown>}).usage??{}),prompt_tokens:usage.inputTokens,completion_tokens:usage.outputTokens,total_tokens:usage.inputTokens+usage.outputTokens},cod_source:sourceId,cod_upstream_source:actualSelection.source.upstreamSourceId,cod_payment_direction:paymentDirection,cod_charge_cents:costCents,cod_commission_rate_bps:commissionRateBps,cod_usage_estimated:usage.estimated,cod_requested_model:model,cod_fallback_used:actualModel!==model,cod_fallback_reason:fallbackReason};
           if(Buffer.byteLength(JSON.stringify(result),'utf8')>CHAT_RESPONSE_CACHE_MAX_BYTES)throw new HttpError('Model response is too large to cache safely',502,'chat_response_cache_too_large');
           if(controller.signal.aborted)throw controller.signal.reason;
+          await stopReservationLease();
+          if(controller.signal.aborted)throw controller.signal.reason;
           activeChat.state='settling';
-          await database.settleUsage(principal,reservationId,{idempotencyKey:`chat:${requestKey}:${requestFingerprint}`,taskId:taskId??'chat',sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection,model:actualModel,inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,costCents,commissionRateBps,commissionCents},{requestKey,fingerprint:requestFingerprint,responsePayload:result,audit:{entityId:actualModel,data:{taskId:taskId??null,requestedModel:model,fallbackUsed:actualModel!==model,fallbackReason,sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection,...usage,costCents,commissionRateBps,commissionCents}}});activeChat.state='settled';chatSettled=true;
+          await database.settleUsage(principal,reservationId,{idempotencyKey:`chat:${requestKey}:${requestFingerprint}`,taskId:taskId??'chat',sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection,model:actualModel,inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,costCents,commissionRateBps,commissionCents},{requestKey,fingerprint:requestFingerprint,executionId:taskExecutionId,responsePayload:result,audit:{entityId:actualModel,data:{taskId:taskId??null,executionId:taskExecutionId??null,requestedModel:model,fallbackUsed:actualModel!==model,fallbackReason,sourceId,upstreamSourceId:actualSelection.source.upstreamSourceId,paymentDirection,...usage,costCents,commissionRateBps,commissionCents}}},taskExecutionId);activeChat.state='settled';chatSettled=true;
           sendChatResult(response,result,clientRequestedStream,requestId);return;
-        } catch(error) { markReservationReady();if(!chatSettled)await failChatClaim();await database.releaseUsage(principal,reservationId);if(controller.signal.aborted)throw controller.signal.reason instanceof HttpError?controller.signal.reason:new HttpError('Task was cancelled',409,'task_cancelled');throw error; }
-        finally { unregisterActiveChat(); }
+        } catch(error) { await stopReservationLease();markReservationReady();if(!chatSettled)await failChatClaim();await database.releaseUsage(principal,reservationId);if(controller.signal.aborted)throw controller.signal.reason instanceof HttpError?controller.signal.reason:new HttpError('Task was cancelled',409,'task_cancelled');throw error; }
+        finally { await stopReservationLease();if(leaseKeepalive)clearInterval(leaseKeepalive);unregisterActiveChat(); }
         } finally { request.removeListener('aborted',cancelOnDisconnect);response.removeListener('close',cancelOnDisconnect); }
       }
       return sendJson(response, 404, { error: 'not_found' });

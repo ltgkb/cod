@@ -20,10 +20,16 @@ export interface CodRuntimeConfig {
   copyText?: (value: string) => Promise<void>;
   setNativeColorMode?: (mode: 'light' | 'dark') => Promise<void>;
   setNativeBackAvailable?: (available: boolean) => Promise<void>;
+  setNativeTopmostUiVisible?: (visible: boolean) => Promise<void>;
+  loadSessionCleanupPending?: () => Promise<boolean>;
+  loadSessionToken?: () => Promise<string | null>;
+  saveSessionToken?: (token: string) => Promise<void>;
+  clearSessionToken?: (expectedToken?: string) => Promise<boolean>;
 }
 
 let runtime: CodRuntimeConfig = {};
 let nativeBackHandler: (() => void) | null = null;
+const closeTopmostUiEvent = 'cod:close-topmost-ui';
 
 export function configureCodRuntime(next: CodRuntimeConfig): void {
   runtime = next;
@@ -50,6 +56,15 @@ export function dispatchCodNativeBack(): boolean {
   if (!nativeBackHandler) return false;
   nativeBackHandler();
   return true;
+}
+
+export function requestCodTopmostUiClose(): void {
+  window.dispatchEvent(new Event(closeTopmostUiEvent));
+}
+
+export function observeCodTopmostUiClose(listener: () => void): () => void {
+  window.addEventListener(closeTopmostUiEvent, listener);
+  return () => window.removeEventListener(closeTopmostUiEvent, listener);
 }
 
 export async function openCodExternalUrl(value: string): Promise<void> {

@@ -87,11 +87,18 @@ rollback() {
   exit "${exit_code}"
 }
 
-trap rollback ERR
-
 source /home/ubuntu/cod-project/upstream/goose/bin/activate-hermit
 cd "${project_root}"
+node_binary="$(node -p 'process.execPath')"
+[[ -x "${node_binary}" ]] || { echo "Node runtime is unavailable" >&2; exit 1; }
+node_version="$(node -p 'process.versions.node')"
+if ! isolated_node_version="$(env -i HOME=/nonexistent PATH=/usr/bin:/bin "${node_binary}" -p 'process.versions.node' 2>/dev/null)" || [[ "${isolated_node_version}" != "${node_version}" ]]; then
+  echo "Resolved Node runtime is not self-contained" >&2
+  exit 1
+fi
 npm ci
+node --test scripts/check-npm-audit.test.mjs
+node scripts/check-npm-audit.mjs
 npm run typecheck
 npm test
 npm run lint
@@ -102,7 +109,24 @@ npm run build
 npm audit --workspace @cod/web --workspace @cod/control-plane --audit-level=high
 
 sudo install -d -m 755 "${release_root}"
-if [[ "${release}" == "${previous}" && -f "${release}/start.mjs" && -f "${release}/web/index.html" && -f "${release}/web/app/index.html" ]]; then
+if ! getent group cod >/dev/null; then
+  sudo groupadd --system cod
+fi
+if ! getent passwd cod >/dev/null; then
+  sudo useradd --system --gid cod --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin cod
+fi
+
+release_complete=false
+release_integrity_violation=""
+if [[ -x "${release}/bin/node" && -f "${release}/start.mjs" && -f "${release}/web/index.html" && -f "${release}/web/app/index.html" ]] &&
+  release_integrity_violation="$(sudo find "${release}" \( ! -user root -o ! -group root -o -perm /022 \) -print -quit)" &&
+  [[ -z "${release_integrity_violation}" ]] &&
+  existing_node_version="$(sudo -u cod -- env -i HOME=/nonexistent PATH=/usr/bin:/bin "${release}/bin/node" -p 'process.versions.node' 2>/dev/null)" &&
+  [[ "${existing_node_version}" == "${node_version}" ]]; then
+  release_complete=true
+fi
+
+if [[ "${release}" == "${previous}" && "${release_complete}" == true ]]; then
   curl -fsS http://127.0.0.1:8787/ready >/dev/null
   curl -fsS http://127.0.0.1:8787/version
   printf '\nrelease=%s (already active)\n' "${release}"
@@ -110,24 +134,36 @@ if [[ "${release}" == "${previous}" && -f "${release}/start.mjs" && -f "${releas
   exit 0
 fi
 
-if [[ ! -f "${release}/start.mjs" || ! -f "${release}/web/index.html" || ! -f "${release}/web/app/index.html" ]]; then
+if [[ "${release_complete}" != true ]]; then
   if [[ "${release}" == "${previous}" ]]; then
     echo "Current release is incomplete; refusing to overwrite it in place" >&2
     exit 1
   fi
   sudo rm -rf --one-file-system "${release}" "${release_staging}"
-  sudo install -d -m 755 "${release_staging}" "${release_staging}/scripts" "${release_staging}/web"
+  sudo install -d -m 755 "${release_staging}" "${release_staging}/bin" "${release_staging}/scripts" "${release_staging}/web"
   ./node_modules/.bin/esbuild services/control-plane/dist/server.js --bundle --platform=node --format=esm --target=node22 \
     --banner:js='import { createRequire as __codCreateRequire } from "node:module"; const require = __codCreateRequire(import.meta.url);' \
     --outfile="/tmp/cod-server-${revision}.mjs"
   sudo install -m 644 "/tmp/cod-server-${revision}.mjs" "${release_staging}/start.mjs"
+  sudo install -o root -g root -m 755 "${node_binary}" "${release_staging}/bin/node"
+  if ! staged_node_version="$(sudo -u cod -- env -i HOME=/nonexistent PATH=/usr/bin:/bin "${release_staging}/bin/node" -p 'process.versions.node' 2>/dev/null)" || [[ "${staged_node_version}" != "${node_version}" ]]; then
+    echo "Staged Node runtime is not self-contained" >&2
+    exit 1
+  fi
   rm -f "/tmp/cod-server-${revision}.mjs"
   sudo rsync -a --delete scripts/ "${release_staging}/scripts/"
   sudo chmod 755 "${release_staging}/scripts/"*.sh
   sudo rsync -a --delete apps/web/dist/ "${release_staging}/web/"
+  sudo chown -R root:root "${release_staging}"
+  sudo chmod -R go-w "${release_staging}"
+  if sudo find "${release_staging}" \( ! -user root -o ! -group root -o -perm /022 \) -print -quit | grep -q .; then
+    echo "Release staging contains mutable or non-root-owned files" >&2
+    exit 1
+  fi
   sudo mv "${release_staging}" "${release}"
 fi
 backup_configuration
+trap rollback ERR
 sudo install -o root -g root -m 644 deploy/cod-control-plane.service /etc/systemd/system/cod-control-plane.service
 sudo install -o root -g root -m 644 deploy/cod-backup.service /etc/systemd/system/cod-backup.service
 sudo install -o root -g root -m 644 deploy/cod-backup.timer /etc/systemd/system/cod-backup.timer
@@ -156,6 +192,12 @@ for _ in $(seq 1 60); do
 done
 
 if [[ "${ready}" != true ]]; then
+  false
+fi
+
+main_pid="$(systemctl show --property=MainPID --value cod-control-plane)"
+if [[ ! "${main_pid}" =~ ^[1-9][0-9]*$ ]] || ! sudo grep -zqx 'NODE_ENV=production' "/proc/${main_pid}/environ"; then
+  echo "Control plane is not running with NODE_ENV=production" >&2
   false
 fi
 

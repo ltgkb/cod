@@ -17,11 +17,11 @@ interface CollectUntrackedDiffOptions {
 }
 
 export function unstagedGitDiffArguments(): string[] {
-  return ['diff', '--no-ext-diff', '--no-textconv', '--'];
+  return ['diff', '--no-ext-diff', '--no-textconv', '--ignore-submodules=all', '--'];
 }
 
 export function stagedGitDiffArguments(): string[] {
-  return ['diff', '--cached', '--no-ext-diff', '--no-textconv', '--'];
+  return ['diff', '--cached', '--no-ext-diff', '--no-textconv', '--ignore-submodules=all', '--'];
 }
 
 export function untrackedGitDiffArguments(emptyFile: string, relativePath: string): string[] {
@@ -127,4 +127,33 @@ export async function collectUntrackedDiff(root: string, options: CollectUntrack
   const omittedPaths = relativePaths.length - includedPaths;
   if (omittedPaths > 0) diffs.push(`# 其余 ${omittedPaths} 个未跟踪路径已省略。`);
   return diffs.join('\n');
+}
+
+export async function collectGitDiff(root: string): Promise<string> {
+  try {
+    const { stdout } = await executeGitCommand(root, ['rev-parse', '--is-inside-work-tree'], {
+      maxBuffer: 64 * 1024,
+      timeoutMilliseconds: 3_000,
+    });
+    if (stdout.trim() !== 'true') return '当前目录不是 Git 工作区，暂无可显示的改动。';
+  } catch (error) {
+    if (commandTimedOut(error)) return 'Git 状态读取超时；项目文件仍可正常使用。可检查仓库元数据权限后重试。';
+    return '当前目录不是 Git 仓库，暂无可显示的改动。初始化 Git 后即可在这里查看变更。';
+  }
+
+  try {
+    const [{ stdout: unstaged }, { stdout: staged }, untracked] = await Promise.all([
+      executeGitCommand(root, unstagedGitDiffArguments(), { maxBuffer: 2 * 1024 * 1024, timeoutMilliseconds: gitCommandTimeoutMilliseconds }),
+      executeGitCommand(root, stagedGitDiffArguments(), { maxBuffer: 2 * 1024 * 1024, timeoutMilliseconds: gitCommandTimeoutMilliseconds }),
+      collectUntrackedDiff(root),
+    ]);
+    return [
+      unstaged && '# Unstaged changes\n' + unstaged,
+      staged && '# Staged changes\n' + staged,
+      untracked && '# Untracked files\n' + untracked,
+    ].filter(Boolean).join('\n');
+  } catch (error) {
+    if (commandTimedOut(error)) return 'Git 改动读取超时；项目文件仍可正常使用。请缩小仓库范围或稍后重试。';
+    return 'Git 改动读取失败；项目文件仍可正常使用。';
+  }
 }

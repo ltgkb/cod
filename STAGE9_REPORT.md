@@ -5,7 +5,7 @@
 - Immutable revision releases under `/opt/cod/releases` with one atomic `/opt/cod/current` switch for both Web and control-plane artifacts.
 - The control plane and runtime dependencies are bundled into a compact Node ESM artifact instead of copying the full development dependency tree.
 - Releases are assembled in staging directories and renamed only when complete.
-- The deployment gate runs clean install, typecheck, all tests, lint, production builds, and high-severity dependency audit before activation.
+- The deployment gate runs clean install, the fail-closed dependency policy, typecheck, all tests, lint, and production builds before activation. Dependency-policy failure occurs before builds and before any service or configuration mutation.
 - Activation has a global rollback trap. Any failure after the current link changes restores the previous release, revision metadata, Nginx, and the control-plane service.
 - Re-deploying the complete active revision is idempotent after the release gate and does not restart services or trigger activation-failure testing.
 - `/health`, PostgreSQL-aware `/ready`, localhost-only `/metrics`, and localhost-only `/version` endpoints.
@@ -18,7 +18,7 @@
 
 ## Verification
 
-- Complete release gates passed with one Web test and 13 control-plane tests, zero lint warnings, successful production builds, and zero npm audit vulnerabilities.
+- The original Stage 9 release gates passed with one Web test and 13 control-plane tests, zero lint warnings, successful production builds, and zero audit vulnerabilities. In the 2026-08-11 post-Expo-refactor review, control-plane/Web production dependencies still report zero high/critical vulnerabilities; the full tree passes only the exact two-advisory, mitigation-bound Expo/Metro `image-size` exception, which expires after 2026-09-11.
 - A controlled post-activation failure returned a non-zero deployment result and automatically restored the old release, `/version`, and PostgreSQL readiness.
 - The rollback drill used two consecutive compact bundled releases, proving that the current release format can actually start after restoration rather than relying on a legacy recovery artifact.
 - An active-revision re-deploy completed successfully with an unchanged control-plane PID and systemd activation timestamp.

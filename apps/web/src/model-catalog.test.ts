@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { PublicModelSourceInfo } from './api';
-import { filterModelCatalog, groupModelCatalog } from './model-catalog';
+import { filterModelCatalog, groupModelCatalog, uniqueCallableModels } from './model-catalog';
 
 const source = (id: string, label: string, callable: boolean, input = 824): PublicModelSourceInfo => ({
   id,
@@ -29,5 +29,13 @@ describe('model catalog grouping', () => {
     const groups = groupModelCatalog([source('ai-kai', 'AI.KAI.COM', true), source('chase-kai', 'CHASE.KAI.COM', false)]);
     expect(filterModelCatalog(groups, 'chase')).toHaveLength(1);
     expect(filterModelCatalog(groups, 'missing')).toHaveLength(0);
+  });
+
+  it('offers one comparison target for the same upstream model and price', () => {
+    const sources = [source('ai-kai', 'AI.KAI.COM', true), source('chase-kai', 'CHASE.KAI.COM', true)];
+    expect(uniqueCallableModels(sources)).toEqual([
+      expect.objectContaining({ key: 'ai-kai::glm-5.2', sourceId: 'ai-kai', model: expect.objectContaining({ id: 'glm-5.2' }) }),
+    ]);
+    expect(uniqueCallableModels([source('one-kai', 'ONE.KAI.COM', true), source('two-kai', 'TWO.KAI.COM', true, 999)])).toHaveLength(2);
   });
 });

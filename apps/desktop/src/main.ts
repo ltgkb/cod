@@ -14,6 +14,8 @@ import { commandPathCandidates, commandPolicyViolation, isWithinRoot, parseComma
 import { commandTimedOut, executeGitCommand } from './git-command.js';
 import { collectUntrackedDiff, stagedGitDiffArguments, unstagedGitDiffArguments } from './git-diff.js';
 import { minimalGooseEnvironment } from './goose-environment.js';
+import { forceTerminateChildProcess, GooseLaunchCoordinator, terminateChildProcess } from './goose-lifecycle.js';
+import { cleanupAbandonedGooseSidecar, clearGooseOwnershipRecord, saveGooseOwnershipRecord } from './goose-ownership.js';
 import { isAllowedDevelopmentNavigation, isSafeExternalUrl } from './navigation-policy.js';
 import { resolveCommandInvocation } from './platform-command.js';
 import { loadApprovedProjectRoots, maximumApprovedProjectRoots, saveApprovedProjectRoots } from './project-roots.js';
@@ -34,22 +36,18 @@ const packagedEntryPath = path.join(process.resourcesPath, 'web', 'app', 'index.
 const packagedEntryUrl = pathToFileURL(packagedEntryPath).href;
 const gitProbeTimeoutMilliseconds = 3_000;
 const gitDiffTimeoutMilliseconds = 15_000;
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) app.quit();
 const approvedProjectRoots = new Set<string>();
 let gooseSidecar: ChildProcess | null = null;
 let gooseAcpProxy: AcpProxy | null = null;
 let gooseAcpUrl: string | null = null;
 let gooseConfigurationKey: string | null = null;
 let gooseAgentTokenExpiresAt = 0;
-let gooseOperationQueue: Promise<void> = Promise.resolve();
+const gooseLaunchCoordinator = new GooseLaunchCoordinator();
 
 function trustedRendererWebSocketOrigins(): string[] {
   return app.isPackaged ? ['file://', 'null'] : [new URL(developmentUrl).origin];
-}
-
-function serializeGooseOperation<T>(operation: () => Promise<T>): Promise<T> {
-  const result = gooseOperationQueue.then(operation, operation);
-  gooseOperationQueue = result.then(() => undefined, () => undefined);
-  return result;
 }
 
 function assertTrustedIpcSender(event: IpcMainInvokeEvent): void {
@@ -88,6 +86,9 @@ async function waitForGoose(port: number, processToWatch: ChildProcess, attempts
   processToWatch.once('exit', handleExit);
   try {
     for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (processToWatch.exitCode !== null || processToWatch.signalCode !== null) {
+        throw new Error(`Goose sidecar exited before becoming ready${processToWatch.exitCode !== null ? ` (exit ${processToWatch.exitCode})` : ` (${processToWatch.signalCode})`}`);
+      }
       if (startupError) throw startupError;
       try {
         const response = await fetch(`http://127.0.0.1:${port}/status`, { signal: AbortSignal.timeout(500) });
@@ -107,6 +108,7 @@ async function waitForGoose(port: number, processToWatch: ChildProcess, attempts
 
 async function stopGooseSidecar(): Promise<void> {
   const processToStop = gooseSidecar;
+  const processId = processToStop?.pid;
   const proxyToStop = gooseAcpProxy;
   gooseSidecar = null;
   gooseAcpProxy = null;
@@ -114,12 +116,12 @@ async function stopGooseSidecar(): Promise<void> {
   gooseConfigurationKey = null;
   gooseAgentTokenExpiresAt = 0;
   if (proxyToStop) await proxyToStop.close();
-  if (!processToStop || processToStop.exitCode !== null) return;
-  await new Promise<void>((resolve) => {
-    const timeout = setTimeout(() => { processToStop.kill('SIGKILL'); resolve(); }, 2_000);
-    processToStop.once('exit', () => { clearTimeout(timeout); resolve(); });
-    processToStop.kill();
-  });
+  await terminateChildProcess(processToStop);
+  if (processId) await clearGooseOwnershipRecord(gooseOwnershipFile(), processId).catch(() => undefined);
+}
+
+function gooseOwnershipFile(): string {
+  return path.join(app.getPath('userData'), 'goose-sidecar-owner.json');
 }
 
 async function prepareGooseStorage(): Promise<{ pathRoot: string; stateHome: string | null }> {
@@ -142,21 +144,27 @@ function validateAgentGatewayConfig(config: AgentGatewayConfig): void {
   }
   if (typeof config.sourceId !== 'string' || !/^[a-z0-9-]{2,40}$/.test(config.sourceId)) throw new Error('Invalid model source');
   if (typeof config.modelId !== 'string' || !config.modelId || config.modelId.length > 200 || /[\0\r\n]/.test(config.modelId)) throw new Error('Invalid model');
-  if (typeof config.taskId !== 'string' || !/^[a-f0-9-]{36}$/i.test(config.taskId)) throw new Error('Invalid task');
+  if (typeof config.taskId !== 'string' || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(config.taskId)) throw new Error('Invalid task');
+  if (typeof config.executionId !== 'string' || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(config.executionId)) throw new Error('Invalid task execution');
+  if (typeof config.leaseToken !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(config.leaseToken)) throw new Error('Invalid task lease');
   if (typeof config.root !== 'string'
     || !config.root
     || config.root.length > 4_096
     || /[\0\r\n]/.test(config.root)) throw new Error('Invalid project root');
 }
 
-async function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | null> {
+async function ensureGooseSidecarSerialized(config: AgentGatewayConfig, assertCurrent: () => void): Promise<string | null> {
   validateAgentGatewayConfig(config);
   const resolvedRoot = await approvedProjectRoot(config.root);
+  assertCurrent();
   const configuredBase = app.isPackaged ? null : process.env.COD_GOOSE_ACP_URL;
   const configuredToken = app.isPackaged ? null : process.env.COD_GOOSE_ACP_TOKEN;
-  const configurationKey = createHash('sha256').update(`${config.token}\0${config.sourceId}\0${config.modelId}\0${config.taskId}\0${resolvedRoot}`).digest('hex');
+  const configurationKey = createHash('sha256').update(`${config.token}\0${config.sourceId}\0${config.modelId}\0${config.taskId}\0${config.executionId}\0${config.leaseToken}\0${resolvedRoot}`).digest('hex');
   if (gooseAcpProxy && gooseAcpUrl && gooseConfigurationKey === configurationKey && gooseAgentTokenExpiresAt > Date.now() + 60_000) return gooseAcpUrl;
-  if (gooseSidecar || gooseAcpProxy) await stopGooseSidecar();
+  if (gooseSidecar || gooseAcpProxy) {
+    await stopGooseSidecar();
+    assertCurrent();
+  }
 
   if (configuredBase || configuredToken) {
     if (!configuredBase || !configuredToken) throw new Error('Both COD_GOOSE_ACP_URL and COD_GOOSE_ACP_TOKEN are required');
@@ -168,9 +176,13 @@ async function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | 
       throw new Error('COD_GOOSE_ACP_URL must be a WebSocket URL without credentials or a fragment');
     }
     configured.searchParams.set('token', configuredToken);
-    const proxy = await startAcpProxy(configured.toString(), resolvedRoot, {
-      allowedOrigins: trustedRendererWebSocketOrigins(),
-    });
+    const proxy = await startAcpProxy(configured.toString(), resolvedRoot, { allowedOrigins: trustedRendererWebSocketOrigins() });
+    try {
+      assertCurrent();
+    } catch (error) {
+      await proxy.close();
+      throw error;
+    }
     gooseAcpProxy = proxy;
     gooseAcpUrl = proxy.url;
     gooseConfigurationKey = configurationKey;
@@ -183,17 +195,23 @@ async function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | 
   try {
     await fs.access(binary);
   } catch {
+    assertCurrent();
     return null;
   }
+  const resolvedBinary = await fs.realpath(binary);
+  assertCurrent();
   const controlPlane = new URL(controlPlaneUrl);
   const agentSession = await mintAgentSession(controlPlane, config);
+  assertCurrent();
   const gooseStorage = await prepareGooseStorage();
+  assertCurrent();
   const port = await availablePort();
+  assertCurrent();
   const secret = randomBytes(24).toString('hex');
   controlPlane.pathname = `${controlPlane.pathname.replace(/\/$/, '')}/v1/tasks/${encodeURIComponent(config.taskId)}/sources/${encodeURIComponent(config.sourceId)}`;
   controlPlane.search = '';
   controlPlane.hash = '';
-  const spawnedSidecar = spawn(binary, ['serve', '--host', '127.0.0.1', '--port', String(port), '--with-builtin', 'developer'], {
+  const spawnedSidecar = spawn(resolvedBinary, ['serve', '--host', '127.0.0.1', '--port', String(port), '--with-builtin', 'developer'], {
     cwd: resolvedRoot,
     stdio: 'ignore',
     windowsHide: true,
@@ -212,8 +230,22 @@ async function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | 
       ...(gooseStorage.stateHome ? { XDG_STATE_HOME: gooseStorage.stateHome } : {}),
     },
   });
+  const sidecarPid = spawnedSidecar.pid;
+  if (!sidecarPid) {
+    await terminateChildProcess(spawnedSidecar);
+    throw new Error('Goose sidecar failed to expose a process ID');
+  }
   gooseSidecar = spawnedSidecar;
+  const ownershipReady = saveGooseOwnershipRecord(gooseOwnershipFile(), {
+    version: 1,
+    ownerPid: process.pid,
+    sidecarPid,
+    executablePath: resolvedBinary,
+    port,
+    createdAt: new Date().toISOString(),
+  });
   const clearSpawnedSidecar = () => {
+    void ownershipReady.then(() => clearGooseOwnershipRecord(gooseOwnershipFile(), sidecarPid)).catch(() => undefined);
     if (gooseSidecar !== spawnedSidecar) return;
     const proxyToClose = gooseAcpProxy;
     gooseSidecar = null;
@@ -226,22 +258,26 @@ async function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | 
   spawnedSidecar.once('exit', clearSpawnedSidecar);
   spawnedSidecar.once('error', clearSpawnedSidecar);
   try {
+    await ownershipReady;
     await waitForGoose(port, spawnedSidecar);
+    assertCurrent();
     if (spawnedSidecar.exitCode !== null || gooseSidecar !== spawnedSidecar) {
       throw new Error('Goose sidecar exited before accepting an ACP session');
     }
   } catch (error) {
-    if (spawnedSidecar.exitCode === null && !spawnedSidecar.killed) spawnedSidecar.kill();
+    await terminateChildProcess(spawnedSidecar);
     clearSpawnedSidecar();
     throw error;
   }
-  let proxy: AcpProxy;
+  let proxy: AcpProxy | null = null;
   try {
     proxy = await startAcpProxy(`ws://127.0.0.1:${port}/acp?token=${secret}`, resolvedRoot, {
       allowedOrigins: trustedRendererWebSocketOrigins(),
     });
+    assertCurrent();
   } catch (error) {
-    if (spawnedSidecar.exitCode === null && !spawnedSidecar.killed) spawnedSidecar.kill();
+    if (proxy) await proxy.close();
+    await terminateChildProcess(spawnedSidecar);
     clearSpawnedSidecar();
     throw error;
   }
@@ -254,6 +290,14 @@ async function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | 
   gooseConfigurationKey = configurationKey;
   gooseAgentTokenExpiresAt = agentSession.expiresAt;
   return gooseAcpUrl;
+}
+
+function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | null> {
+  return gooseLaunchCoordinator.run((assertCurrent) => ensureGooseSidecarSerialized(config, assertCurrent));
+}
+
+function invalidateAndStopGooseSidecar(): Promise<void> {
+  return gooseLaunchCoordinator.invalidate(stopGooseSidecar);
 }
 
 async function resolveProjectRoot(root: string): Promise<string> {
@@ -321,6 +365,7 @@ async function createWindow() {
       devTools: !app.isPackaged,
       webSecurity: true,
       allowRunningInsecureContent: false,
+      backgroundThrottling: false,
       spellcheck: true,
     },
   });
@@ -339,8 +384,11 @@ async function createWindow() {
     if (!event.isMainFrame) event.preventDefault();
   });
   window.webContents.on('will-attach-webview', (event) => event.preventDefault());
-  window.webContents.on('render-process-gone', () => { void serializeGooseOperation(stopGooseSidecar); });
-  window.on('closed', () => { void serializeGooseOperation(stopGooseSidecar); });
+  window.webContents.on('did-start-navigation', (_event, _url, _isInPlace, isMainFrame) => {
+    if (isMainFrame) void invalidateAndStopGooseSidecar();
+  });
+  window.webContents.on('render-process-gone', () => { void invalidateAndStopGooseSidecar(); });
+  window.webContents.on('destroyed', () => { void invalidateAndStopGooseSidecar(); });
 
   if (!app.isPackaged) {
     await window.loadURL(new URL('/app/', developmentUrl).href);
@@ -402,11 +450,11 @@ ipcMain.handle('cod:git-diff', async (event, root: string) => {
 
 ipcMain.handle('cod:get-goose-acp-url', (event, config: AgentGatewayConfig) => {
   assertTrustedIpcSender(event);
-  return serializeGooseOperation(() => ensureGooseSidecar(config));
+  return ensureGooseSidecar(config);
 });
 ipcMain.handle('cod:stop-goose', (event) => {
   assertTrustedIpcSender(event);
-  return serializeGooseOperation(stopGooseSidecar);
+  return invalidateAndStopGooseSidecar();
 });
 
 ipcMain.handle('cod:run-command', async (event, root: string, rawCommand: string): Promise<TerminalResult> => {
@@ -444,25 +492,51 @@ ipcMain.handle('cod:run-command', async (event, root: string, rawCommand: string
   }
 });
 
-app.whenReady().then(async () => {
-  if (runtimeConfigurationError) {
-    dialog.showErrorBox('COD 启动配置无效', runtimeConfigurationError.message);
-    app.quit();
-    return;
-  }
-  session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
-  session.defaultSession.setPermissionCheckHandler(() => false);
-  session.defaultSession.setDevicePermissionHandler(() => false);
-  session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => callback({}));
-  session.defaultSession.on('will-download', (event) => event.preventDefault());
-  await restoreApprovedProjectRoots();
-  await createWindow();
-  app.on('activate', async () => {
-    if (BrowserWindow.getAllWindows().length === 0) await createWindow();
+if (hasSingleInstanceLock) {
+  app.whenReady().then(async () => {
+    if (runtimeConfigurationError) {
+      dialog.showErrorBox('COD 启动配置无效', runtimeConfigurationError.message);
+      app.quit();
+      return;
+    }
+    session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+    session.defaultSession.setPermissionCheckHandler(() => false);
+    session.defaultSession.setDevicePermissionHandler(() => false);
+    session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => callback({}));
+    session.defaultSession.on('will-download', (event) => event.preventDefault());
+    await cleanupAbandonedGooseSidecar(gooseOwnershipFile()).catch(() => undefined);
+    await restoreApprovedProjectRoots();
+    await createWindow();
+    app.on('activate', async () => {
+      if (BrowserWindow.getAllWindows().length === 0) await createWindow();
+    });
   });
-});
 
-app.on('window-all-closed', () => {
-  void serializeGooseOperation(stopGooseSidecar);
-  if (process.platform !== 'darwin') app.quit();
-});
+  app.on('second-instance', () => {
+    const window = BrowserWindow.getAllWindows()[0];
+    if (!window) return;
+    if (window.isMinimized()) window.restore();
+    window.show();
+    window.focus();
+  });
+
+  app.on('window-all-closed', () => {
+    void invalidateAndStopGooseSidecar();
+    if (process.platform !== 'darwin') app.quit();
+  });
+
+  app.on('before-quit', () => { void invalidateAndStopGooseSidecar(); });
+  process.once('exit', () => { forceTerminateChildProcess(gooseSidecar); });
+
+  let stoppingForSignal = false;
+  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
+    process.once(signal, () => {
+      if (stoppingForSignal) {
+        forceTerminateChildProcess(gooseSidecar);
+        process.exit(1);
+      }
+      stoppingForSignal = true;
+      void invalidateAndStopGooseSidecar().finally(() => { process.kill(process.pid, signal); });
+    });
+  }
+}

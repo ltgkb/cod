@@ -1,48 +1,90 @@
 'use dom';
 
-import { useEffect } from 'react';
+import { forwardRef, useEffect, useState } from 'react';
+import { useDOMImperativeHandle } from 'expo/dom';
 import type { DOMImperativeFactory } from 'expo/dom';
-import type { Ref } from 'react';
 
 import { App } from '../../web/src/App';
 import { configureCodRuntime, dispatchCodNativeBack } from '../../web/src/runtime';
 import type { NativeHttpRequest, NativeHttpResponse } from '../../web/src/runtime';
-import { ensureExpoDomGlobals } from './dom-bootstrap';
-import { domNativeActions, installNativeBackHandle } from './dom-native-bridge';
+import { nativeBridgeCapabilityReadyEvent, tryReadNativeBridgeCapability } from './native-bridge-security';
 import '../../web/src/styles.css';
 
-const fallbackControlPlaneUrl = process.env.EXPO_PUBLIC_COD_CONTROL_PLANE_URL ?? 'https://cod.kai.com';
-ensureExpoDomGlobals(fallbackControlPlaneUrl);
-
-export interface CodWorkspaceRef extends DOMImperativeFactory {
+export interface CodWorkspaceHandle extends DOMImperativeFactory {
   handleNativeBack: () => void;
 }
 
 interface CodWorkspaceProps {
-  ref: Ref<CodWorkspaceRef>;
   controlPlaneUrl: string;
   hostPlatform?: 'android' | 'ios';
-  nativeRequest: (request: NativeHttpRequest) => Promise<NativeHttpResponse>;
-  cancelNativeRequest: (id: string) => Promise<void>;
-  openExternalUrl: (url: string) => Promise<void>;
-  copyText: (value: string) => Promise<void>;
-  setNativeColorMode: (mode: 'light' | 'dark') => Promise<void>;
-  setNativeBackAvailable: (available: boolean) => Promise<void>;
+  nativeRequest: (capability: string, request: NativeHttpRequest) => Promise<NativeHttpResponse>;
+  cancelNativeRequest: (capability: string, id: string) => Promise<void>;
+  openExternalUrl: (capability: string, url: string) => Promise<void>;
+  copyText: (capability: string, value: string) => Promise<void>;
+  setNativeColorMode: (capability: string, mode: 'light' | 'dark') => Promise<void>;
+  setNativeBackAvailable: (capability: string, available: boolean) => Promise<void>;
+  loadSessionCleanupPending: (capability: string) => Promise<boolean>;
+  loadSessionToken: (capability: string) => Promise<string | null>;
+  saveSessionToken: (capability: string, token: string) => Promise<void>;
+  clearSessionToken: (capability: string, expectedToken?: string) => Promise<boolean>;
   dom?: import('expo/dom').DOMProps;
 }
 
-export default function CodWorkspace({
+const CodWorkspace = forwardRef<CodWorkspaceHandle, CodWorkspaceProps>(function CodWorkspace({
   controlPlaneUrl,
   hostPlatform,
-}: CodWorkspaceProps) {
-  useEffect(() => installNativeBackHandle(() => {
-    dispatchCodNativeBack();
-  }), []);
-
+  nativeRequest,
+  cancelNativeRequest,
+  openExternalUrl,
+  copyText,
+  setNativeColorMode,
+  setNativeBackAvailable,
+  loadSessionCleanupPending,
+  loadSessionToken,
+  saveSessionToken,
+  clearSessionToken,
+}, ref) {
+  const [nativeBridgeCapability,setNativeBridgeCapability]=useState(tryReadNativeBridgeCapability);
+  useEffect(()=>{
+    const root=document.documentElement;
+    const previousHostPlatform=root.dataset.codHostPlatform;
+    if(hostPlatform)root.dataset.codHostPlatform=hostPlatform;
+    else delete root.dataset.codHostPlatform;
+    return()=>{
+      if(previousHostPlatform)root.dataset.codHostPlatform=previousHostPlatform;
+      else delete root.dataset.codHostPlatform;
+    };
+  },[hostPlatform]);
+  useEffect(()=>{
+    if(nativeBridgeCapability)return undefined;
+    const readCapability=()=>{
+      const nextCapability=tryReadNativeBridgeCapability();
+      if(nextCapability)setNativeBridgeCapability(nextCapability);
+    };
+    window.addEventListener(nativeBridgeCapabilityReadyEvent,readCapability);
+    const retry=window.setInterval(readCapability,25);
+    readCapability();
+    return()=>{window.removeEventListener(nativeBridgeCapabilityReadyEvent,readCapability);window.clearInterval(retry);};
+  },[nativeBridgeCapability]);
+  useDOMImperativeHandle(ref, () => ({ handleNativeBack: dispatchCodNativeBack }), []);
+  if(!nativeBridgeCapability){
+    return <main role="status" aria-live="polite">正在安全启动 COD…</main>;
+  }
   configureCodRuntime({
     controlPlaneUrl,
     hostPlatform,
-    ...domNativeActions,
+    nativeRequest:(request)=>nativeRequest(nativeBridgeCapability,request),
+    cancelNativeRequest:(id)=>cancelNativeRequest(nativeBridgeCapability,id),
+    openExternalUrl:(url)=>openExternalUrl(nativeBridgeCapability,url),
+    copyText:(value)=>copyText(nativeBridgeCapability,value),
+    setNativeColorMode:(mode)=>setNativeColorMode(nativeBridgeCapability,mode),
+    setNativeBackAvailable:(available)=>setNativeBackAvailable(nativeBridgeCapability,available),
+    loadSessionCleanupPending:()=>loadSessionCleanupPending(nativeBridgeCapability),
+    loadSessionToken:()=>loadSessionToken(nativeBridgeCapability),
+    saveSessionToken:(token)=>saveSessionToken(nativeBridgeCapability,token),
+    clearSessionToken:(expectedToken)=>clearSessionToken(nativeBridgeCapability,expectedToken),
   });
   return <App />;
-}
+});
+
+export default CodWorkspace;

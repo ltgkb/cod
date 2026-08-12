@@ -144,6 +144,8 @@ export interface AgentGatewayConfig {
   modelId: string;
   taskId: string;
   root: string;
+  executionId: string;
+  leaseToken: string;
 }
 
 export interface DesktopBridge {

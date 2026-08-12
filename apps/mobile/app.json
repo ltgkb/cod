@@ -20,6 +20,12 @@
             "backgroundColor": "#0b1416"
           }
         }
+      ],
+      [
+        "expo-secure-store",
+        {
+          "configureAndroidBackup": true
+        }
       ]
     ],
     "ios": {
@@ -28,6 +34,12 @@
     },
     "android": {
       "package": "com.kai.cod",
+      "allowBackup": false,
+      "blockedPermissions": [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.SYSTEM_ALERT_WINDOW"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#1b7f7f",
         "foregroundImage": "./assets/android-icon-foreground.png"

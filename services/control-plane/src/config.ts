@@ -1,5 +1,10 @@
 import { existsSync } from 'node:fs';
-import { tokenRetailDomains, tokenRetailSourceId } from './token-retail-directory.js';
+import { isIP } from 'node:net';
+import { nonPublicTokenRetailDomains, tokenRetailDomains, tokenRetailSourceId } from './token-retail-directory.js';
+
+const nonPublicTokenRetailSourceIds = new Set(nonPublicTokenRetailDomains.map(tokenRetailSourceId));
+const nonPublicTokenRetailLabels = new Set<string>(nonPublicTokenRetailDomains);
+const reservedModelSourceIds = new Set(['demo']);
 
 export interface ModelSourceConfig {
   id: string;
@@ -43,6 +48,9 @@ export interface RegistrationVerificationConfig {
   turnstileSiteKey: string | null;
   turnstileSecretKey: string | null;
   turnstileVerifyUrl: string;
+  turnstileExpectedHostnames: string[];
+  turnstileExpectedActions: string[];
+  outboundAllowedHostnames: string[];
   otpTtlSeconds: number;
   resendSeconds: number;
   maxSendsPerChannel: number;
@@ -146,6 +154,8 @@ function loadModelSources(environment: NodeJS.ProcessEnv): ModelSourceConfig[] {
     const id = String(source.id ?? '').trim(); const label = String(source.label ?? '').trim();
     const commissionRateBps = Number(source.commissionRateBps ?? 0);
     if (!/^[a-z0-9-]{2,40}$/.test(id) || !label || !Number.isInteger(commissionRateBps) || commissionRateBps < 0 || commissionRateBps > 10_000) throw new Error(`Model source ${index} is incomplete`);
+    if (reservedModelSourceIds.has(id)) throw new Error(`Model source ${index} uses a reserved ID`);
+    if (nonPublicTokenRetailSourceIds.has(id) || nonPublicTokenRetailLabels.has(label.toLowerCase())) throw new Error(`Model source ${index} is non-public`);
     return {
       id, label, upstreamSourceId: 'ai-kai', baseUrl: aiBaseUrl, catalogUrl, statusUrl,
       paymentDirection: `钱包/额度 → ai.kai.com · 归因 ${label}`, commissionRateBps, apiKey: environment.KAI_API_KEY ?? null,
@@ -212,6 +222,16 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     if (!Number.isInteger(value) || value < minimum || value > maximum) throw new Error(`${name} must be an integer between ${minimum} and ${maximum}`);
     return value;
   };
+  const hostnameList = (name: string, raw: string | undefined, fallback = ''): string[] => {
+    const values=(raw??fallback).split(',').map((value)=>value.trim().toLowerCase()).filter(Boolean);
+    if(values.some((value)=>value.length>253||value==='localhost'||!/^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/.test(value)))throw new Error(`${name} must contain valid public hostnames`);
+    return [...new Set(values)];
+  };
+  const configuredRegistrationHosts=[registrationEmailWebhook?.url,registrationSmsWebhook?.url].flatMap((value)=>{try{return value?[new URL(value).hostname.toLowerCase().replace(/\.$/,'')]:[];}catch{return[];}});
+  const turnstileExpectedHostnames=hostnameList('COD_TURNSTILE_EXPECTED_HOSTNAMES',environment.COD_TURNSTILE_EXPECTED_HOSTNAMES,production?'':'test.localhost');
+  const outboundAllowedHostnames=hostnameList('COD_REGISTRATION_OUTBOUND_ALLOWED_HOSTS',environment.COD_REGISTRATION_OUTBOUND_ALLOWED_HOSTS,production?'':configuredRegistrationHosts.join(','));
+  const turnstileExpectedActions=(environment.COD_TURNSTILE_EXPECTED_ACTIONS??'cod_registration_email,cod_registration_phone').split(',').map((value)=>value.trim()).filter(Boolean);
+  if(turnstileExpectedActions.length!==2||turnstileExpectedActions.some((value)=>!/^[A-Za-z0-9_-]{1,32}$/.test(value)))throw new Error('COD_TURNSTILE_EXPECTED_ACTIONS must contain the email and phone actions');
   const registrationVerification: RegistrationVerificationConfig = {
     hmacKey: registrationHmacKey,
     emailWebhook: registrationEmailWebhook ? { url: registrationEmailWebhook.url, bearerToken: registrationEmailWebhook.bearerToken } : null,
@@ -219,6 +239,9 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     turnstileSiteKey: turnstile?.siteKey ?? null,
     turnstileSecretKey: turnstile?.secretKey ?? null,
     turnstileVerifyUrl: environment.COD_TURNSTILE_VERIFY_URL ?? 'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+    turnstileExpectedHostnames,
+    turnstileExpectedActions,
+    outboundAllowedHostnames,
     otpTtlSeconds: positiveInteger('COD_REGISTRATION_OTP_TTL_SECONDS', environment.COD_REGISTRATION_OTP_TTL_SECONDS, 600, 60, 3600),
     resendSeconds: positiveInteger('COD_REGISTRATION_RESEND_SECONDS', environment.COD_REGISTRATION_RESEND_SECONDS, 60, 15, 900),
     maxSendsPerChannel: positiveInteger('COD_REGISTRATION_MAX_SENDS_PER_CHANNEL', environment.COD_REGISTRATION_MAX_SENDS_PER_CHANNEL, 3, 1, 10),
@@ -260,6 +283,8 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
       if (!registrationEmailWebhook) throw new Error('Production registration requires a complete Registration email webhook configuration');
       if (!registrationSmsWebhook) throw new Error('Production registration requires a complete Registration SMS webhook configuration');
       if (!turnstile) throw new Error('Production registration requires complete Turnstile configuration');
+      if (turnstileExpectedHostnames.length===0) throw new Error('Production registration requires COD_TURNSTILE_EXPECTED_HOSTNAMES');
+      if (outboundAllowedHostnames.length===0) throw new Error('Production registration requires COD_REGISTRATION_OUTBOUND_ALLOWED_HOSTS');
       if (!publicRegistrationUrl) throw new Error('Production registration requires COD_PUBLIC_REGISTRATION_URL');
     }
   }
@@ -270,8 +295,12 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     try { parsed = new URL(webhook.url); }
     catch { throw new Error(`${name} must be a valid URL`); }
     if (parsed.username || parsed.password) throw new Error(`${name} must not contain URL credentials`);
+    if (parsed.hash) throw new Error(`${name} must not contain a URL fragment`);
+    if (production && parsed.port && parsed.port !== '443') throw new Error(`${name} must use port 443 in production`);
+    if (production && isIP(parsed.hostname.replace(/^\[|\]$/g,''))) throw new Error(`${name} must use an allowlisted hostname`);
     if (production && parsed.protocol !== 'https:') throw new Error(`${name} must use HTTPS in production`);
     if (!production && parsed.protocol !== 'https:' && parsed.protocol !== 'http:') throw new Error(`${name} must use HTTP or HTTPS`);
+    if(production&&!outboundAllowedHostnames.includes(parsed.hostname.toLowerCase().replace(/\.$/,'')))throw new Error(`${name} host is not allowed by COD_REGISTRATION_OUTBOUND_ALLOWED_HOSTS`);
   }
   {
     let parsed: URL;
@@ -279,6 +308,7 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     catch { throw new Error('COD_TURNSTILE_VERIFY_URL must be a valid URL'); }
     if (parsed.username || parsed.password) throw new Error('COD_TURNSTILE_VERIFY_URL must not contain URL credentials');
     if (production && parsed.protocol !== 'https:') throw new Error('COD_TURNSTILE_VERIFY_URL must use HTTPS in production');
+    if(production&&parsed.hostname.toLowerCase().replace(/\.$/,'')!=='challenges.cloudflare.com')throw new Error('Production COD_TURNSTILE_VERIFY_URL must use challenges.cloudflare.com');
   }
   if (publicRegistrationUrl) {
     let parsed: URL;
@@ -289,7 +319,19 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     if (production && !allowedOrigins.includes(parsed.origin)) throw new Error('COD_PUBLIC_REGISTRATION_URL origin must be listed in COD_ALLOWED_ORIGINS');
   }
   if ((wechatPay || alipay) && !paymentPublicBaseUrl) throw new Error('Official payments require COD_PAYMENT_PUBLIC_BASE_URL');
-  if (paymentPublicBaseUrl && !/^https:\/\//.test(paymentPublicBaseUrl)) throw new Error('COD_PAYMENT_PUBLIC_BASE_URL must use HTTPS');
+  if (paymentPublicBaseUrl) {
+    let publicBase: URL;
+    try { publicBase = new URL(paymentPublicBaseUrl); }
+    catch { throw new Error('COD_PAYMENT_PUBLIC_BASE_URL must be a valid HTTPS origin'); }
+    if (publicBase.protocol !== 'https:' || publicBase.username || publicBase.password || (publicBase.pathname !== '/' && publicBase.pathname !== '') || publicBase.search || publicBase.hash) throw new Error('COD_PAYMENT_PUBLIC_BASE_URL must be a valid HTTPS origin');
+  }
+  if (alipay) {
+    let gateway: URL;
+    try { gateway = new URL(alipay.gatewayUrl); }
+    catch { throw new Error('COD_ALIPAY_GATEWAY_URL must be a valid HTTPS URL'); }
+    if (gateway.protocol !== 'https:' || gateway.username || gateway.password) throw new Error('COD_ALIPAY_GATEWAY_URL must be a valid HTTPS URL');
+    if (production && gateway.hostname.toLowerCase() !== 'openapi.alipay.com') throw new Error('Production COD_ALIPAY_GATEWAY_URL must use openapi.alipay.com');
+  }
   if (wechatPay && Buffer.byteLength(wechatPay.apiV3Key, 'utf8') !== 32) throw new Error('COD_WECHAT_PAY_API_V3_KEY must contain exactly 32 bytes');
   for (const [label, path] of [
     ['WeChat merchant private key', wechatPay?.merchantPrivateKeyPath],
@@ -304,6 +346,10 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
       feishuBindings = Object.fromEntries(Object.entries(parsed).map(([key, value]) => [key, String(value).trim().toLowerCase()]));
     } catch { throw new Error('COD_FEISHU_BINDINGS_JSON must be a JSON object'); }
+  }
+  const modelSources = loadModelSources(environment);
+  if (production && modelSources.some((source) => source.commissionRateBps !== 0)) {
+    throw new Error('Production source commissions require server-bound attribution');
   }
   return {
     port: Number(environment.COD_CONTROL_PORT ?? 8787),
@@ -329,7 +375,7 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     feishuAppSecret: environment.COD_FEISHU_APP_SECRET ?? null,
     feishuBindings,
     demoMode,
-    modelSources: loadModelSources(environment),
+    modelSources,
     wikiBaseUrl: environment.KAI_WIKI_BASE_URL ?? 'https://wiki.kai.com',
     wikiSearchEndpoint: environment.KAI_WIKI_SEARCH_ENDPOINT ?? null,
     wikiApiKey: environment.KAI_WIKI_API_KEY ?? null,

@@ -9,6 +9,9 @@
     "services/*"
   ],
   "scripts": {
+    "postinstall": "node apps/mobile/scripts/patch-expo-dom-template.cjs && node apps/mobile/scripts/patch-react-native-webview.cjs",
+    "audit:high": "node scripts/check-npm-audit.mjs",
+    "test:audit-gate": "node --test scripts/check-npm-audit.test.mjs",
     "dev": "npm run dev -w @cod/web",
     "build": "npm run build -w @cod/web && npm run build -w @cod/desktop && npm run build -w @cod/control-plane",
     "typecheck": "npm run typecheck -w @cod/web && npm run typecheck -w @cod/mobile && npm run typecheck -w @cod/desktop && npm run typecheck -w @cod/control-plane",
@@ -37,7 +40,10 @@
   "overrides": {
     "react": "19.2.3",
     "react-dom": "19.2.3",
-    "yauzl": "3.3.1"
+    "yauzl": "3.3.1",
+    "xcode": {
+      "uuid": "11.1.1"
+    }
   },
   "allowScripts": {
     "electron@39.8.10": true,

@@ -1,4 +1,6 @@
 import { createHmac, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
+import { lookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
 import type { RegistrationVerificationConfig, RegistrationWebhookConfig } from './config.js';
 import { HttpError } from './errors.js';
 
@@ -16,7 +18,37 @@ export interface RegistrationDelivery {
   sendSmsCode(message: RegistrationDeliveryMessage): Promise<void>;
 }
 
+export type RegistrationEndpointValidator=(url:string,allowedHostnames:string[],label:string)=>Promise<void>;
+
 export const REGISTRATION_OTP_DIGITS = 6;
+
+function normalizedHostname(value:string):string{return value.toLowerCase().replace(/\.$/,'');}
+
+export function isPrivateRegistrationAddress(value:string):boolean{
+  if(isIP(value)===4){const octets=value.split('.').map(Number);return octets[0]===0||octets[0]===10||octets[0]===100&&octets[1]>=64&&octets[1]<=127||octets[0]===127||octets[0]===169&&octets[1]===254||octets[0]===172&&octets[1]>=16&&octets[1]<=31||octets[0]===192&&octets[1]===0&&octets[2]===0||octets[0]===192&&octets[1]===0&&octets[2]===2||octets[0]===192&&octets[1]===168||octets[0]===198&&octets[1]>=18&&octets[1]<=19||octets[0]===198&&octets[1]===51&&octets[2]===100||octets[0]===203&&octets[1]===0&&octets[2]===113||octets[0]>=224;}
+  if(isIP(value)!==6)return true;
+  let normalized=value.toLowerCase();
+  if(normalized.includes('.')){
+    const separator=normalized.lastIndexOf(':');const octets=normalized.slice(separator+1).split('.').map(Number);
+    if(octets.length!==4||octets.some((octet)=>!Number.isInteger(octet)||octet<0||octet>255))return true;
+    normalized=`${normalized.slice(0,separator)}:${((octets[0]<<8)|octets[1]).toString(16)}:${((octets[2]<<8)|octets[3]).toString(16)}`;
+  }
+  const [head='',tail='']=normalized.split('::');
+  const left=head?head.split(':'):[];const right=tail?tail.split(':'):[];
+  const groups=[...left,...Array(Math.max(0,8-left.length-right.length)).fill('0'),...right].map((group)=>Number.parseInt(group||'0',16));
+  if(groups.length===8&&groups.slice(0,5).every((group)=>group===0)&&groups[5]===0xffff){
+    return isPrivateRegistrationAddress(`${groups[6]>>8}.${groups[6]&255}.${groups[7]>>8}.${groups[7]&255}`);
+  }
+  return normalized==='::'||normalized==='::1'||normalized.startsWith('fc')||normalized.startsWith('fd')||/^fe[89ab]/.test(normalized)||normalized.startsWith('ff')||normalized.startsWith('fec')||normalized.startsWith('fed')||normalized.startsWith('fee')||normalized.startsWith('fef')||normalized.startsWith('2001:db8');
+}
+
+async function assertSafeRegistrationEndpoint(rawUrl:string,allowedHostnames:string[],label:string):Promise<void>{
+  let url:URL;try{url=new URL(rawUrl);}catch{throw new Error(`${label} URL is invalid`);}
+  const hostname=normalizedHostname(url.hostname.replace(/^\[|\]$/g,''));
+  if(url.protocol!=='https:'||url.username||url.password||(url.port&&url.port!=='443')||!allowedHostnames.includes(hostname)||isIP(hostname))throw new Error(`${label} endpoint is not allowed`);
+  const addresses=await lookup(hostname,{all:true,verbatim:true});
+  if(addresses.length===0||addresses.some(({address})=>isPrivateRegistrationAddress(address)))throw new Error(`${label} endpoint resolved to a private address`);
+}
 
 function decodeHmacKey(value: string): Buffer {
   if(value.startsWith('base64url:'))return Buffer.from(value.slice('base64url:'.length),'base64url');
@@ -73,6 +105,7 @@ export class RegistrationVerification {
     readonly config: RegistrationVerificationConfig,
     private readonly delivery: RegistrationDelivery | null,
     private readonly fetcher: typeof fetch = fetch,
+    private readonly endpointValidator:RegistrationEndpointValidator=assertSafeRegistrationEndpoint,
   ) {
     this.key = config.hmacKey ? decodeHmacKey(config.hmacKey) : null;
     this.available = Boolean(this.key?.length === 32 && delivery && config.turnstileSiteKey && config.turnstileSecretKey);
@@ -108,7 +141,7 @@ export class RegistrationVerification {
       .digest('hex');
   }
 
-  async verifyHuman(token: unknown, remoteIp?: string): Promise<void> {
+  async verifyHuman(token: unknown, expectedAction:string, remoteIp?: string): Promise<void> {
     if (!this.config.turnstileSecretKey) throw new HttpError('人机验证服务暂不可用', 503, 'human_verification_unavailable');
     if (typeof token !== 'string' || !token || token.length > 2048) {
       throw new HttpError('请完成人机验证', 400, 'human_verification_required');
@@ -120,15 +153,18 @@ export class RegistrationVerification {
     });
     if (remoteIp) form.set('remoteip', remoteIp);
     try {
+      await this.endpointValidator(this.config.turnstileVerifyUrl,['challenges.cloudflare.com'],'Turnstile');
       const response = await this.fetcher(this.config.turnstileVerifyUrl, {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body: form.toString(),
         signal: AbortSignal.timeout(8_000),
+        redirect: 'error',
       });
       if (!response.ok) throw new Error('verification provider unavailable');
-      const result = await response.json() as { success?: unknown };
-      if (result.success !== true) throw new HttpError('人机验证失败，请重试', 400, 'human_verification_failed');
+      const result = await response.json() as { success?: unknown;hostname?:unknown;action?:unknown };
+      const hostname=typeof result.hostname==='string'?normalizedHostname(result.hostname):'';
+      if (result.success !== true||!this.config.turnstileExpectedHostnames.includes(hostname)||!this.config.turnstileExpectedActions.includes(expectedAction)||result.action!==expectedAction) throw new HttpError('人机验证失败，请重试', 400, 'human_verification_failed');
     } catch (error) {
       if (error instanceof HttpError) throw error;
       throw new HttpError('人机验证服务暂不可用', 503, 'human_verification_unavailable');
@@ -151,22 +187,26 @@ class WebhookRegistrationDelivery implements RegistrationDelivery {
     private readonly email: RegistrationWebhookConfig,
     private readonly sms: RegistrationWebhookConfig,
     private readonly fetcher: typeof fetch,
+    private readonly allowedHostnames: string[],
+    private readonly endpointValidator:RegistrationEndpointValidator,
   ) {}
 
   sendEmailCode(message: RegistrationDeliveryMessage): Promise<void> { return this.send(this.email, 'email', message); }
   sendSmsCode(message: RegistrationDeliveryMessage): Promise<void> { return this.send(this.sms, 'sms', message); }
 
   private async send(config: RegistrationWebhookConfig, channel: 'email' | 'sms', message: RegistrationDeliveryMessage): Promise<void> {
+    await this.endpointValidator(config.url,this.allowedHostnames,'Registration webhook');
     const response = await this.fetcher(config.url, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${config.bearerToken}` },
       body: JSON.stringify({ type: 'cod.registration.otp', channel, ...message }),
       signal: AbortSignal.timeout(8_000),
+      redirect: 'error',
     });
     if (!response.ok) throw new Error('registration delivery rejected');
   }
 }
 
-export function registrationDeliveryFromConfig(config: RegistrationVerificationConfig, fetcher: typeof fetch = fetch): RegistrationDelivery | null {
-  return config.emailWebhook && config.smsWebhook ? new WebhookRegistrationDelivery(config.emailWebhook, config.smsWebhook, fetcher) : null;
+export function registrationDeliveryFromConfig(config: RegistrationVerificationConfig, fetcher: typeof fetch = fetch,endpointValidator:RegistrationEndpointValidator=assertSafeRegistrationEndpoint): RegistrationDelivery | null {
+  return config.emailWebhook && config.smsWebhook ? new WebhookRegistrationDelivery(config.emailWebhook, config.smsWebhook, fetcher,config.outboundAllowedHostnames,endpointValidator) : null;
 }

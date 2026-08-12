@@ -50,6 +50,7 @@ import {
   getCreditPacks,
   getPaymentOrder,
   getReferralSummary,
+  getTaskExecutionLease,
   heartbeatDevice,
   hydrateCodSession,
   listDevices,
@@ -64,6 +65,7 @@ import {
   listTasks,
   loginCod,
   logoutCod,
+  observeCodSessionInvalidated,
   refreshAccount,
   purchaseCreditPack,
   persistCodSession,
@@ -97,10 +99,17 @@ import {
 } from './api';
 import { desktopGitDiffError, hasDesktopBridge, loadProject, loadProjectDiff, loadProjectFiles, readProjectFile, selectProjectRoot } from './desktop';
 import { chatFailureMessage } from './chat-errors';
-import { filterModelCatalog, groupModelCatalog } from './model-catalog';
-import { permissionOptionLabel, presentPermissionOptions } from './permissions';
+import { filterModelCatalog, groupModelCatalog, uniqueCallableModels } from './model-catalog';
+import {
+  permissionOptionLabel,
+  permissionOptionsRequirePersistentWarning,
+  persistentPermissionWarning,
+  presentPermissionOptions,
+  summarizePermissionToolCall,
+  type PermissionToolSummary,
+} from './permissions';
 import { MarkdownContent } from './presentation';
-import { copyCodText, getCodRuntime, openCodExternalUrl, setCodNativeBackHandler } from './runtime';
+import { copyCodText, getCodRuntime, observeCodTopmostUiClose, openCodExternalUrl, setCodNativeBackHandler } from './runtime';
 import type { InspectorTab, ProjectSnapshot, WorkspaceMode } from './types';
 
 const statusLabels: Record<TaskStatus, string> = {
@@ -113,7 +122,7 @@ type ColorMode = 'light' | 'dark';
 type ProjectDiffStatus = 'idle' | 'loading' | 'ready' | 'error';
 interface ComparisonResult { sourceId: string; sourceLabel: string; model: string; modelId?: string; content: string; inputTokens?: number; outputTokens?: number; durationMs: number; error?: string }
 interface ChatMessage { id: string; role: 'user' | 'assistant' | 'comparison'; content: string; mode?: 'live' | 'demo'; sourceLabel?: string; model?: string; inputTokens?: number; outputTokens?: number; usageEstimated?: boolean; fallbackUsed?: boolean; failed?: boolean; cancelled?: boolean; retryPrompt?: string; comparisonResults?: ComparisonResult[]; selectedComparisonKey?: string; createdAt: string }
-interface ActiveRun { taskId:string; controller:AbortController; cancelled:boolean; mode:WorkspaceMode }
+interface ActiveRun { taskId:string; controller:AbortController; cancelled:boolean; leaseAcquired:boolean; finalizing:boolean; terminalCommitted:boolean; mode:WorkspaceMode }
 interface CurrentDeviceSnapshot { device:DeviceRecord; devices:DeviceRecord[] }
 interface CurrentDeviceRequest { token:string; authGeneration:number; promise:Promise<CurrentDeviceSnapshot> }
 interface ComputeDraft {
@@ -197,6 +206,18 @@ function StatusGlyph({ status }: { status: TaskStatus }) {
   if (status === 'complete') return <Check className="status-complete" weight="bold" />;
   return <ListChecks />;
 }
+function PermissionRequestSummary({ summary, showPersistentWarning }: { summary: PermissionToolSummary; showPersistentWarning: boolean }) {
+  return <span className="permission-summary">
+    <span className="permission-summary-title">{summary.title}</span>
+    <span className="permission-summary-details">
+      <span><b>工具类型</b><i>{summary.kindLabel}</i></span>
+      {summary.command && <span><b>命令 / 参数</b><code>{summary.command}</code></span>}
+      {summary.paths.length > 0 && <span><b>影响路径</b><i className="permission-paths">{summary.paths.map((path) => <code key={path}>{path}</code>)}</i></span>}
+      <span><b>操作摘要</b><i>{summary.detail}</i></span>
+    </span>
+    {showPersistentWarning && <span className="permission-persistent-warning">{persistentPermissionWarning}</span>}
+  </span>;
+}
 function TaskList({ tasks, devices, activeId, onSelect }: { tasks: RemoteTask[]; devices: DeviceRecord[]; activeId: string | null; onSelect: (id: string) => void }) {
   if (!tasks.length) return <div className="sidebar-empty">没有匹配的任务</div>;
   return <nav className="task-list" aria-label="任务列表">{tasks.map((task) => (
@@ -217,37 +238,39 @@ function CodeBlock({ text }: { text: string }) {
   })}</pre>;
 }
 function Modal({ title, onClose, children, wide = false }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
-  const dialogRef = useRef<HTMLElement>(null);
-  const previousFocusRef = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null);
+  const modalRef = useRef<HTMLElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   useEffect(() => {
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-    const previousFocus = previousFocusRef.current;
-    const focusable = () => Array.from(dialog.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'))
-      .filter((element) => element.getAttribute('aria-hidden') !== 'true');
-    if (!dialog.contains(document.activeElement)) (focusable()[0] ?? dialog).focus();
-    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+    const modal = modalRef.current;
+    if (!modal) return undefined;
+    const returnFocus = returnFocusRef.current;
+    const focusableElements = () => [...modal.querySelectorAll<HTMLElement>('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')]
+      .filter((element) => !element.hasAttribute('disabled') && element.getAttribute('aria-hidden') !== 'true' && !element.closest('[hidden]'));
+    if (!(document.activeElement instanceof Node) || !modal.contains(document.activeElement)) (focusableElements()[0] ?? modal).focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         onCloseRef.current();
         return;
       }
       if (event.key !== 'Tab') return;
-      const elements = focusable();
-      if (!elements.length) { event.preventDefault(); dialog.focus(); return; }
-      const first = elements[0]; const last = elements[elements.length - 1];
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      const focusable = focusableElements();
+      if (!focusable.length) { event.preventDefault(); modal.focus(); return; }
+      const first = focusable[0]!; const last = focusable[focusable.length - 1]!;
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || !(active instanceof Node) || !modal.contains(active))) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && (active === last || !(active instanceof Node) || !modal.contains(active))) { event.preventDefault(); first.focus(); }
     };
-    dialog.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('keydown', handleKeyDown);
     return () => {
-      dialog.removeEventListener('keydown', handleKeyDown);
-      if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+      document.removeEventListener('keydown', handleKeyDown);
+      if (returnFocus?.isConnected) returnFocus.focus();
     };
   }, []);
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section ref={dialogRef} className={`modal${wide ? ' modal-wide' : ''}`} role="dialog" aria-modal="true" aria-label={title} tabIndex={-1}><header><strong>{title}</strong><button className="icon-button" title="关闭" aria-label="关闭" onClick={onClose}><X /></button></header>{children}</section></div>;
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onCloseRef.current()}><section ref={modalRef} className={`modal${wide ? ' modal-wide' : ''}`} role="dialog" aria-modal="true" aria-label={title} tabIndex={-1}><header><strong>{title}</strong><button className="icon-button" title="关闭" aria-label="关闭" onClick={() => onCloseRef.current()}><X /></button></header>{children}</section></div>;
 }
 
 function LegacyLoginForm({ capabilities, capabilityError, resumeConversation, initialMode = 'login', onModeChange, onLogin, onRegister }: { capabilities: CapabilityReport | null; capabilityError: string; resumeConversation: boolean; initialMode?: 'login'|'register'; onModeChange?: (mode: 'login'|'register') => void; onLogin: (email: string, password: string) => Promise<void>; onRegister:(input:{email:string;password:string;inviteCode?:string;legacyAccessCode?:string})=>Promise<void> }) {
@@ -270,9 +293,9 @@ function LegacyLoginForm({ capabilities, capabilityError, resumeConversation, in
     try {
       if(mode==='login')await onLogin(email,password);
       else{
-        if(!enrollmentAvailable)throw new Error('当前暂未开放新账号注册或迁移');
+      if(!enrollmentAvailable)throw new Error('当前暂未开放新账号注册或迁移');
         if(password!==confirmPassword)throw new Error('两次输入的密码不一致');
-        await onRegister({email,password,inviteCode:registrationAvailable?inviteCode.trim()||undefined:undefined,legacyAccessCode:migrationOnly||showLegacyMigration?legacyAccessCode||undefined:undefined});
+      await onRegister({email,password,inviteCode:registrationAvailable?inviteCode.trim()||undefined:undefined,legacyAccessCode:migrationOnly||showLegacyMigration?legacyAccessCode||undefined:undefined});
       }
     } catch (nextError) {
       if(nextError instanceof ApiError&&nextError.code==='legacy_migration_required')setShowLegacyMigration(true);
@@ -281,14 +304,15 @@ function LegacyLoginForm({ capabilities, capabilityError, resumeConversation, in
   };
   const switchMode=(next:'login'|'register')=>{setMode(next);onModeChange?.(next);setPassword('');setConfirmPassword('');setError('');setShowLegacyMigration(false);setLegacyAccessCode('');};
   const registering=mode==='register';
-  return <div className="login-form"><div className={`auth-tabs${enrollmentAvailable?'':' single'}`} role="tablist"><button type="button" role="tab" aria-selected={mode==='login'} className={mode==='login'?'active':''} onClick={()=>switchMode('login')}>密码登录</button>{enrollmentAvailable&&<button type="button" role="tab" aria-selected={registering} className={registering?'active':''} onClick={()=>switchMode('register')}>{migrationOnly?'旧账号迁移':'注册账号'}</button>}</div><div className="login-copy"><span className="eyebrow">COD ACCOUNT</span><h2>{resumeConversation ? `${mode==='login'?'登录':migrationOnly?'迁移':'注册'}后继续对话` : mode==='login'?'登录 COD':migrationOnly?'迁移旧账号':'注册 COD'}</h2><p>{resumeConversation ? '你的消息已保留，认证成功后会自动发送。' : mode==='login'?(registrationAvailable?'当前使用 COD 邮箱密码账号；注册入口在上方。':migrationOnly?'已有账号可直接登录；旧试点账号可完成一次性迁移。':'当前使用 COD 邮箱密码账号，新注册暂未开放。'):migrationOnly?'使用旧试点访问码为原账号设置新密码；迁移仅可完成一次。':`注册即获 ¥10 试用金，有效期 30 天。${inviteRequired?'需要有效邀请码。':'邀请码选填，用于绑定邀请人与后续返佣。'}`}</p></div>{capabilityError && <div className="notice error">{capabilityError}</div>}<form onSubmit={submit}><label>邮箱<input aria-label="邮箱" name="email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" required autoFocus /></label><label>密码<input key={`password-${mode}`} aria-label="密码" name={mode==='login'?'loginPassword':'newPassword'} type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode==='login'?'current-password':'new-password'} minLength={10} maxLength={128} required /></label>{registering&&<><label>确认密码<input key="confirm-register-password" aria-label="确认密码" name="confirmPassword" type="password" value={confirmPassword} onChange={(event)=>setConfirmPassword(event.target.value)} autoComplete="new-password" minLength={10} maxLength={128} required /></label>{registrationAvailable&&<label>邀请码 <small>{inviteRequired?'必填':'选填'}</small><input aria-label="邀请码" name="inviteCode" value={inviteCode} onChange={(event)=>setInviteCode(event.target.value.toUpperCase())} autoComplete="off" maxLength={32} placeholder="例如 KAI-XXXXXXXXXX" required={inviteRequired} /></label>}{(migrationOnly||showLegacyMigration)&&<label>旧试点访问码 <small>仅迁移一次</small><input key="legacy-access-code" aria-label="旧试点访问码" name="legacyAccessCode" type="password" value={legacyAccessCode} onChange={(event)=>setLegacyAccessCode(event.target.value)} autoComplete="off" maxLength={256} required /></label>}<p className="password-hint">密码须为 10-128 位，并同时包含字母和数字。{migrationOnly?'迁移成功后请使用新密码登录。':'邀请关系注册后不可自行更改。'}</p></>}{error && <div className="notice error" role="alert">{error}</div>}<button type="submit" className="primary-button" disabled={submitting}>{submitting ? <CircleNotch className="spin" /> : <Key />} {resumeConversation ? `${mode==='login'?'登录':migrationOnly?'迁移':'注册'}并继续` : mode==='login'?'登录':migrationOnly?'迁移旧账号':'注册并领取试用金'}</button></form><div className="capability-summary"><span className={capabilities?.ai.mode === 'live' ? 'live' : 'demo'}>模型：{capabilities?.ai.mode === 'live' ? '已连接' : capabilities?.ai.mode === 'demo' ? '演示模式' : '待检测'}</span><span>认证：COD 邮箱密码</span></div></div>;
+  return <div className="login-form"><div className={`auth-tabs${enrollmentAvailable?'':' single'}`} role="tablist"><button type="button" role="tab" aria-selected={mode==='login'} className={mode==='login'?'active':''} onClick={()=>switchMode('login')}>密码登录</button>{enrollmentAvailable&&<button type="button" role="tab" aria-selected={registering} className={registering?'active':''} onClick={()=>switchMode('register')}>{migrationOnly?'旧账号迁移':'注册账号'}</button>}</div><div className="login-copy"><span className="eyebrow">COD ACCOUNT</span><h2>{resumeConversation ? `${mode==='login'?'登录':migrationOnly?'迁移':'注册'}后继续对话` : mode==='login'?'登录 COD':migrationOnly?'迁移旧账号':'注册 COD'}</h2><p>{resumeConversation ? '你的消息已保留，认证成功后会自动发送。' : mode==='login'?(registrationAvailable?'当前使用 COD 邮箱密码账号；注册入口在上方。':migrationOnly?'已有账号可直接登录；旧试点账号可完成一次性迁移。':'当前仅开放已有账号登录，新注册暂未开放。'):migrationOnly?'使用旧试点访问码为原账号设置新密码；迁移仅可完成一次。':`注册即获 ¥10 试用金，有效期 30 天。${inviteRequired?'需要有效邀请码。':'邀请码选填，用于绑定邀请人与后续返佣。'}`}</p></div>{capabilityError && <div className="notice error">{capabilityError}</div>}<form onSubmit={submit}><label>邮箱<input aria-label="邮箱" name="email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" required autoFocus /></label><label>密码<input key={`password-${mode}`} aria-label="密码" name={mode==='login'?'loginPassword':'newPassword'} type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode==='login'?'current-password':'new-password'} minLength={10} maxLength={128} required /></label>{registering&&<><label>确认密码<input key="confirm-register-password" aria-label="确认密码" name="confirmPassword" type="password" value={confirmPassword} onChange={(event)=>setConfirmPassword(event.target.value)} autoComplete="new-password" minLength={10} maxLength={128} required /></label>{registrationAvailable&&<label>邀请码 <small>{inviteRequired?'必填':'选填'}</small><input aria-label="邀请码" name="inviteCode" value={inviteCode} onChange={(event)=>setInviteCode(event.target.value.toUpperCase())} autoComplete="off" maxLength={32} placeholder="例如 KAI-XXXXXXXXXX" required={inviteRequired} /></label>}{(migrationOnly||showLegacyMigration)&&<label>旧试点访问码 <small>仅迁移一次</small><input key="legacy-access-code" aria-label="旧试点访问码" name="legacyAccessCode" type="password" value={legacyAccessCode} onChange={(event)=>setLegacyAccessCode(event.target.value)} autoComplete="off" maxLength={256} required /></label>}<p className="password-hint">密码须为 10-128 位，并同时包含字母和数字。{migrationOnly?'迁移成功后请使用新密码登录。':'邀请关系注册后不可自行更改。'}</p></>}{error && <div className="notice error" role="alert">{error}</div>}<button type="submit" className="primary-button" disabled={submitting}>{submitting ? <CircleNotch className="spin" /> : <Key />} {resumeConversation ? `${mode==='login'?'登录':migrationOnly?'迁移':'注册'}并继续` : mode==='login'?'登录':migrationOnly?'迁移旧账号':'注册并领取试用金'}</button></form><div className="capability-summary"><span className={capabilities?.ai.mode === 'live' ? 'live' : 'demo'}>模型：{capabilities?.ai.mode === 'live' ? '已连接' : capabilities?.ai.mode === 'demo' ? '演示模式' : '待检测'}</span><span>认证：COD 邮箱密码</span></div></div>;
 }
 
 type AuthMode = 'login' | 'register';
 type RegistrationStep = 'email' | 'email-code' | 'phone' | 'phone-code' | 'password';
 type RegistrationDelivery = { maskedDestination: string; expiresAt: string; resendAt: string };
+type RegistrationTurnstileAction = 'cod_registration_email' | 'cod_registration_phone';
 interface TurnstileApi {
-  render(container: HTMLElement, options: { sitekey: string; theme: 'auto'; size: 'flexible'; callback: (token: string) => void; 'expired-callback': () => void; 'error-callback': () => void }): string;
+  render(container: HTMLElement, options: { sitekey: string; action: RegistrationTurnstileAction; theme: 'auto'; size: 'flexible'; callback: (token: string) => void; 'expired-callback': () => void; 'error-callback': () => void }): string;
   remove(widgetId: string): void;
 }
 
@@ -317,7 +341,7 @@ function loadTurnstile(): Promise<TurnstileApi> {
   return turnstileScriptPromise;
 }
 
-function TurnstileWidget({ siteKey, resetNonce, onToken, onError }: { siteKey: string; resetNonce: number; onToken: (token: string) => void; onError: (message: string) => void }) {
+function TurnstileWidget({ siteKey, action, resetNonce, onToken, onError }: { siteKey: string; action: RegistrationTurnstileAction; resetNonce: number; onToken: (token: string) => void; onError: (message: string) => void }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const onTokenRef = useRef(onToken);
   const onErrorRef = useRef(onError);
@@ -332,6 +356,7 @@ function TurnstileWidget({ siteKey, resetNonce, onToken, onError }: { siteKey: s
       api = loaded;
       widgetId = loaded.render(containerRef.current, {
         sitekey: siteKey,
+        action,
         theme: 'auto',
         size: 'flexible',
         callback: (token) => onTokenRef.current(token),
@@ -345,7 +370,7 @@ function TurnstileWidget({ siteKey, resetNonce, onToken, onError }: { siteKey: s
       disposed = true;
       if (api && widgetId) api.remove(widgetId);
     };
-  }, [resetNonce, siteKey]);
+  }, [action, resetNonce, siteKey]);
   return <div className="turnstile-slot" ref={containerRef} aria-label="人机验证" />;
 }
 
@@ -370,7 +395,9 @@ function safePublicRegistrationUrl(value: string | undefined): string {
   if (!value) return '';
   try {
     const url = new URL(value);
-    return url.protocol === 'https:' && url.hostname === 'cod.kai.com' ? url.href : '';
+    if (url.origin !== 'https://cod.kai.com' || url.username || url.password) return '';
+    if (url.pathname !== '/app/' && url.pathname !== '/app') return '';
+    return url.searchParams.get('auth') === 'register' ? url.href : '';
   } catch {
     return '';
   }
@@ -687,7 +714,7 @@ function LoginForm(props: LoginFormProps) {
       {registering && nativeRegistration && <div className="native-registration-handoff"><ShieldCheck weight="bold" /><div><strong>请先在网页完成注册</strong><p>邮箱、手机验证需在安全网页中完成。注册后回到 App 使用邮箱密码登录。</p>{!publicRegistrationUrl && <p className="native-registration-unavailable">注册地址暂未下发，请稍后刷新。</p>}</div>{publicRegistrationUrl && <button type="button" className="primary-button" onClick={() => void openCodExternalUrl(publicRegistrationUrl)}><ArrowSquareOut /> 打开网页注册</button>}</div>}
       {registering && !nativeRegistration && registrationStep === 'email' && <>
         <label>邮箱<input aria-label="邮箱" name="registrationEmail" type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" required autoFocus /></label>
-        {turnstileSiteKey && <TurnstileWidget siteKey={turnstileSiteKey} resetNonce={turnstileResetNonce} onToken={setHumanChallengeToken} onError={setError} />}
+        {turnstileSiteKey && <TurnstileWidget siteKey={turnstileSiteKey} action="cod_registration_email" resetNonce={turnstileResetNonce} onToken={setHumanChallengeToken} onError={setError} />}
       </>}
       {registering && !nativeRegistration && registrationStep === 'email-code' && <>
         <button type="button" className="auth-step-back" onClick={changeEmail} disabled={submitting}>更换邮箱</button>
@@ -698,7 +725,7 @@ function LoginForm(props: LoginFormProps) {
         <button type="button" className="auth-step-back" onClick={changeEmail} disabled={submitting}>更换邮箱</button>
         <div className="verified-destination"><Check weight="bold" /><span>邮箱已验证<strong>{email}</strong></span></div>
         <label>手机号 <small>请包含国家或地区码</small><input aria-label="手机号" name="phone" type="tel" value={phone} onChange={(event) => setPhone(event.target.value)} inputMode="tel" autoComplete="tel" placeholder="+8613800138000" maxLength={24} required autoFocus /></label>
-        {turnstileSiteKey && <TurnstileWidget siteKey={turnstileSiteKey} resetNonce={turnstileResetNonce} onToken={setHumanChallengeToken} onError={setError} />}
+        {turnstileSiteKey && <TurnstileWidget siteKey={turnstileSiteKey} action="cod_registration_phone" resetNonce={turnstileResetNonce} onToken={setHumanChallengeToken} onError={setError} />}
       </>}
       {registering && !nativeRegistration && registrationStep === 'phone-code' && <>
         <button type="button" className="auth-step-back" onClick={changePhone} disabled={submitting}>更换手机号</button>
@@ -1024,7 +1051,7 @@ export function App() {
   const [manualRefreshBusy, setManualRefreshBusy] = useState(false);
   const [cancellingTaskId,setCancellingTaskId]=useState('');
   const [agentStatus, setAgentStatus] = useState('就绪');
-  const [pendingPermission, setPendingPermission] = useState<{ title: string; options: Array<{ optionId: string; name: string; kind: string }> } | null>(null);
+  const [pendingPermission, setPendingPermission] = useState<{ summary: PermissionToolSummary; options: Array<{ optionId: string; name: string; kind: string }> } | null>(null);
   const [project, setProject] = useState<ProjectSnapshot>(emptyProject);
   const [projectDiffStatus, setProjectDiffStatus] = useState<ProjectDiffStatus>('idle');
   const permissionResolver = useRef<((optionId: string | null) => void) | null>(null);
@@ -1106,6 +1133,40 @@ export function App() {
     return true;
   };
 
+  const clearAuthenticatedUi = useCallback((message = '') => {
+    authGenerationRef.current += 1;
+    const run=activeRunRef.current;
+    if(run){run.cancelled=true;run.controller.abort(new DOMException('Signed out','AbortError'));}
+    activeRunRef.current=null;sendingRef.current=false;sessionTokenRef.current=null;
+    permissionResolver.current?.(null);permissionResolver.current=null;
+    void window.codDesktop?.stopGoose();
+    setSession(null);setTasks([]);setDevices([]);setLedger([]);setCreditPacks({ packs: [], summary: { availableCents: 0, grants: [] } });setComputeRequests([]);setReferralSummary(null);setKnowledgeHits([]);setKnowledgeLoading(false);setPaymentOrder(null);setPaymentCheckout(null);setPaymentBusy(false);setCurrentDeviceId('');setTargetDeviceId('');setActiveTaskId(null);setMessagesByTask({});setPrompt('');setPendingSend(null);setResumeComputeAfterLogin(false);setPendingPermission(null);setIsSending(false);setAgentStatus('就绪');setNotice(message);setOverlay(null);setAuthState('signed-out');
+  }, []);
+
+  const closeTopmostUi = useCallback(() => {
+    if (overlay !== null) {
+      if (overlay === 'login') {
+        authGenerationRef.current += 1;
+        setPendingSend(null);
+        setResumeComputeAfterLogin(false);
+      }
+      setOverlay(null);
+      return;
+    }
+    if (sidebarOpen) setSidebarOpen(false);
+  }, [overlay, sidebarOpen]);
+
+  useEffect(() => observeCodTopmostUiClose(closeTopmostUi), [closeTopmostUi]);
+
+  useEffect(() => observeCodSessionInvalidated((expectedToken) => {
+    if (sessionTokenRef.current !== expectedToken) return;
+    clearAuthenticatedUi('登录已过期，请重新登录。');
+  }), [clearAuthenticatedUi]);
+
+  useEffect(() => {
+    void getCodRuntime().setNativeTopmostUiVisible?.(overlay !== null || sidebarOpen);
+  }, [overlay, sidebarOpen]);
+
   useEffect(() => {
     document.documentElement.dataset.colorMode = colorMode;
     document.documentElement.style.colorScheme = colorMode;
@@ -1173,7 +1234,7 @@ export function App() {
   const selectedSource = session?.sources.find((source) => source.id === selectedSourceId) ?? session?.sources[0] ?? null;
   const sourceModels = selectedSource?.models ?? [];
   const selectedModelInfo = sourceModels.find((model) => model.id === selectedModel) ?? sourceModels[0] ?? null;
-  const callableModels = useMemo(() => session?.sources.flatMap((source) => source.callable ? source.models.map((model) => ({ key: `${source.id}::${model.id}`, sourceId: source.id, sourceLabel: source.label, model })) : []) ?? [], [session]);
+  const callableModels = useMemo(() => uniqueCallableModels(session?.sources ?? []), [session]);
   const compareTargets = callableModels.filter((target) => compareModelKeys.includes(target.key));
   const onlineDesktopDevices = useMemo(() => devices.filter((device) => device.status === 'online' && !['web', 'mobile'].includes(device.platform)), [devices]);
   const activeMessages = activeTaskId ? messagesByTask[activeTaskId] ?? [] : [];
@@ -1274,8 +1335,9 @@ export function App() {
     const storedModel = nextSource ? storageGet(`cod.model.${nextSource.id}`) : null;
     setSelectedModel(nextSource?.models.find((model) => model.id === storedModel)?.id ?? nextSource?.models[0]?.id ?? '');
     setCompareModelKeys((current) => {
-      const valid=current.filter((key)=>nextSession.sources.some((source)=>source.callable&&source.models.some((model)=>`${source.id}::${model.id}`===key)));
-      return valid.length>=2?valid:nextSession.sources.flatMap((source)=>source.callable?source.models.map((model)=>`${source.id}::${model.id}`):[]).slice(0,2);
+      const available=uniqueCallableModels(nextSession.sources);
+      const valid=current.filter((key)=>available.some((target)=>target.key===key));
+      return valid.length>=2?valid:available.map((target)=>target.key).slice(0,2);
     });
   };
 
@@ -1289,7 +1351,15 @@ export function App() {
       const nextSession = sessionResult.status === 'fulfilled' ? sessionResult.value : null;
       if (!nextSession) { setAuthState('signed-out'); return; }
       try { await loadWorkspace(nextSession,authGeneration); if (mounted&&authGenerationRef.current===authGeneration) { sessionTokenRef.current=nextSession.token; setSession(nextSession); setAuthState('signed-in'); setInitialAuthMode('login'); setOverlay(null); } }
-      catch (error) { if (mounted&&authGenerationRef.current===authGeneration) { if (isDefinitiveAuthenticationFailure(error)) { logoutCod(); setAuthState('signed-out'); } else { sessionTokenRef.current=nextSession.token; setSession(nextSession); setNotice('已恢复登录；工作区暂未加载，可在网络恢复后重试。'); setAuthState('signed-in'); } } }
+      catch (error) {
+        if (!mounted || authGenerationRef.current!==authGeneration) return;
+        if (isDefinitiveAuthenticationFailure(error)) {
+          await logoutCod(nextSession.token).catch(() => false);
+          setAuthState('signed-out');
+        } else {
+          sessionTokenRef.current=nextSession.token;setSession(nextSession);setNotice('已恢复登录；工作区暂未加载，可在网络恢复后重试。');setAuthState('signed-in');
+        }
+      }
     });
     return () => { mounted = false; if(authGenerationRef.current===authGeneration)authGenerationRef.current+=1; };
     // Bootstrap captures the initial workspace loader and must run exactly once per mount.
@@ -1333,8 +1403,10 @@ export function App() {
     const authGeneration=authGenerationRef.current;
     let stopped=false;
     const sync = async () => {
-      if (!hasDesktopBridge() && document.visibilityState === 'hidden') return;
+      if (!hasDesktopBridge() && document.visibilityState === 'hidden' && !activeRunRef.current?.leaseAcquired) return;
       try {
+        const currentDeviceId = storageGet('cod.device.id');const activeRun=activeRunRef.current;
+        if(currentDeviceId&&!stopped){try{await heartbeatDevice(token,currentDeviceId,activeRun?.leaseAcquired?activeRun.taskId:undefined);}catch(error){if(activeRun?.leaseAcquired&&error instanceof ApiError&&['task_lease_expired','task_lease_required','invalid_task_lease'].includes(error.code)&&!activeRun.cancelled&&!activeRun.finalizing&&!activeRun.terminalCommitted){activeRun.cancelled=true;activeRun.controller.abort(new DOMException('Task execution lease expired','AbortError'));setNotice('任务执行租约已失效，本机 Agent 已停止。请检查项目状态后重新执行。');if(hasDesktopBridge())void window.codDesktop?.stopGoose();}}}
         const [tasksResult, devicesResult, accountResult, creditPacksResult] = await Promise.allSettled([
           listTasks(token), listDevices(token), refreshAccount(token), getCreditPacks(token),
         ]);
@@ -1397,7 +1469,7 @@ export function App() {
 
   useEffect(()=>{
     const run=activeRunRef.current;if(!run||run.cancelled)return;
-    const task=tasks.find((item)=>item.id===run.taskId);if(task?.status!=='cancelled')return;
+    const task=tasks.find((item)=>item.id===run.taskId);if(task?.status!=='cancelled'&&task?.status!=='failed')return;
     run.cancelled=true;run.controller.abort(new DOMException('Task cancelled','AbortError'));
     permissionResolver.current?.(null);permissionResolver.current=null;setPendingPermission(null);setAgentStatus('已终止');
     if(hasDesktopBridge())void window.codDesktop?.stopGoose();
@@ -1419,41 +1491,51 @@ export function App() {
     authRequestControllerRef.current=null;
     authAttemptGenerationRef.current+=1;
   };
+  const establishAuthenticatedSession = async (nextSession: CodSession, authAttemptGeneration: number, signal: AbortSignal, nextOverlay: Overlay) => {
+    const authGeneration=++authGenerationRef.current;
+    let persisted=false;
+    const assertCurrentAuth=()=>{
+      if(signal.aborted||authAttemptGenerationRef.current!==authAttemptGeneration||authGenerationRef.current!==authGeneration){
+        throw signal.reason instanceof DOMException ? signal.reason : new DOMException('Authentication attempt superseded','AbortError');
+      }
+    };
+    try{
+      await persistCodSession(nextSession.token);persisted=true;assertCurrentAuth();
+      await loadWorkspace(nextSession,authGeneration);assertCurrentAuth();
+    }catch(error){
+      if(persisted){
+        try{
+          const cleared=await logoutCod(nextSession.token,{clearMobileHistory:false});
+          if(!cleared)throw new ApiError('登录凭据回滚未完成，请清理本机应用数据后重试。',503,'logout_recovery_unavailable');
+        }catch(cleanupError){
+          if(cleanupError instanceof ApiError&&cleanupError.code==='logout_recovery_unavailable')throw cleanupError;
+        }
+      }
+      throw error;
+    }
+    sessionTokenRef.current=nextSession.token;setSession(nextSession);setAuthState('signed-in');setInitialAuthMode('login');setOverlay(nextOverlay);setResumeComputeAfterLogin(false);
+  };
   const handleLogin = async (email: string, password: string, signal: AbortSignal) => {
     const authAttemptGeneration=++authAttemptGenerationRef.current;
-    const issuedToken = await loginCod(email, password, { signal });
-    if(authAttemptGenerationRef.current!==authAttemptGeneration)throw new DOMException('Authentication attempt superseded','AbortError');
-    persistCodSession(issuedToken);
-    const nextSession = await hydrateCodSession(issuedToken, signal);
-    if(authAttemptGenerationRef.current!==authAttemptGeneration)throw new DOMException('Authentication attempt superseded','AbortError');
-    const authGeneration=++authGenerationRef.current;
-    // Persist the issued session before loading optional workspace services.
-    // A successful login must not be lost merely because device sync, ledger,
-    // or another secondary GET is temporarily unavailable.
-    persistCodSession(nextSession.token);sessionTokenRef.current=nextSession.token;setSession(nextSession);setAuthState('signed-in');
-    try{await loadWorkspace(nextSession,authGeneration);}
-    catch(error){if(authAttemptGenerationRef.current!==authAttemptGeneration||authGenerationRef.current!==authGeneration)throw new DOMException('Authentication attempt superseded','AbortError');if(isDefinitiveAuthenticationFailure(error)){logoutCod();sessionTokenRef.current=null;setSession(null);setAuthState('signed-out');throw error;}setNotice('已登录；工作区暂未加载，可在网络恢复后刷新。');}
-    if(authAttemptGenerationRef.current!==authAttemptGeneration||authGenerationRef.current!==authGeneration)throw new DOMException('Authentication attempt superseded','AbortError');
-    setInitialAuthMode('login');setOverlay(resumeComputeAfterLogin ? 'compute' : null);setResumeComputeAfterLogin(false);
+    const issuedToken=await loginCod(email,password,{signal});
+    if(signal.aborted||authAttemptGenerationRef.current!==authAttemptGeneration)throw signal.reason??new DOMException('Authentication attempt superseded','AbortError');
+    const nextSession=await hydrateCodSession(issuedToken,signal);
+    if(signal.aborted||authAttemptGenerationRef.current!==authAttemptGeneration)throw signal.reason??new DOMException('Authentication attempt superseded','AbortError');
+    await establishAuthenticatedSession(nextSession,authAttemptGeneration,signal,resumeComputeAfterLogin?'compute':null);
   };
   const handleRegister=async(input:VerifiedRegistrationInput|LegacyMigrationInput,signal:AbortSignal,idempotencyKey?:string)=>{
     const authAttemptGeneration=++authAttemptGenerationRef.current;
     const issuedToken=await registerCod(input,{signal,idempotencyKey});
-    if(authAttemptGenerationRef.current!==authAttemptGeneration)throw new DOMException('Authentication attempt superseded','AbortError');
-    persistCodSession(issuedToken);
+    if(signal.aborted||authAttemptGenerationRef.current!==authAttemptGeneration)throw signal.reason??new DOMException('Authentication attempt superseded','AbortError');
     const nextSession=await hydrateCodSession(issuedToken,signal);
-    if(authAttemptGenerationRef.current!==authAttemptGeneration)throw new DOMException('Authentication attempt superseded','AbortError');
-    const authGeneration=++authGenerationRef.current;
-    // Registration/legacy migration may be one-time. Keep the returned token
-    // immediately so a transient workspace failure cannot turn success into an
-    // apparent failure that the user is unable to retry.
-    persistCodSession(nextSession.token);sessionTokenRef.current=nextSession.token;setSession(nextSession);setAuthState('signed-in');
-    try{await loadWorkspace(nextSession,authGeneration);}
-    catch(error){if(authAttemptGenerationRef.current!==authAttemptGeneration||authGenerationRef.current!==authGeneration)throw new DOMException('Authentication attempt superseded','AbortError');if(isDefinitiveAuthenticationFailure(error)){logoutCod();sessionTokenRef.current=null;setSession(null);setAuthState('signed-out');throw error;}setNotice('账号已创建；工作区暂未加载，可在网络恢复后刷新。');}
-    if(authAttemptGenerationRef.current!==authAttemptGeneration||authGenerationRef.current!==authGeneration)throw new DOMException('Authentication attempt superseded','AbortError');
-    setInitialAuthMode('login');setOverlay(resumeComputeAfterLogin?'compute':null);setResumeComputeAfterLogin(false);
+    if(signal.aborted||authAttemptGenerationRef.current!==authAttemptGeneration)throw signal.reason??new DOMException('Authentication attempt superseded','AbortError');
+    await establishAuthenticatedSession(nextSession,authAttemptGeneration,signal,resumeComputeAfterLogin?'compute':null);
   };
-  const handleLogout = () => { cancelAuthentication();authGenerationRef.current+=1;const run=activeRunRef.current;if(run){run.cancelled=true;run.controller.abort(new DOMException('Signed out','AbortError'));}sessionTokenRef.current=null;void window.codDesktop?.stopGoose();logoutCod();setSession(null);setTasks([]);setDevices([]);setLedger([]);setCreditPacks({ packs: [], summary: { availableCents: 0, grants: [] } });setComputeRequests([]);setReferralSummary(null);setKnowledgeHits([]);setKnowledgeLoading(false);setPaymentOrder(null);setPaymentCheckout(null);setPaymentBusy(false);setCurrentDeviceId('');setTargetDeviceId('');setActiveTaskId(null);setMessagesByTask({});setPrompt('');setPendingSend(null);setResumeComputeAfterLogin(false);setInitialAuthMode('login');setNotice('');setOverlay(null);setAuthState('signed-out'); };
+  const handleLogout = () => {
+    const expectedToken=sessionTokenRef.current??undefined;
+    cancelAuthentication();setInitialAuthMode('login');clearAuthenticatedUi();
+    void logoutCod(expectedToken,{explicit:true}).catch((error)=>setNotice(error instanceof Error?error.message:'本机登录凭据未能删除，请在系统设置中清除 COD 应用数据。'));
+  };
   logoutRef.current=handleLogout;
   const handleManualRefresh = async () => {
     if (manualRefreshBusy) return;
@@ -1669,12 +1751,13 @@ export function App() {
     let promptAppended = false;
     let responseAppended = false;
     let chatShellStatus: Promise<RemoteTask | null> | null = null;
-    const run:ActiveRun={taskId:task?.id??'',controller:new AbortController(),cancelled:false,mode:requestedMode};
+    const run:ActiveRun={taskId:task?.id??'',controller:new AbortController(),cancelled:false,leaseAcquired:false,finalizing:false,terminalCommitted:false,mode:requestedMode};
     const assertActive=()=>{if(run.cancelled||run.controller.signal.aborted||sessionTokenRef.current!==token)throw new DOMException('Task cancelled','AbortError');};
     let projectBeforeRun:ProjectSnapshot|null=null;
     if (task && task.deviceId !== currentDeviceId) { setNotice(`该任务应在 ${devices.find((device) => device.id === task!.deviceId)?.name ?? '目标设备'} 上执行`); return; }
     sendingRef.current=true;activeRunRef.current=run;setIsSending(true);setAgentStatus('正在执行');setNotice('');
     try {
+      if(currentDeviceId){await heartbeatDevice(token,currentDeviceId);assertActive();}
       if (!task) {
         if (!currentDeviceId) throw new Error('当前设备尚未完成注册');
         task = await createRemoteTask(token, promptText.slice(0, 80), currentDeviceId);
@@ -1684,8 +1767,11 @@ export function App() {
       // A chat task is only a local/history shell. Model requests intentionally
       // remain taskless so a Desktop execution claim can never block ordinary
       // conversation. Code/Agent runs keep the strict synchronized task lease.
-      if (requestedMode === 'code' && task.status !== 'running') {task = await changeTaskStatus(task, 'running');assertActive();}
-      else if (requestedMode === 'chat') {
+      if (requestedMode === 'code') {
+        if (task.status !== 'running'||!getTaskExecutionLease(task.id)) {task = await changeTaskStatus(task, 'running');assertActive();}
+        run.leaseAcquired=Boolean(getTaskExecutionLease(task.id));
+        if(!run.leaseAcquired)throw new Error('未取得任务执行租约，本次任务未启动。');
+      } else {
         const shellTask = task;
         chatShellStatus = (shellTask.status === 'running' || shellTask.status === 'waiting'
           ? Promise.resolve(shellTask)
@@ -1720,7 +1806,8 @@ export function App() {
         assertActive();
         if(!projectBeforeRun)throw new Error('无法读取项目运行前状态，本次代码任务未执行。');
       }
-      const acpUrl = requestedMode === 'code' && selectedSource && selectedModelInfo ? await window.codDesktop?.getGooseAcpUrl({ token, sourceId: selectedSource.id, modelId: selectedModelInfo.id, taskId:task.id, root:projectContext!.root }) : null;
+      const executionLease=getTaskExecutionLease(task.id);
+      const acpUrl = requestedMode === 'code' && selectedSource && selectedModelInfo && executionLease ? await window.codDesktop?.getGooseAcpUrl({ token, sourceId: selectedSource.id, modelId: selectedModelInfo.id, taskId:task.id, root:projectContext!.root, executionId:executionLease.executionId, leaseToken:executionLease.leaseToken }) : null;
       assertActive();
       if(comparisonRequest){
         setAgentStatus(`正在并行请求 ${compareTargets.length} 个模型`);
@@ -1736,7 +1823,7 @@ export function App() {
         const { buildCodeExecutionPrompt, runGooseTask, validateCodeRun } = await import('./goose');
         setAgentStatus('连接本机 Goose');
         const contextualPrompt = conversationMessages.length === 1 ? submittedPrompt : `Continue this conversation using the current project.\n\n${conversationMessages.map((message) => `${message.role === 'user' ? 'User' : 'Assistant'}: ${message.content}`).join('\n\n')}`;
-        const gooseRun = await runGooseTask({ acpUrl, cwd: projectContext!.root, prompt: buildCodeExecutionPrompt(contextualPrompt), signal:run.controller.signal, onUpdate: (update) => { if(run.cancelled||sessionTokenRef.current!==token)return;if (update.kind === 'message') reply += update.text; if (update.kind === 'tool' || update.kind === 'status') setAgentStatus(update.text); }, requestPermission: (request) => new Promise((resolve) => { if(run.cancelled||sessionTokenRef.current!==token){resolve(null);return;}permissionResolver.current = resolve; setPendingPermission({ title: request.toolCall.title ?? '工具权限请求', options: request.options }); }) });
+        const gooseRun = await runGooseTask({ acpUrl, cwd: projectContext!.root, prompt: buildCodeExecutionPrompt(contextualPrompt), signal:run.controller.signal, onUpdate: (update) => { if(run.cancelled||sessionTokenRef.current!==token)return;if (update.kind === 'message') reply += update.text; if (update.kind === 'tool' || update.kind === 'status') setAgentStatus(update.text); }, requestPermission: (request) => new Promise((resolve) => { if(run.cancelled||sessionTokenRef.current!==token){resolve(null);return;}permissionResolver.current = resolve; setPendingPermission({ summary: summarizePermissionToolCall(request.toolCall), options: request.options }); }) });
         assertActive();
         const projectAfterRun=await loadProject(projectContext!.root);
         assertActive();
@@ -1751,7 +1838,12 @@ export function App() {
         responseAppended = true;
       }
       if (!comparisonRequest&&requestedMode === 'code'&&selectedSource&&selectedModelInfo) { appendMessage(task.id, { id: createClientId(), role: 'assistant', content: reply, mode: replyMode, sourceLabel: selectedSource.label, model: selectedModelInfo.id, createdAt: new Date().toISOString() }); responseAppended = true; }
-      if (requestedMode === 'code' && (task.status === 'running' || task.status === 'waiting')) {task = await changeTaskStatus(task, 'complete', { result: reply, error: null });assertActive();}
+      if (requestedMode === 'code' && (task.status === 'running' || task.status === 'waiting')) {
+        run.finalizing=true;
+        try{task=await changeTaskStatus(task,'complete',{result:reply,error:null});run.terminalCommitted=true;run.leaseAcquired=false;}
+        catch(error){run.finalizing=false;throw error;}
+        assertActive();
+      }
       else if (requestedMode === 'chat') {
         void chatShellStatus?.then(async (shellTask) => {
           if (!shellTask) throw new Error('chat shell unavailable');
@@ -1773,7 +1865,11 @@ export function App() {
       const failure = chatFailureMessage(error);
       setAgentStatus('等待重试'); setNotice(failure);
       if (task && promptAppended && !responseAppended) appendMessage(task.id, { id: createClientId(), role: 'assistant', content: failure, failed: true, retryPrompt: promptText, createdAt: new Date().toISOString() });
-      if (requestedMode === 'code' && task && session && (task.status === 'draft' || task.status === 'running' || task.status === 'waiting')) { try { await changeTaskStatus(task, 'failed', { error: failure }); } catch { /* Preserve the original error. */ } }
+      if (requestedMode === 'code' && task && session && (task.status === 'draft' || task.status === 'running' || task.status === 'waiting')) {
+        run.finalizing=true;
+        try{await changeTaskStatus(task,'failed',{error:failure});run.terminalCommitted=true;run.leaseAcquired=false;}
+        catch{run.finalizing=false;/* Preserve the original error. */}
+      }
       else if (requestedMode === 'chat') void chatShellStatus?.then(async (shellTask) => {
         if (shellTask && (shellTask.status === 'running' || shellTask.status === 'waiting')) await changeTaskStatus(shellTask, 'failed', { error: failure });
       }).catch(() => undefined);
@@ -1807,7 +1903,7 @@ export function App() {
     try{
       const [result]=await Promise.all([cancelRemoteTask(token,task),hasDesktopBridge()&&run?.taskId===task.id?window.codDesktop?.stopGoose():Promise.resolve()]);
       if(sessionTokenRef.current!==token)return;
-      replaceTask(result.task);appendMessage(task.id,{id:createClientId(),role:'assistant',content:hasDesktopBridge()?'任务已由用户终止。本机 Agent 已停止。未结算请求不扣费，已完成或结算中的请求按实际用量计费。':'任务已由用户终止。未结算请求不扣费，已完成或结算中的请求按实际用量计费。',cancelled:true,createdAt:new Date().toISOString()});
+      if(run?.taskId===task.id)run.leaseAcquired=false;replaceTask(result.task);appendMessage(task.id,{id:createClientId(),role:'assistant',content:hasDesktopBridge()?'任务已由用户终止。本机 Agent 已停止。未结算请求不扣费，已完成或结算中的请求按实际用量计费。':'任务已由用户终止。未结算请求不扣费，已完成或结算中的请求按实际用量计费。',cancelled:true,createdAt:new Date().toISOString()});
       setAgentStatus('已终止');setNotice(result.cancelledRequests>0?`任务已终止，已取消 ${result.cancelledRequests} 个模型请求并释放预占额度。`:'任务已终止，当前没有仍在运行的模型请求。');await refreshWallet();
     }catch(error){
       if(sessionTokenRef.current!==token)return;
@@ -1888,11 +1984,11 @@ export function App() {
   const sendHint=isNativeHost?'发送':window.codDesktop?.platform==='darwin'?'⌘ Enter 发送':'Ctrl / ⌘ Enter 发送';
 
   return <div className={`app-shell${inspectorOpen ? '' : ' inspector-hidden'}`}>
-    <aside className="rail"><Brand /><div className="rail-actions"><button className={`icon-button mobile-rail-primary ${mode === 'code' ? 'active' : ''}`} title="任务" aria-label="任务" onClick={() => { if(hasDesktopBridge())selectWorkspaceMode('code');setSidebarOpen(true); }}><ListChecks weight="fill" /></button><button className={`icon-button mobile-rail-primary ${mode === 'chat' ? 'active' : ''}`} title="普通对话" aria-label="普通对话" onClick={() => selectWorkspaceMode('chat')}><ChatCircleDots /></button><button className="icon-button compute-entry mobile-rail-secondary" title="算力市场" aria-label="算力市场" onClick={() => setOverlay('compute')}><Storefront weight="fill" /></button><button className="icon-button mobile-rail-primary" title="模型库" aria-label="模型库" onClick={() => setOverlay('models')}><Stack /></button>{showDownloadEntry && <a className="icon-button mobile-rail-secondary" title="下载客户端" aria-label="下载客户端" href="/download/index.html" target="_blank" rel="noreferrer"><DownloadSimple /></a>}<button className="icon-button mobile-rail-secondary" title="命令面板" aria-label="命令面板" onClick={() => setOverlay('commands')}><Command /></button>{products.map((product) => <button className="icon-button mobile-rail-secondary" title={product.name} aria-label={product.name} key={product.id} onClick={() => void handleProductLaunch(product)}><ArrowSquareOut /></button>)}</div><div className="rail-footer"><ThemeToggle colorMode={colorMode} onChange={setColorMode} className="mobile-rail-secondary" /><button className="icon-button mobile-rail-more" title="更多功能" aria-label="更多功能" onClick={() => setOverlay('mobile-menu')}><DotsThree weight="bold" /></button><button className="icon-button mobile-rail-primary" title={session ? '账户' : '登录'} aria-label={session ? '账户' : '登录'} onClick={() => setOverlay(session ? 'account' : 'login')}><UserCircle /></button></div></aside>
+    <aside className="rail"><Brand /><div className="rail-actions"><button className={`icon-button mobile-rail-primary ${mode === 'code' ? 'active' : ''}`} title="任务" aria-label="任务" onClick={() => { if(hasDesktopBridge())selectWorkspaceMode('code');setSidebarOpen(true); }}><ListChecks weight="fill" /></button><button className={`icon-button mobile-rail-primary ${mode === 'chat' ? 'active' : ''}`} title="普通对话" aria-label="普通对话" onClick={() => selectWorkspaceMode('chat')}><ChatCircleDots /></button><button className="icon-button compute-entry mobile-rail-secondary" title="算力市场" aria-label="算力市场" onClick={() => setOverlay('compute')}><Storefront weight="fill" /></button><button className="icon-button mobile-rail-primary" title="模型库" aria-label="模型库" onClick={() => setOverlay('models')}><Stack /></button>{showDownloadEntry && <button type="button" className="icon-button mobile-rail-secondary" title="下载客户端" aria-label="下载客户端" onClick={handleOpenDownloadPage}><DownloadSimple /></button>}<button className="icon-button mobile-rail-secondary" title="命令面板" aria-label="命令面板" onClick={() => setOverlay('commands')}><Command /></button>{products.map((product) => <button className="icon-button mobile-rail-secondary" title={product.name} aria-label={product.name} key={product.id} onClick={() => void handleProductLaunch(product)}><ArrowSquareOut /></button>)}</div><div className="rail-footer"><ThemeToggle colorMode={colorMode} onChange={setColorMode} className="mobile-rail-secondary" /><button className="icon-button mobile-rail-more" title="更多功能" aria-label="更多功能" onClick={() => setOverlay('mobile-menu')}><DotsThree weight="bold" /></button><button className="icon-button mobile-rail-primary" title={session ? '账户' : '登录'} aria-label={session ? '账户' : '登录'} onClick={() => setOverlay(session ? 'account' : 'login')}><UserCircle /></button></div></aside>
     {sidebarOpen && <button className="sidebar-scrim" aria-label="关闭任务栏遮罩" onClick={() => setSidebarOpen(false)} />}
     <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}><div className="sidebar-head"><div className="sidebar-head-title"><small>工作区</small><strong>{mode === 'code' ? '代码任务' : '对话'}</strong></div><div className="sidebar-head-actions">{sidebarOpen && <button className="mobile-only icon-button sidebar-close-button" type="button" aria-label="关闭任务栏" title="关闭任务栏" onClick={() => setSidebarOpen(false)}><X /></button>}<button className="new-task" onClick={startNewWorkspaceItem}><Plus weight="bold" /> {mode === 'chat' ? '新对话' : '新任务'}</button></div></div><div className="search"><MagnifyingGlass /><input aria-label="搜索任务" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="搜索任务或状态" /></div><TaskList tasks={filteredTasks} devices={devices} activeId={activeTaskId} onSelect={(id) => { setActiveTaskId(id); setSidebarOpen(false); }} /><div className="sidebar-bottom">{notice && <div className="remote-notice">{notice}</div>}<button className="project-switch" onClick={handleOpenProject}><span className="project-icon"><Folder weight="fill" /></span><span><small>当前项目</small><strong>{projectName}</strong></span><CaretDown /></button><div className="balance-preview"><Lightning weight="fill" /><span><small>可用使用额度</small><strong>{session ? session.account.billingExempt ? '不限额度' : `¥ ${((session.account.balanceCents + creditPacks.summary.availableCents) / 100).toFixed(2)}` : '登录后查看'}</strong></span><button onClick={() => setOverlay(session ? 'account' : 'login')}>{session ? '额度包' : '登录'}</button></div></div></aside>
     <main className="workspace"><header className="workspace-header"><div className="task-heading"><button className="mobile-only icon-button" title="打开任务栏" onClick={() => setSidebarOpen(true)}><SidebarSimple /></button><div><h1>{activeTask?.title ?? (session?'新建或选择任务':'新对话')}</h1><p>{project.root || (authState === 'loading' ? '正在连接 COD…' : session ? mode==='chat'?(isNativeHost?'移动端模型对话':'当前设备模型对话'):'Desktop 代码工作区' : '输入消息即可开始')}</p></div><button className="phone-only icon-button mobile-refresh" title="刷新工作区" aria-label="刷新工作区" disabled={manualRefreshBusy} onClick={() => void handleManualRefresh()}>{manualRefreshBusy ? <CircleNotch className="spin" /> : <ArrowClockwise />}</button></div><div className="header-actions">{activeTask && mode==='code' && <span className={`header-status ${activeTask.status}`}>{statusLabels[activeTask.status]}</span>}<div className="mode-switch" aria-label="工作模式">{hasDesktopBridge()&&<button className={mode === 'code' ? 'active' : ''} onClick={() => selectWorkspaceMode('code')}><Code /> 代码</button>}<button className={mode === 'chat' ? 'active' : ''} onClick={() => selectWorkspaceMode('chat')}><ChatCircleDots /> 对话</button></div><select className="source-picker" aria-label="模型源" value={selectedSource?.id ?? ''} onChange={(event) => handleSourceChange(event.target.value)} disabled={!session}><option value="">{authState === 'loading' ? '正在连接…' : '登录后选择模型源'}</option>{session?.sources.map((source) => <option key={source.id} value={source.id}>{source.label} · {source.callable ? '已连接' : source.status === 'catalog' ? '目录' : '不可用'}</option>)}</select><select className="model-picker" aria-label="模型" value={selectedModelInfo?.id ?? ''} onChange={(event) => handleModelChange(event.target.value)} disabled={!session || !sourceModels.length}><option value="">登录后选择模型</option>{sourceModels.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}</select><button className={`icon-button inspector-toggle${inspectorOpen ? ' active' : ''}`} title={inspectorOpen ? '隐藏右侧面板' : '显示右侧面板'} onClick={toggleInspector}><SidebarSimple /></button></div></header>
-      <section className="conversation"><div className="conversation-scroll" ref={conversationScrollRef}>{!activeTask && <div className="empty-state"><div className="agent-avatar"><span>C</span></div><h2>休息一下，把任务交给 COD</h2><p>{session ? '选择模型后直接输入消息；首次发送会在当前设备创建并保存这段对话。' : '直接输入消息；发送时再登录，已经写好的内容不会丢失。'}</p>{session && <button className="primary-button" onClick={startNewWorkspaceItem}><Plus /> {mode === 'chat' ? '开始新对话' : '新建代码任务'}</button>}</div>}{activeTask && !activeMessages.length && !activeTask.result && !activeTask.error && <div className="empty-state compact"><StatusGlyph status={activeTask.status} /><h2>{activeTask.title}</h2><p>{mode==='chat'?'这是保存在当前设备上的对话，直接输入消息即可继续。':activeTask.status==='cancelled'?'任务已终止，可重新执行。':`任务已同步到 ${devices.find((device) => device.id === activeTask.deviceId)?.name ?? '目标设备'}。输入内容开始执行。`}</p></div>}{activeTask && !activeMessages.length && (activeTask.result || activeTask.error) && <article className="agent-message"><div className="agent-avatar"><span>C</span></div><div><header><strong>{mode==='chat'?(activeTask.error?'上次对话未完成':'上次对话结果'):(activeTask.error ? '远程任务失败' : '远程任务结果')}</strong></header><MarkdownContent>{activeTask.error ? chatFailureMessage(new Error(activeTask.error)) : activeTask.result ?? ''}</MarkdownContent><small>{formatTime(activeTask.updatedAt)}</small></div></article>}{activeMessages.map((message) => message.role === 'user' ? <article className="user-message" key={message.id}><p>{message.content}</p><small>{formatTime(message.createdAt)}</small></article> : message.role === 'comparison' ? <article className="comparison-message" key={message.id}><header><div><Stack weight="fill" /><span><strong>多模型对比</strong><small>同一问题 · {message.comparisonResults?.length ?? 0} 个模型</small></span></div><time>{formatTime(message.createdAt)}</time></header><div className="comparison-results">{message.comparisonResults?.map((result) => <section className={`${result.error ? 'failed' : ''}${message.selectedComparisonKey === comparisonResultKey(result) ? ' selected' : ''}`.trim()} key={`${result.sourceId}-${result.model}`}><header><span><strong>{result.model}</strong><small>{result.sourceLabel}</small></span><div><i>{result.error ? '失败' : `${(result.durationMs / 1000).toFixed(1)}s`}</i>{!result.error&&<button type="button" aria-pressed={message.selectedComparisonKey === comparisonResultKey(result)} onClick={()=>chooseComparisonModel(message.id,result)}>{message.selectedComparisonKey === comparisonResultKey(result) ? '已用于后续对话' : '选用此回答'}</button>}</div></header><MarkdownContent className={result.error ? 'comparison-error' : ''}>{result.error ?? result.content}</MarkdownContent><footer>{result.inputTokens !== undefined && result.outputTokens !== undefined ? `输入 ${result.inputTokens.toLocaleString('zh-CN')} / 输出 ${result.outputTokens.toLocaleString('zh-CN')} Token` : '未返回 Token 用量'}</footer></section>)}</div></article> : <article className={`agent-message${message.failed ? ' failed' : message.cancelled?' cancelled':''}`} key={message.id}><div className="agent-avatar"><span>{message.failed ? '!' : message.cancelled?'■':'C'}</span></div><div><header><strong>{message.failed ? '本次未扣费' : message.cancelled?'已停止':'COD Agent'}</strong>{message.mode === 'demo' && <span className="demo-chip">演示响应</span>}{message.sourceLabel && <span className="source-chip">{message.sourceLabel} · {message.model}{message.fallbackUsed ? '（健康模型降级）' : ''}{message.inputTokens !== undefined && message.outputTokens !== undefined ? ` · 输入 ${message.inputTokens.toLocaleString('zh-CN')} / 输出 ${message.outputTokens.toLocaleString('zh-CN')} Token${message.usageEstimated ? '（估算）' : ''}` : ''}</span>}</header><MarkdownContent>{message.content}</MarkdownContent>{message.failed && message.retryPrompt && <button className="retry-message" disabled={isSending} onClick={() => void handleSend(message.retryPrompt, activeTask, mode)}><ArrowClockwise /> 重试这条消息</button>}<small>{formatTime(message.createdAt)}</small></div></article>)}{isSending && <div className="agent-intro"><div className="agent-avatar"><span>C</span></div><div><strong>COD Agent</strong><small>{agentStatus}</small></div><span className="live-chip"><CircleNotch className="spin" /> 正在回复</span></div>}{pendingPermission && <div className="live-permission"><strong>{pendingPermission.title}</strong><p>Goose 请求执行权限，请确认本次操作。建议优先选择单次授权。</p><div>{presentPermissionOptions(pendingPermission.options).map((option) => <button className={option.kind === 'allow_once' ? 'approve' : option.kind.endsWith('always') ? 'persistent' : ''} key={option.optionId} title={option.kind.endsWith('always') ? '在当前 Agent 会话的后续同类操作中持续生效' : undefined} onClick={() => resolvePermission(option.optionId)}>{permissionOptionLabel(option)}</button>)}<button onClick={() => resolvePermission(null)}>取消</button></div></div>}</div>
+      <section className="conversation"><div className="conversation-scroll" ref={conversationScrollRef}>{!activeTask && <div className="empty-state"><div className="agent-avatar"><span>C</span></div><h2>休息一下，把任务交给 COD</h2><p>{session ? '选择模型后直接输入消息；首次发送会在当前设备创建并保存这段对话。' : '直接输入消息；发送时再登录，已经写好的内容不会丢失。'}</p>{session && <button className="primary-button" onClick={startNewWorkspaceItem}><Plus /> {mode === 'chat' ? '开始新对话' : '新建代码任务'}</button>}</div>}{activeTask && !activeMessages.length && !activeTask.result && !activeTask.error && <div className="empty-state compact"><StatusGlyph status={activeTask.status} /><h2>{activeTask.title}</h2><p>{mode==='chat'?'这是保存在当前设备上的对话，直接输入消息即可继续。':activeTask.status==='cancelled'?'任务已终止，可重新执行。':`任务已同步到 ${devices.find((device) => device.id === activeTask.deviceId)?.name ?? '目标设备'}。输入内容开始执行。`}</p></div>}{activeTask && !activeMessages.length && (activeTask.result || activeTask.error) && <article className="agent-message"><div className="agent-avatar"><span>C</span></div><div><header><strong>{mode==='chat'?(activeTask.error?'上次对话未完成':'上次对话结果'):(activeTask.error ? '远程任务失败' : '远程任务结果')}</strong></header><MarkdownContent>{activeTask.error ? chatFailureMessage(new Error(activeTask.error)) : activeTask.result ?? ''}</MarkdownContent><small>{formatTime(activeTask.updatedAt)}</small></div></article>}{activeMessages.map((message) => message.role === 'user' ? <article className="user-message" key={message.id}><p>{message.content}</p><small>{formatTime(message.createdAt)}</small></article> : message.role === 'comparison' ? <article className="comparison-message" key={message.id}><header><div><Stack weight="fill" /><span><strong>多模型对比</strong><small>同一问题 · {message.comparisonResults?.length ?? 0} 个模型</small></span></div><time>{formatTime(message.createdAt)}</time></header><div className="comparison-results">{message.comparisonResults?.map((result) => <section className={`${result.error ? 'failed' : ''}${message.selectedComparisonKey === comparisonResultKey(result) ? ' selected' : ''}`.trim()} key={`${result.sourceId}-${result.model}`}><header><span><strong>{result.model}</strong><small>{result.sourceLabel}</small></span><div><i>{result.error ? '失败' : `${(result.durationMs / 1000).toFixed(1)}s`}</i>{!result.error&&<button type="button" aria-pressed={message.selectedComparisonKey === comparisonResultKey(result)} onClick={()=>chooseComparisonModel(message.id,result)}>{message.selectedComparisonKey === comparisonResultKey(result) ? '已用于后续对话' : '选用此回答'}</button>}</div></header><MarkdownContent className={result.error ? 'comparison-error' : ''}>{result.error ?? result.content}</MarkdownContent><footer>{result.inputTokens !== undefined && result.outputTokens !== undefined ? `输入 ${result.inputTokens.toLocaleString('zh-CN')} / 输出 ${result.outputTokens.toLocaleString('zh-CN')} Token` : '未返回 Token 用量'}</footer></section>)}</div></article> : <article className={`agent-message${message.failed ? ' failed' : message.cancelled?' cancelled':''}`} key={message.id}><div className="agent-avatar"><span>{message.failed ? '!' : message.cancelled?'■':'C'}</span></div><div><header><strong>{message.failed ? '本次未扣费' : message.cancelled?'已停止':'COD Agent'}</strong>{message.mode === 'demo' && <span className="demo-chip">演示响应</span>}{message.sourceLabel && <span className="source-chip">{message.sourceLabel} · {message.model}{message.fallbackUsed ? '（健康模型降级）' : ''}{message.inputTokens !== undefined && message.outputTokens !== undefined ? ` · 输入 ${message.inputTokens.toLocaleString('zh-CN')} / 输出 ${message.outputTokens.toLocaleString('zh-CN')} Token${message.usageEstimated ? '（估算）' : ''}` : ''}</span>}</header><MarkdownContent>{message.content}</MarkdownContent>{message.failed && message.retryPrompt && <button className="retry-message" disabled={isSending} onClick={() => void handleSend(message.retryPrompt, activeTask, mode)}><ArrowClockwise /> 重试这条消息</button>}<small>{formatTime(message.createdAt)}</small></div></article>)}{isSending && <div className="agent-intro"><div className="agent-avatar"><span>C</span></div><div><strong>COD Agent</strong><small>{agentStatus}</small></div><span className="live-chip"><CircleNotch className="spin" /> 正在回复</span></div>}{pendingPermission && <div className="live-permission"><PermissionRequestSummary summary={pendingPermission.summary} showPersistentWarning={permissionOptionsRequirePersistentWarning(pendingPermission.options)} /><p>Goose 请求执行权限，请确认本次操作。建议优先选择单次授权。</p><div>{presentPermissionOptions(pendingPermission.options).map((option) => <button className={option.kind === 'allow_once' ? 'approve' : option.kind.endsWith('always') ? 'persistent' : ''} key={option.optionId} title={option.kind.endsWith('always') ? '在当前 Agent 会话的后续同类操作中持续生效' : undefined} onClick={() => resolvePermission(option.optionId)}>{permissionOptionLabel(option)}</button>)}<button onClick={() => resolvePermission(null)}>取消</button></div></div>}</div>
         <div className="composer-wrap">
           {activeTask && mode==='chat' && isSending && activeRunRef.current?.taskId===activeTask.id && <div className="task-actions"><button className="cancel-task" onClick={() => void stopActiveChat(activeTask)} disabled={Boolean(cancellingTaskId)}>{cancellingTaskId===activeTask.id?<CircleNotch className="spin"/>:<Stop weight="fill"/>}{cancellingTaskId===activeTask.id?'正在停止':'停止回复'}</button></div>}
           {activeTask && mode==='code' && <div className="task-actions">{(activeTask.status === 'draft' || activeTask.status === 'failed' || activeTask.status === 'complete' || activeTask.status==='cancelled') && <button onClick={() => executeSynchronizedTask(activeTask)} disabled={isSending}><Play /> {activeTask.status === 'failed' ? '重试任务' : activeTask.status === 'complete' ? '继续任务' : activeTask.status==='cancelled'?'重新执行':'执行任务'}</button>}{(activeTask.status === 'running' || activeTask.status === 'waiting') && <><button onClick={() => completeSynchronizedTask(activeTask)} disabled={isSending || cancellingTaskId===activeTask.id}><Check /> 标记完成</button><button className="cancel-task" onClick={() => void cancelSynchronizedTask(activeTask)} disabled={Boolean(cancellingTaskId)}>{cancellingTaskId===activeTask.id?<CircleNotch className="spin"/>:<Stop weight="fill"/>}{cancellingTaskId===activeTask.id?'正在终止':'终止任务'}</button></>}</div>}
@@ -1908,7 +2004,7 @@ export function App() {
             <button className="context-more-toggle" type="button" aria-expanded={mobileContextExpanded} aria-label={mobileContextExpanded ? '收起上下文信息' : `展开更多上下文信息，共 ${hiddenMobileContextCount} 项`} onClick={() => setMobileContextExpanded((current) => !current)}><CaretDown /> {mobileContextExpanded ? '收起' : '更多'}</button>
           </div>
           {notice && <div className="remote-notice"><span>{notice}</span><button title="关闭提示" onClick={() => setNotice('')}><X /></button></div>}
-          {knowledgeHits.length > 0 && <div className="knowledge-strip">{knowledgeHits.map((hit) => <a href={hit.url} target="_blank" rel="noreferrer" key={hit.id} onClick={(event)=>{event.preventDefault();void openCodExternalUrl(hit.url);}}><strong>{hit.title}</strong><span>{hit.excerpt}</span></a>)}</div>}
+          {knowledgeHits.length > 0 && <div className="knowledge-strip">{knowledgeHits.map((hit) => <button type="button" key={hit.id} onClick={()=>void openCodExternalUrl(hit.url)}><strong>{hit.title}</strong><span>{hit.excerpt}</span></button>)}</div>}
           <div className="composer"><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void handleSend(); }} placeholder={mode === 'code' ? '让 COD 修改、检查或解释这个项目...' : compareEnabled ? `输入一个问题，同时询问 ${compareTargets.length} 个模型...` : '问 COD 任何问题...'} /><div className="composer-footer">{hasDesktopBridge() && <button className="composer-tool" title="查看项目文件" onClick={() => setInspectorTab('files')}><Plus /></button>}<span>{compareEnabled&&mode==='chat'?`${compareTargets.length} 个模型 · 独立计费`:sendHint}</span><button className="send" title="发送" disabled={!prompt.trim() || isSending || Boolean(session && (compareEnabled&&mode==='chat' ? compareTargets.length<2 : !selectedSource?.callable && !(mode === 'code' && hasDesktopBridge() && project.root)))} onClick={() => void handleSend()}>{isSending ? <CircleNotch className="spin" /> : <PaperPlaneTilt weight="fill" />}</button></div></div>
         </div></section>
     </main>
@@ -1928,7 +2024,7 @@ export function App() {
       {(capabilities?.payments.channels?.length ?? 0) > 0 && <section className="official-payment">
         <header><div><strong>官方商户充值</strong><small>订单金额与回调金额一致后才会入账；未支付订单不会增加余额。</small></div><label>充值金额<select aria-label="充值金额" value={paymentAmountCents} onChange={(event) => setPaymentAmountCents(Number(event.target.value))} disabled={paymentBusy}><option value={1000}>¥10</option><option value={5000}>¥50</option><option value={10000}>¥100</option><option value={20000}>¥200</option><option value={50000}>¥500</option></select></label></header>
         <div className="official-payment-actions">{capabilities?.payments.channels?.includes('wechat') && <button className="wechat" disabled={paymentBusy} onClick={() => void handleOfficialPayment('wechat')}>{paymentBusy ? <CircleNotch className="spin" /> : <CreditCard />} 微信支付</button>}{capabilities?.payments.channels?.includes('alipay') && <button className="alipay" disabled={paymentBusy} onClick={() => void handleOfficialPayment('alipay')}>{paymentBusy ? <CircleNotch className="spin" /> : <CreditCard />} 支付宝</button>}</div>
-        {paymentCheckout && paymentOrder && <div className={`payment-checkout ${paymentOrder.status}`}><div>{paymentCheckout.kind === 'qr' && paymentCheckout.qrDataUrl ? <img src={paymentCheckout.qrDataUrl} alt="微信支付二维码" /> : <CreditCard weight="duotone" />}</div><span><strong>{paymentOrder.status === 'paid' ? '充值已到账' : paymentCheckout.kind === 'qr' ? '请使用微信扫码支付' : '支付宝订单已创建'}</strong><small>订单 {paymentOrder.id} · ¥{(paymentOrder.amountCents / 100).toFixed(2)}</small>{paymentOrder.status === 'pending' && paymentCheckout.kind === 'redirect' && <a href={paymentCheckout.url} target="_blank" rel="noreferrer" onClick={(event)=>{event.preventDefault();void openCodExternalUrl(paymentCheckout.url);}}>前往支付宝付款 <ArrowSquareOut /></a>}{paymentOrder.status === 'pending' && <i>正在等待官方支付结果…</i>}</span></div>}
+        {paymentCheckout && paymentOrder && <div className={`payment-checkout ${paymentOrder.status}`}><div>{paymentCheckout.kind === 'qr' && paymentCheckout.qrDataUrl ? <img src={paymentCheckout.qrDataUrl} alt="微信支付二维码" /> : <CreditCard weight="duotone" />}</div><span><strong>{paymentOrder.status === 'paid' ? '充值已到账' : paymentCheckout.kind === 'qr' ? '请使用微信扫码支付' : '支付宝订单已创建'}</strong><small>订单 {paymentOrder.id} · ¥{(paymentOrder.amountCents / 100).toFixed(2)}</small>{paymentOrder.status === 'pending' && paymentCheckout.kind === 'redirect' && <button type="button" onClick={()=>void openCodExternalUrl(paymentCheckout.url)}>前往支付宝付款 <ArrowSquareOut /></button>}{paymentOrder.status === 'pending' && <i>正在等待官方支付结果…</i>}</span></div>}
       </section>}
       {capabilities?.payments.mode === 'unavailable' && <div className="payment-status unavailable"><strong>充值渠道尚未开通</strong><small>当前只能使用已有钱包余额和试用额度；COD 不会创建无法支付的订单。</small></div>}
       {capabilities?.payments.topupEnabled && <div className="topup-panel"><div><strong>预存试点钱包</strong><small>仅用于本轮产品与计费闭环测试，不代表真实支付已到账。</small></div><div><button onClick={() => handleTopup(1000)}>+ ¥10</button><button onClick={() => handleTopup(5000)}>+ ¥50</button><button onClick={() => handleTopup(10000)}>+ ¥100</button></div></div>}

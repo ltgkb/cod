@@ -28,4 +28,10 @@ describe('chatFailureMessage', () => {
   it('maps Goose provider-credit wording back to the COD wallet', () => {
     expect(chatFailureMessage(new Error('Please check your account with your provider to add more credits, then resend your message to continue.'))).toContain('最后一次失败请求未扣费');
   });
+
+  it('does not claim an automatic retry for provider authentication failures', () => {
+    const message = chatFailureMessage(new ApiError('Provider authentication failed', 502, 'ai_upstream_auth_failed'));
+    expect(message).toContain('模型服务认证配置异常');
+    expect(message).not.toContain('自动重试');
+  });
 });

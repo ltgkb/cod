@@ -10,6 +10,7 @@ interface AgentSessionResponse {
   expiresAt?: unknown;
   scope?: {
     taskId?: unknown;
+    executionId?: unknown;
     sourceId?: unknown;
     model?: unknown;
   };
@@ -61,7 +62,7 @@ export async function mintAgentSession(
         authorization: `Bearer ${config.token}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({ taskId: config.taskId, sourceId: config.sourceId, model: config.modelId }),
+      body: JSON.stringify({ taskId: config.taskId, executionId: config.executionId, leaseToken: config.leaseToken, sourceId: config.sourceId, model: config.modelId }),
       redirect: 'error',
       signal: controller.signal,
     });
@@ -89,6 +90,7 @@ export async function mintAgentSession(
   }
   if (!scope
     || scope.taskId !== config.taskId
+    || scope.executionId !== config.executionId
     || scope.sourceId !== config.sourceId
     || scope.model !== config.modelId) {
     throw new Error('安全 Agent 会话权限范围与当前任务不匹配。');

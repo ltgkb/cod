@@ -101,7 +101,7 @@ Further visual work should focus on a final COD icon set, richer empty/loading s
 - TypeScript typecheck passes.
 - ESLint passes with zero warnings.
 - Web and desktop production builds pass.
-- `npm audit --audit-level=high` reports no vulnerabilities.
+- The original Stage 1-9 baseline reported no vulnerabilities. In the 2026-08-11 post-Expo-refactor review, control-plane/Web production workspaces still report zero high/critical vulnerabilities; the full tree is fail-closed except for the exact, mitigation-bound, 2026-09-11-expiring `image-size` advisories `GHSA-w3rx-r6r6-pgpr` and `GHSA-5p2g-fcmc-qvqq` propagated through Expo/Metro.
 - Goose upstream remains unmodified and clean.
 - The release Goose 1.45.0 sidecar passed `/status` and a real ACP prompt that completed three tool calls through the COD adapter.
 - Final Linux packages include the 148,700,800-byte Goose sidecar:

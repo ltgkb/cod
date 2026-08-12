@@ -3,13 +3,31 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AdminComputeRequestSummary, WorkspaceFile } from '@cod/contracts';
 import { App } from './App';
-import { createClientId, getControlPlaneUrl, sendChat, type ComputeRequest } from './api';
-import { configureCodRuntime, dispatchCodNativeBack } from './runtime';
+import { createClientId, getControlPlaneUrl, getTaskExecutionLease, heartbeatDevice, loginCod, logoutCod, observeCodSessionInvalidated, persistCodSession, refreshAccount, resumeCodSession, sendChat, updateRemoteTask, type ComputeRequest } from './api';
+import { configureCodRuntime as configureCodRuntimeBase, requestCodTopmostUiClose } from './runtime';
+import { dispatchCodNativeBack, type CodRuntimeConfig } from './runtime';
 
-beforeEach(() => {
-  delete window.codDesktop;
+function configureCodRuntime(next: CodRuntimeConfig): void {
+  configureCodRuntimeBase({ loadSessionCleanupPending: async () => false, ...next });
+}
+
+function configureAuthenticatedMobileRuntime(token: string, next: Omit<CodRuntimeConfig, 'loadSessionCleanupPending' | 'loadSessionToken' | 'saveSessionToken' | 'clearSessionToken'> & { hostPlatform: 'android' | 'ios' }): void {
+  let secureToken: string | null = token;
+  configureCodRuntime({
+    ...next,
+    loadSessionToken: async () => secureToken,
+    saveSessionToken: async (value) => { secureToken = value; },
+    clearSessionToken: async (expectedToken) => {
+      if (expectedToken !== undefined && secureToken !== null && secureToken !== expectedToken) return false;
+      secureToken = null;
+      return true;
+    },
+  });
+}
+
+function createMemoryStorage(): Storage {
   const values = new Map<string, string>();
-  const storage: Storage = {
+  return {
     get length() { return values.size; },
     clear: () => values.clear(),
     getItem: (key) => values.get(key) ?? null,
@@ -17,21 +35,27 @@ beforeEach(() => {
     removeItem: (key) => { values.delete(key); },
     setItem: (key, value) => { values.set(key, String(value)); },
   };
-  Object.defineProperty(window, 'localStorage', { configurable: true, value: storage });
+}
+
+beforeEach(() => {
+  delete window.codDesktop;
+  Object.defineProperty(window, 'localStorage', { configurable: true, value: createMemoryStorage() });
 });
 
-afterEach(() => {
-  vi.useRealTimers();
+afterEach(async () => {
   cleanup();
   delete window.codDesktop;
   delete (window as Window & { turnstile?: unknown }).turnstile;
   configureCodRuntime({});
+  Object.defineProperty(window, 'localStorage', { configurable: true, value: createMemoryStorage() });
+  await logoutCod();
+  vi.useRealTimers();
   try { window.localStorage?.clear(); } catch { /* Node can expose localStorage without a backing file. */ }
   vi.unstubAllGlobals();
 });
 
 const capabilities = {
-  authentication: { mode: 'password', registrationEnabled: true, inviteCodeOptional: true, inviteCodeRequired: false, accessCodeRequired: false },
+  authentication: { mode: 'password', registrationEnabled: true, legacyMigrationEnabled: false, inviteCodeOptional: true, inviteCodeRequired: false, accessCodeRequired: false },
   ai: { mode: 'demo', streaming: false, streamingMode: 'buffered-sse' as const },
   knowledge: { mode: 'demo' },
   payments: { topupEnabled: false, orderApi: false, mode: 'unavailable' as const },
@@ -91,6 +115,510 @@ describe('COD workspace', () => {
     expect(await sendChat('token', 'demo', 'demo-model', [{ role: 'user', content: '测试' }])).toMatchObject({ content: '原生响应', inputTokens: 2, outputTokens: 3 });
     expect(nativeRequest).toMatchObject({ url: 'https://mobile.cod.example/v1/chat/completions', method: 'POST' });
     expect(nativeRequest?.headers.authorization).toBe('Bearer token');
+    expect(nativeRequest?.url).not.toContain('token');
+  });
+
+  it('keeps the Expo secure session when a model provider authentication fails', async () => {
+    let secureToken: string | null = 'mobile-session';
+    const clearSessionToken = vi.fn(async () => { secureToken = null; return true; });
+    const nativeRequest = vi.fn(async () => ({
+      status: 502,
+      body: JSON.stringify({ error: 'ai_upstream_auth_failed', message: 'KAI model provider authentication failed' }),
+    }));
+    configureCodRuntime({
+      controlPlaneUrl: 'https://mobile.cod.example/',
+      hostPlatform: 'android',
+      nativeRequest,
+      loadSessionToken: async () => secureToken,
+      saveSessionToken: async (token) => { secureToken = token; },
+      clearSessionToken,
+    });
+
+    await expect(sendChat('mobile-session', 'ai-kai', 'broken-model', [{ role: 'user', content: '测试' }]))
+      .rejects.toMatchObject({ status: 502, code: 'ai_upstream_auth_failed' });
+    expect(nativeRequest).toHaveBeenCalledTimes(1);
+    expect(clearSessionToken).not.toHaveBeenCalled();
+    expect(secureToken).toBe('mobile-session');
+  });
+
+  it('keeps the Web and Desktop session fallback in localStorage', async () => {
+    await persistCodSession('web-session');
+    expect(window.localStorage.getItem('cod.session.token')).toBe('web-session');
+    expect(await logoutCod('different-session')).toBe(false);
+    expect(window.localStorage.getItem('cod.session.token')).toBe('web-session');
+    expect(await logoutCod('web-session')).toBe(true);
+    expect(window.localStorage.getItem('cod.session.token')).toBeNull();
+  });
+
+  it('migrates a legacy Expo WebView session into secure storage and removes the plaintext copy', async () => {
+    let secureToken: string | null = null;
+    const saveSessionToken = vi.fn(async (token: string) => { secureToken = token; });
+    const clearSessionToken = vi.fn(async (expected?: string) => {
+      if (expected !== undefined && secureToken !== null && secureToken !== expected) return false;
+      secureToken = null; return true;
+    });
+    configureCodRuntime({
+      hostPlatform: 'android',
+      loadSessionToken: async () => secureToken,
+      saveSessionToken,
+      clearSessionToken,
+    });
+    window.localStorage.setItem('cod.session.token', 'legacy-session');
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => String(input).endsWith('/api/account')
+      ? json({ userId: 'user', displayName: 'developer', balanceCents: 0, currency: 'CNY', plan: 'developer' })
+      : json([])));
+    await expect(resumeCodSession()).resolves.toMatchObject({ token: 'legacy-session' });
+    expect(saveSessionToken).toHaveBeenCalledWith('legacy-session');
+    expect(secureToken).toBe('legacy-session');
+    expect(window.localStorage.getItem('cod.session.token')).toBeNull();
+  });
+
+  it('fails closed when the Expo secure-session bridge is missing or cannot migrate', async () => {
+    window.localStorage.setItem('cod.session.token', 'legacy-session');
+    configureCodRuntime({ hostPlatform: 'android' });
+    await expect(resumeCodSession()).rejects.toMatchObject({ code: 'secure_session_storage_unavailable' });
+    expect(window.localStorage.getItem('cod.session.token')).toBeNull();
+    window.localStorage.removeItem('cod.session.logout-pending');
+
+    window.localStorage.setItem('cod.session.token', 'another-session');
+    const clearSessionToken = vi.fn(async () => true);
+    configureCodRuntime({
+      hostPlatform: 'android',
+      loadSessionToken: async () => null,
+      saveSessionToken: async () => { throw new Error('native storage unavailable'); },
+      clearSessionToken,
+    });
+    await expect(resumeCodSession()).rejects.toMatchObject({ code: 'secure_session_storage_unavailable' });
+    expect(clearSessionToken).toHaveBeenCalledWith(undefined);
+    expect(window.localStorage.getItem('cod.session.token')).toBeNull();
+  });
+
+  it('does not enter a mobile session when secure persistence fails', async () => {
+    configureCodRuntime({
+      hostPlatform: 'ios',
+      loadSessionToken: async () => null,
+      saveSessionToken: async () => { throw new Error('keychain unavailable'); },
+      clearSessionToken: async () => true,
+    });
+    await expect(persistCodSession('new-session')).rejects.toMatchObject({ code: 'secure_session_storage_unavailable' });
+    expect(window.localStorage.getItem('cod.session.token')).toBeNull();
+  });
+
+  it('uses expected-token CAS so a stale authenticated 401 cannot clear a newer session', async () => {
+    const backing=window.localStorage;
+    let markerMutations=0;
+    const storage:Storage={
+      get length(){return backing.length;},
+      clear:()=>backing.clear(),
+      getItem:(key)=>backing.getItem(key),
+      key:(index)=>backing.key(index),
+      removeItem:(key)=>{
+        if(key==='cod.session.logout-pending'){markerMutations+=1;throw new Error('marker removal failed');}
+        backing.removeItem(key);
+      },
+      setItem:(key,value)=>{
+        if(key==='cod.session.logout-pending')markerMutations+=1;
+        backing.setItem(key,value);
+      },
+    };
+    Object.defineProperty(window,'localStorage',{configurable:true,value:storage});
+    let secureToken: string | null = 'new-session';
+    let releaseClear: () => void = () => undefined;
+    const clearGate = new Promise<void>((resolve) => { releaseClear = resolve; });
+    let markClearStarted: () => void = () => undefined;
+    const clearStarted = new Promise<void>((resolve) => { markClearStarted = resolve; });
+    const clearSessionToken = vi.fn(async (expected?: string) => {
+      markClearStarted();
+      await clearGate;
+      if (expected !== undefined && secureToken !== null && secureToken !== expected) return false;
+      secureToken = null; return true;
+    });
+    configureCodRuntime({
+      hostPlatform: 'android',
+      loadSessionToken: async () => secureToken,
+      saveSessionToken: async (token) => { secureToken = token; },
+      clearSessionToken,
+    });
+    window.localStorage.setItem('cod.messages.current-task', 'new-session-chat');
+    const invalidated = vi.fn();
+    const stopObserving = observeCodSessionInvalidated(invalidated);
+    vi.stubGlobal('fetch', vi.fn(async () => json({ error: 'unauthorized' }, 401)));
+    const request = refreshAccount('old-session');
+    await clearStarted;
+    expect(invalidated).not.toHaveBeenCalled();
+    releaseClear();
+    await expect(request).rejects.toMatchObject({ status: 401 });
+    stopObserving();
+    expect(clearSessionToken).toHaveBeenCalledWith('old-session');
+    expect(invalidated).not.toHaveBeenCalled();
+    expect(secureToken).toBe('new-session');
+    expect(window.localStorage.getItem('cod.messages.current-task')).toBe('new-session-chat');
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBeNull();
+    expect(markerMutations).toBe(0);
+    vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL)=>String(input).endsWith('/api/account')
+      ?json({userId:'user',displayName:'new session',balanceCents:0,currency:'CNY',plan:'developer'})
+      :json([])));
+    await expect(resumeCodSession()).resolves.toMatchObject({token:'new-session'});
+  });
+
+  it('persists the logout marker before waiting for the native tombstone write', async () => {
+    let releaseClear:()=>void=()=>undefined;
+    const clearGate=new Promise<void>((resolve)=>{releaseClear=resolve;});
+    let markClearStarted:()=>void=()=>undefined;
+    const clearStarted=new Promise<void>((resolve)=>{markClearStarted=resolve;});
+    let secureToken:string|null='mobile-session';
+    configureCodRuntime({
+      hostPlatform:'android',
+      loadSessionCleanupPending:async()=>false,
+      loadSessionToken:async()=>secureToken,
+      saveSessionToken:async(token)=>{secureToken=token;},
+      clearSessionToken:async()=>{markClearStarted();await clearGate;secureToken=null;return true;},
+    });
+    const logout=logoutCod('mobile-session',{explicit:true});
+    await clearStarted;
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBe('1');
+    const restartedStorage=createMemoryStorage();
+    restartedStorage.setItem('cod.session.logout-pending',String(window.localStorage.getItem('cod.session.logout-pending')));
+    expect(restartedStorage.getItem('cod.session.logout-pending')).toBe('1');
+    releaseClear();
+    await expect(logout).resolves.toBe(true);
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBeNull();
+  });
+
+  it('keeps explicit mobile logout fail closed until a failed secure deletion is retried', async () => {
+    let secureToken: string | null = 'mobile-session';
+    configureCodRuntime({
+      hostPlatform: 'android',
+      loadSessionToken: async () => secureToken,
+      saveSessionToken: async (token) => { secureToken = token; },
+      clearSessionToken: async () => { throw new Error('secure deletion failed'); },
+    });
+    window.localStorage.setItem('cod.messages.private-task', 'private-chat');
+    await expect(logoutCod('mobile-session', { explicit: true })).rejects.toThrow('secure deletion failed');
+    expect(window.localStorage.getItem('cod.messages.private-task')).toBe('private-chat');
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBe('1');
+
+    configureCodRuntime({
+      hostPlatform: 'android',
+      loadSessionToken: async () => secureToken,
+      saveSessionToken: async (token) => { secureToken = token; },
+      clearSessionToken: async () => { secureToken = null; return true; },
+    });
+    await expect(resumeCodSession()).resolves.toBeNull();
+    expect(secureToken).toBeNull();
+    expect(window.localStorage.getItem('cod.messages.private-task')).toBeNull();
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBeNull();
+  });
+
+  it('fails closed when the pending-logout marker cannot be read', async () => {
+    const backing=window.localStorage;
+    const storage:Storage={
+      get length(){return backing.length;},
+      clear:()=>backing.clear(),
+      getItem:(key)=>{if(key==='cod.session.logout-pending')throw new Error('storage read failed');return backing.getItem(key);},
+      key:(index)=>backing.key(index),
+      removeItem:(key)=>backing.removeItem(key),
+      setItem:(key,value)=>backing.setItem(key,value),
+    };
+    Object.defineProperty(window,'localStorage',{configurable:true,value:storage});
+    let secureToken:string|null='mobile-session';
+    configureCodRuntime({
+      hostPlatform:'ios',
+      loadSessionToken:async()=>secureToken,
+      saveSessionToken:async(token)=>{secureToken=token;},
+      clearSessionToken:async()=>{secureToken=null;return true;},
+    });
+    await expect(resumeCodSession()).rejects.toMatchObject({code:'logout_marker_unavailable'});
+    expect(secureToken).toBeNull();
+  });
+
+  it('treats a corrupted mobile logout marker as pending and never restores the secure session', async () => {
+    let secureToken:string|null='mobile-session';
+    configureCodRuntime({
+      hostPlatform:'android',
+      loadSessionCleanupPending:async()=>false,
+      loadSessionToken:async()=>secureToken,
+      saveSessionToken:async(token)=>{secureToken=token;},
+      clearSessionToken:async()=>{secureToken=null;return true;},
+    });
+    window.localStorage.setItem('cod.session.logout-pending','corrupted');
+    await expect(resumeCodSession()).resolves.toBeNull();
+    expect(secureToken).toBeNull();
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBeNull();
+  });
+
+  it('requires app-data cleanup when both logout recovery layers fail', async () => {
+    const backing=window.localStorage;
+    const storage:Storage={
+      get length(){return backing.length;},
+      clear:()=>backing.clear(),
+      getItem:(key)=>backing.getItem(key),
+      key:(index)=>backing.key(index),
+      removeItem:(key)=>backing.removeItem(key),
+      setItem:(key,value)=>{if(key==='cod.session.logout-pending')throw new Error('marker write failed');backing.setItem(key,value);},
+    };
+    Object.defineProperty(window,'localStorage',{configurable:true,value:storage});
+    let secureToken:string|null='mobile-session';
+    configureCodRuntime({
+      hostPlatform:'android',
+      loadSessionToken:async()=>secureToken,
+      saveSessionToken:async(token)=>{secureToken=token;},
+      clearSessionToken:async()=>{throw new Error('secure deletion failed');},
+    });
+    window.localStorage.setItem('cod.messages.private-task','private-chat');
+    await expect(logoutCod('mobile-session',{explicit:true})).rejects.toMatchObject({code:'logout_recovery_unavailable'});
+    expect(window.localStorage.getItem('cod.messages.private-task')).toBe('private-chat');
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBeNull();
+    expect(secureToken).toBe('mobile-session');
+  });
+
+  it('retries the fallback logout marker after plaintext cleanup frees storage', async () => {
+    const values=new Map<string,string>([
+      ['cod.session.token','legacy-mobile-session'],
+      ['cod.messages.private-task','private-chat'],
+    ]);
+    let markerWrites=0;
+    const storage:Storage={
+      get length(){return values.size;},
+      clear:()=>values.clear(),
+      getItem:(key)=>values.get(key)??null,
+      key:(index)=>[...values.keys()][index]??null,
+      removeItem:(key)=>{values.delete(key);},
+      setItem:(key,value)=>{
+        if(key==='cod.session.logout-pending'){
+          markerWrites+=1;
+          if(values.has('cod.session.token'))throw new Error('quota exhausted');
+        }
+        values.set(key,String(value));
+      },
+    };
+    Object.defineProperty(window,'localStorage',{configurable:true,value:storage});
+    let secureToken:string|null='mobile-session';
+    let secureLogoutPending=false;
+    let failSecureClear=true;
+    const configureRestartedRuntime=()=>configureCodRuntime({
+      hostPlatform:'android',
+      loadSessionCleanupPending:async()=>secureLogoutPending,
+      loadSessionToken:async()=>secureLogoutPending?null:secureToken,
+      saveSessionToken:async(token)=>{secureToken=token;secureLogoutPending=false;},
+      clearSessionToken:async(expected)=>{
+        if(failSecureClear)throw new Error('secure tombstone failed');
+        if(expected!==undefined&&secureToken!==null&&secureToken!==expected)return false;
+        secureToken=null;secureLogoutPending=true;return true;
+      },
+    });
+    configureRestartedRuntime();
+    await expect(logoutCod('mobile-session',{explicit:true})).rejects.toThrow('secure tombstone failed');
+    expect(markerWrites).toBe(2);
+    expect(window.localStorage.getItem('cod.session.token')).toBeNull();
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBe('1');
+    expect(window.localStorage.getItem('cod.messages.private-task')).toBe('private-chat');
+
+    failSecureClear=false;
+    configureRestartedRuntime();
+    await expect(resumeCodSession()).resolves.toBeNull();
+    expect(secureLogoutPending).toBe(true);
+    expect(window.localStorage.getItem('cod.messages.private-task')).toBeNull();
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBeNull();
+  });
+
+  it('uses the native logout tombstone after restart when local fallback storage is unavailable', async () => {
+    const values=new Map<string,string>([['cod.session.token','stale-legacy-session']]);
+    let allowPlaintextRemoval=false;
+    const storage:Storage={
+      get length(){return values.size;},
+      clear:()=>values.clear(),
+      getItem:(key)=>values.get(key)??null,
+      key:(index)=>[...values.keys()][index]??null,
+      removeItem:(key)=>{if(key!=='cod.session.token'||allowPlaintextRemoval)values.delete(key);},
+      setItem:(key,value)=>{
+        if(key==='cod.session.logout-pending')throw new Error('marker storage unavailable');
+        values.set(key,String(value));
+      },
+    };
+    Object.defineProperty(window,'localStorage',{configurable:true,value:storage});
+    let secureToken:string|null='mobile-session';
+    let secureLogoutPending=false;
+    const saveSessionToken=vi.fn(async(token:string)=>{secureToken=token;secureLogoutPending=false;});
+    const configureRestartedRuntime=()=>configureCodRuntime({
+      hostPlatform:'ios',
+      loadSessionCleanupPending:async()=>secureLogoutPending,
+      loadSessionToken:async()=>secureLogoutPending?null:secureToken,
+      saveSessionToken,
+      clearSessionToken:async(expected)=>{
+        if(expected!==undefined&&secureToken!==null&&secureToken!==expected)return false;
+        secureToken=null;secureLogoutPending=true;return true;
+      },
+    });
+    configureRestartedRuntime();
+    await expect(logoutCod('mobile-session',{explicit:true})).rejects.toMatchObject({code:'plaintext_session_cleanup_failed',sessionCredentialCleared:true});
+    expect(secureLogoutPending).toBe(true);
+    expect(window.localStorage.getItem('cod.session.token')).toBe('stale-legacy-session');
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBeNull();
+
+    allowPlaintextRemoval=true;
+    configureRestartedRuntime();
+    await expect(resumeCodSession()).resolves.toBeNull();
+    expect(window.localStorage.getItem('cod.session.token')).toBeNull();
+    expect(saveSessionToken).not.toHaveBeenCalled();
+    expect(secureLogoutPending).toBe(true);
+  });
+
+  it('fails closed and removes the secure copy when legacy plaintext deletion cannot be verified', async () => {
+    const values = new Map<string, string>([['cod.session.token', 'legacy-session']]);
+    const storage: Storage = {
+      get length() { return values.size; },
+      clear: () => values.clear(),
+      getItem: (key) => values.get(key) ?? null,
+      key: (index) => [...values.keys()][index] ?? null,
+      removeItem: (key) => { if (key !== 'cod.session.token') values.delete(key); },
+      setItem: (key, value) => { values.set(key, String(value)); },
+    };
+    Object.defineProperty(window, 'localStorage', { configurable: true, value: storage });
+    let secureToken: string | null = null;
+    configureCodRuntime({
+      hostPlatform: 'ios',
+      loadSessionToken: async () => secureToken,
+      saveSessionToken: async (token) => { secureToken = token; },
+      clearSessionToken: async () => { secureToken = null; return true; },
+    });
+    await expect(resumeCodSession()).rejects.toMatchObject({ code: 'plaintext_session_cleanup_failed' });
+    expect(secureToken).toBeNull();
+    expect(window.localStorage.getItem('cod.session.token')).toBe('legacy-session');
+  });
+
+  it('does not invalidate an existing session for a login-credentials 401', async () => {
+    window.localStorage.setItem('cod.session.token', 'existing-session');
+    const invalidated = vi.fn();
+    const stopObserving = observeCodSessionInvalidated(invalidated);
+    vi.stubGlobal('fetch', vi.fn(async () => json({ error: 'invalid_credentials', message: '邮箱或密码错误' }, 401)));
+    await expect(loginCod('developer@kai.com', 'wrong-password')).rejects.toMatchObject({ status: 401 });
+    stopObserving();
+    expect(invalidated).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem('cod.session.token')).toBe('existing-session');
+  });
+
+  it('clears persisted Expo chat history on logout without removing harmless preferences', async () => {
+    let secureToken: string | null = 'mobile-session';
+    configureCodRuntime({
+      hostPlatform: 'android',
+      loadSessionToken: async () => secureToken,
+      saveSessionToken: async (token) => { secureToken = token; },
+      clearSessionToken: async (expected) => {
+        if (expected !== undefined && secureToken !== null && secureToken !== expected) return false;
+        secureToken = null; return true;
+      },
+    });
+    window.localStorage.setItem('cod.messages.task-1', JSON.stringify([{ content: 'private' }]));
+    window.localStorage.setItem('kai.color-mode.v1', 'dark');
+    await logoutCod('mobile-session');
+    expect(window.localStorage.getItem('cod.messages.task-1')).toBeNull();
+    expect(window.localStorage.getItem('kai.color-mode.v1')).toBe('dark');
+    expect(secureToken).toBeNull();
+  });
+
+  it('keeps a logout tombstone when a newly written secure session cannot be rolled back', async () => {
+    let secureToken: string | null = null;
+    let verificationReads = 0;
+    configureCodRuntime({
+      hostPlatform: 'android',
+      loadSessionToken: async () => {
+        verificationReads += 1;
+        if (verificationReads === 1) return 'different-session';
+        return secureToken;
+      },
+      saveSessionToken: async (token) => { secureToken = token; },
+      clearSessionToken: async () => { throw new Error('secure deletion failed'); },
+    });
+    await expect(persistCodSession('new-session')).rejects.toMatchObject({ code: 'secure_session_storage_unavailable' });
+    expect(secureToken).toBe('new-session');
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBe('1');
+
+    configureCodRuntime({
+      hostPlatform: 'android',
+      loadSessionToken: async () => secureToken,
+      saveSessionToken: async (token) => { secureToken = token; },
+      clearSessionToken: async () => { secureToken = null; return true; },
+    });
+    await expect(resumeCodSession()).resolves.toBeNull();
+    expect(secureToken).toBeNull();
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBeNull();
+  });
+
+  it('never cancels an older pending logout when pre-login cleanup cannot reach SecureStore', async () => {
+    let secureToken:string|null='old-session';
+    let secureLogoutPending=false;
+    let clearAttempts=0;
+    const saveSessionToken=vi.fn(async(token:string)=>{secureToken=token;secureLogoutPending=false;});
+    const configureRestartedRuntime=()=>configureCodRuntime({
+      hostPlatform:'android',
+      loadSessionCleanupPending:async()=>secureLogoutPending,
+      loadSessionToken:async()=>secureLogoutPending?null:secureToken,
+      saveSessionToken,
+      clearSessionToken:async(expected)=>{
+        clearAttempts+=1;
+        if(clearAttempts===1)throw new Error('temporary SecureStore failure');
+        if(expected!==undefined&&secureToken!==null&&secureToken!==expected)return false;
+        secureToken=null;secureLogoutPending=true;return true;
+      },
+    });
+    window.localStorage.setItem('cod.session.logout-pending','1');
+    configureRestartedRuntime();
+    await expect(persistCodSession('new-session')).rejects.toMatchObject({code:'secure_session_storage_unavailable'});
+    expect(clearAttempts).toBe(1);
+    expect(saveSessionToken).not.toHaveBeenCalled();
+    expect(secureToken).toBe('old-session');
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBe('1');
+
+    configureRestartedRuntime();
+    await expect(resumeCodSession()).resolves.toBeNull();
+    expect(secureLogoutPending).toBe(true);
+    expect(secureToken).toBeNull();
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBeNull();
+  });
+
+  it('does not complete mobile logout while private chat removal is unverified', async () => {
+    const values = new Map<string, string>([['cod.messages.private-task', 'private-chat']]);
+    let allowChatRemoval = false;
+    const storage: Storage = {
+      get length() { return values.size; },
+      clear: () => values.clear(),
+      getItem: (key) => values.get(key) ?? null,
+      key: (index) => [...values.keys()][index] ?? null,
+      removeItem: (key) => { if (allowChatRemoval || !key.startsWith('cod.messages.')) values.delete(key); },
+      setItem: (key, value) => { values.set(key, String(value)); },
+    };
+    Object.defineProperty(window, 'localStorage', { configurable: true, value: storage });
+    let secureToken: string | null = 'mobile-session';
+    configureCodRuntime({
+      hostPlatform: 'ios',
+      loadSessionToken: async () => secureToken,
+      saveSessionToken: async (token) => { secureToken = token; },
+      clearSessionToken: async () => { secureToken = null; return true; },
+    });
+    await expect(logoutCod('mobile-session', { explicit: true })).rejects.toMatchObject({ code: 'chat_history_cleanup_failed', sessionCredentialCleared: true });
+    expect(secureToken).toBeNull();
+    expect(window.localStorage.getItem('cod.messages.private-task')).toBe('private-chat');
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBe('1');
+    allowChatRemoval = true;
+    await expect(resumeCodSession()).resolves.toBeNull();
+    expect(window.localStorage.getItem('cod.messages.private-task')).toBeNull();
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBeNull();
+  });
+
+  it('does not claim Web logout succeeded when localStorage retains the token', async () => {
+    const values = new Map<string, string>([['cod.session.token', 'web-session']]);
+    const storage: Storage = {
+      get length() { return values.size; },
+      clear: () => values.clear(),
+      getItem: (key) => values.get(key) ?? null,
+      key: (index) => [...values.keys()][index] ?? null,
+      removeItem: (key) => { if (key !== 'cod.session.token') values.delete(key); },
+      setItem: (key, value) => { values.set(key, String(value)); },
+    };
+    Object.defineProperty(window, 'localStorage', { configurable: true, value: storage });
+    await expect(logoutCod('web-session', { explicit: true })).rejects.toMatchObject({ code: 'session_cleanup_failed' });
+    expect(window.localStorage.getItem('cod.session.token')).toBe('web-session');
   });
 
   it('sends recent multi-turn context to the model gateway', async () => {
@@ -111,10 +639,38 @@ describe('COD workspace', () => {
     await expect(sendChat('token', 'ai-kai', 'glm-5.2', [{ role: 'user', content: '问题' }])).rejects.toMatchObject({ code: 'empty_model_response' });
   });
 
-  it('keeps explicit task-bound model requests bound and aborts without retrying when cancelled',async()=>{
-    let requestSignal:AbortSignal|undefined;let requestBody:Record<string,unknown>|null=null;let started:()=>void=()=>undefined;const requestStarted=new Promise<void>((resolve)=>{started=resolve;});
-    const fetchMock=vi.fn(async(_input:RequestInfo|URL,init?:RequestInit):Promise<Response>=>{requestSignal=init?.signal??undefined;requestBody=JSON.parse(String(init?.body)) as Record<string,unknown>;started();return new Promise<Response>((_resolve,reject)=>requestSignal?.addEventListener('abort',()=>reject(requestSignal?.reason),{once:true}));});
-    vi.stubGlobal('fetch',fetchMock);const controller=new AbortController();const pending=sendChat('token','ai-kai','model-1',[{role:'user',content:'长任务'}],{taskId:'task-1',signal:controller.signal});await requestStarted;controller.abort(new DOMException('Task cancelled','AbortError'));await expect(pending).rejects.toMatchObject({name:'AbortError'});expect(requestSignal?.aborted).toBe(true);expect(requestBody).toMatchObject({task_id:'task-1'});expect(fetchMock).toHaveBeenCalledTimes(1);
+  it('binds model requests to a task and aborts without retrying when cancelled',async()=>{
+    const taskId='10000000-0000-4000-8000-000000000001';let requestSignal:AbortSignal|undefined;let requestBody:Record<string,unknown>|null=null;let started:()=>void=()=>undefined;const requestStarted=new Promise<void>((resolve)=>{started=resolve;});
+    const fetchMock=vi.fn(async(input:RequestInfo|URL,init?:RequestInit):Promise<Response>=>{const url=String(input);if(url.includes('/api/tasks/')){const body=JSON.parse(String(init?.body)) as {leaseToken:string};return json({id:taskId,title:'长任务',status:'running',deviceId:'device',updatedAt:new Date().toISOString(),version:2,result:null,error:null,execution:{executionId:'20000000-0000-4000-8000-000000000002',leaseToken:body.leaseToken,leaseExpiresAt:new Date(Date.now()+90_000).toISOString()}});}requestSignal=init?.signal??undefined;requestBody=JSON.parse(String(init?.body)) as Record<string,unknown>;started();return new Promise<Response>((_resolve,reject)=>requestSignal?.addEventListener('abort',()=>reject(requestSignal?.reason),{once:true}));});
+    vi.stubGlobal('fetch',fetchMock);await updateRemoteTask('token',{id:taskId,title:'长任务',status:'draft',deviceId:'device',updatedAt:new Date().toISOString(),version:1,result:null,error:null},'running');const controller=new AbortController();const pending=sendChat('token','ai-kai','model-1',[{role:'user',content:'长任务'}],{taskId,signal:controller.signal});await requestStarted;controller.abort(new DOMException('Task cancelled','AbortError'));await expect(pending).rejects.toMatchObject({name:'AbortError'});expect(requestSignal?.aborted).toBe(true);expect(requestBody).toMatchObject({task_id:taskId});expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries a lost claim response with exactly the same high-entropy credential',async()=>{
+    const taskId='60000000-0000-4000-8000-000000000006';const bodies:Array<{expectedVersion:number;claimId:string;leaseToken:string}>=[];
+    const fetchMock=vi.fn(async(_input:RequestInfo|URL,init?:RequestInit)=>{const body=JSON.parse(String(init?.body)) as {expectedVersion:number;claimId:string;leaseToken:string};bodies.push(body);if(bodies.length===1)throw new TypeError('response lost after commit');return json({id:taskId,title:'幂等启动',status:'running',deviceId:'device',updatedAt:new Date().toISOString(),version:2,result:null,error:null,execution:{executionId:'70000000-0000-4000-8000-000000000007',leaseToken:body.leaseToken,leaseExpiresAt:new Date(Date.now()+90_000).toISOString()}});});
+    vi.stubGlobal('fetch',fetchMock);const result=await updateRemoteTask('token',{id:taskId,title:'幂等启动',status:'draft',deviceId:'device',updatedAt:new Date().toISOString(),version:1,result:null,error:null},'running');
+    expect(result).toMatchObject({status:'running',version:2});expect(bodies).toHaveLength(2);expect(bodies[1]).toEqual(bodies[0]);expect(bodies[0]?.expectedVersion).toBe(1);expect(bodies[0]?.claimId).toMatch(/^[A-Za-z0-9_-]{43}$/);expect(bodies[0]?.leaseToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  });
+
+  it('retries a committed claim hidden by a gateway 502 with the same credential',async()=>{
+    const taskId='61000000-0000-4000-8000-000000000006';const bodies:Array<{expectedVersion:number;claimId:string;leaseToken:string}>=[];
+    const fetchMock=vi.fn(async(_input:RequestInfo|URL,init?:RequestInit)=>{const body=JSON.parse(String(init?.body)) as {expectedVersion:number;claimId:string;leaseToken:string};bodies.push(body);if(bodies.length===1)return json({error:'bad_gateway',message:'response lost after commit'},502);return json({id:taskId,title:'网关恢复',status:'running',deviceId:'device',updatedAt:new Date().toISOString(),version:2,result:null,error:null,execution:{executionId:'71000000-0000-4000-8000-000000000007',leaseToken:body.leaseToken,leaseExpiresAt:new Date(Date.now()+90_000).toISOString()}});});
+    vi.stubGlobal('fetch',fetchMock);await expect(updateRemoteTask('token',{id:taskId,title:'网关恢复',status:'draft',deviceId:'device',updatedAt:new Date().toISOString(),version:1,result:null,error:null},'running')).resolves.toMatchObject({status:'running',version:2});
+    expect(bodies).toHaveLength(2);expect(bodies[1]).toEqual(bodies[0]);
+  });
+
+  it('honors Retry-After before the single bounded claim retry',async()=>{
+    vi.useFakeTimers();const taskId='62000000-0000-4000-8000-000000000006';let calls=0;
+    const fetchMock=vi.fn(async(_input:RequestInfo|URL,init?:RequestInit)=>{calls+=1;const body=JSON.parse(String(init?.body)) as {leaseToken:string};if(calls===1)return Response.json({error:'rate_limited',message:'slow down'},{status:429,headers:{'retry-after':'1'}});return json({id:taskId,title:'限流恢复',status:'running',deviceId:'device',updatedAt:new Date().toISOString(),version:2,result:null,error:null,execution:{executionId:'72000000-0000-4000-8000-000000000007',leaseToken:body.leaseToken,leaseExpiresAt:new Date(Date.now()+90_000).toISOString()}});});
+    vi.stubGlobal('fetch',fetchMock);const pending=updateRemoteTask('token',{id:taskId,title:'限流恢复',status:'draft',deviceId:'device',updatedAt:new Date().toISOString(),version:1,result:null,error:null},'running');
+    await vi.advanceTimersByTimeAsync(999);expect(calls).toBe(1);await vi.advanceTimersByTimeAsync(1);await expect(pending).resolves.toMatchObject({status:'running'});expect(calls).toBe(2);
+  });
+
+  it('drops a cached execution credential after every fatal heartbeat lease error',async()=>{
+    const taskId='63000000-0000-4000-8000-000000000006';let claimed=false;
+    const fetchMock=vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{if(String(input).includes('/status')){claimed=true;const body=JSON.parse(String(init?.body)) as {leaseToken:string};return json({id:taskId,title:'租约丢失',status:'running',deviceId:'device',updatedAt:new Date().toISOString(),version:2,result:null,error:null,execution:{executionId:'73000000-0000-4000-8000-000000000007',leaseToken:body.leaseToken,leaseExpiresAt:new Date(Date.now()+90_000).toISOString()}});}return json({error:'task_lease_required',message:'lease missing'},409);});
+    vi.stubGlobal('fetch',fetchMock);await updateRemoteTask('token',{id:taskId,title:'租约丢失',status:'draft',deviceId:'device',updatedAt:new Date().toISOString(),version:1,result:null,error:null},'running');expect(claimed).toBe(true);expect(getTaskExecutionLease(taskId)).not.toBeNull();
+    await expect(heartbeatDevice('token','device',taskId)).rejects.toMatchObject({code:'task_lease_required'});expect(getTaskExecutionLease(taskId)).toBeNull();
   });
 
   it('shows the workspace first and opens login when the first message is sent', async () => {
@@ -130,11 +686,61 @@ describe('COD workspace', () => {
     const dialog = await screen.findByRole('dialog', { name: '登录后继续' });
     expect(within(dialog).getByLabelText('密码')).toBeRequired();
     expect(composer).toHaveValue('这是我的第一条消息');
+    act(() => requestCodTopmostUiClose());
+    expect(screen.queryByRole('dialog', { name: '登录后继续' })).not.toBeInTheDocument();
+    expect(composer).toHaveValue('这是我的第一条消息');
+  });
+
+  it('closes the topmost Web UI before releasing Android back navigation', async () => {
+    const setNativeTopmostUiVisible = vi.fn(async () => undefined);
+    configureCodRuntime({ setNativeTopmostUiVisible });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/capabilities')) return json(capabilities);
+      if (url.endsWith('/api/model-catalog')) return json([]);
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<App />);
+    await screen.findByRole('heading', { name: '新对话' });
+    await waitFor(() => expect(setNativeTopmostUiVisible).toHaveBeenLastCalledWith(false));
+
+    fireEvent.click(screen.getByTitle('打开任务栏'));
+    fireEvent.click(screen.getByTitle('模型库'));
+    expect(await screen.findByRole('dialog', { name: '模型库' })).toBeInTheDocument();
+    await waitFor(() => expect(setNativeTopmostUiVisible).toHaveBeenLastCalledWith(true));
+
+    act(() => requestCodTopmostUiClose());
+    expect(screen.queryByRole('dialog', { name: '模型库' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '关闭任务栏' })).toBeInTheDocument();
+    expect(setNativeTopmostUiVisible).toHaveBeenLastCalledWith(true);
+
+    act(() => requestCodTopmostUiClose());
+    expect(screen.queryByRole('button', { name: '关闭任务栏' })).not.toBeInTheDocument();
+    await waitFor(() => expect(setNativeTopmostUiVisible).toHaveBeenLastCalledWith(false));
+  });
+
+  it('traps keyboard focus inside a modal, closes it with Escape, and restores the trigger focus', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => String(input).endsWith('/api/capabilities') ? json(capabilities) : json([])));
+    render(<App />);
+    await screen.findByRole('heading', { name: '新对话' });
+    const trigger = screen.getByTitle('模型库');
+    trigger.focus();
+    fireEvent.click(trigger);
+    const dialog = await screen.findByRole('dialog', { name: '模型库' });
+    const close = within(dialog).getByTitle('关闭');
+    await waitFor(() => expect(dialog).toContainElement(document.activeElement as HTMLElement));
+    const last = within(dialog).getByRole('button', { name: '登录后使用模型' });
+    last.focus();
+    fireEvent.keyDown(document, { key: 'Tab' });
+    expect(close).toHaveFocus();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: '模型库' })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
   });
 
   it('starts and completes a mobile model conversation without an online Desktop or task-bound chat claim', async () => {
-    window.localStorage.setItem('cod.session.token', 'mobile-token');
-    configureCodRuntime({ hostPlatform: 'ios' });
+    configureAuthenticatedMobileRuntime('mobile-token', { hostPlatform: 'ios' });
     let taskVersion = 1;
     let registeredDevice: Record<string, unknown> | null = null;
     let chatBody: Record<string, unknown> | null = null;
@@ -150,15 +756,16 @@ describe('COD workspace', () => {
         registeredDevice = JSON.parse(String(init.body)) as Record<string, unknown>;
         return json({ id: 'mobile-device', name: 'COD Mobile', platform: 'mobile', status: 'online', lastSeenAt: new Date().toISOString() }, 201);
       }
+      if (url.endsWith('/api/devices/mobile-device/heartbeat')) return json({ id: 'mobile-device', name: 'COD Mobile', platform: 'mobile', status: 'online', lastSeenAt: new Date().toISOString() });
       if (url.endsWith('/api/devices')) return json([]);
       if (url.endsWith('/api/tasks') && init?.method === 'POST') {
         return json({ id: 'mobile-conversation', title: '移动端你好', status: 'draft', deviceId: 'mobile-device', updatedAt: new Date().toISOString(), version: taskVersion }, 201);
       }
       if (url.endsWith('/api/tasks')) return json([]);
       if (/\/api\/tasks\/mobile-conversation\/status$/.test(url)) {
-        const body = JSON.parse(String(init?.body)) as { status: 'running' | 'complete' };
+        const body = JSON.parse(String(init?.body)) as { status: 'running' | 'complete'; leaseToken?: string };
         taskVersion += 1;
-        return json({ id: 'mobile-conversation', title: '移动端你好', status: body.status, deviceId: 'mobile-device', updatedAt: new Date().toISOString(), version: taskVersion, result: body.status === 'complete' ? '移动端模型回复正常' : null, error: null });
+        return json({ id: 'mobile-conversation', title: '移动端你好', status: body.status, deviceId: 'mobile-device', updatedAt: new Date().toISOString(), version: taskVersion, result: body.status === 'complete' ? '移动端模型回复正常' : null, error: null, ...(body.status === 'running' ? { execution: { executionId: '10000000-0000-4000-8000-000000000001', leaseToken: body.leaseToken, leaseExpiresAt: new Date(Date.now() + 90_000).toISOString() } } : {}) });
       }
       if (url.endsWith('/v1/chat/completions')) {
         chatBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -256,9 +863,9 @@ describe('COD workspace', () => {
 
   it('renders Turnstile only on Web and sends its token without storing it', async () => {
     const remove = vi.fn();
-    const renderTurnstile = vi.fn((_container: HTMLElement, options: { callback: (token: string) => void }) => {
-      options.callback('human-token');
-      return 'widget-1';
+    const renderTurnstile = vi.fn((_container: HTMLElement, options: { action: string; callback: (token: string) => void }) => {
+      options.callback(`human-token-${options.action}`);
+      return `widget-${options.action}`;
     });
     (window as Window & { turnstile?: unknown }).turnstile = { render: renderTurnstile, remove };
     let startBody: Record<string, unknown> | null = null;
@@ -270,6 +877,7 @@ describe('COD workspace', () => {
         startBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
         return json({ challengeId: 'challenge-1', maskedDestination: 't***@kai.test', expiresAt: new Date(Date.now() + 600_000).toISOString(), resendAt: new Date(Date.now() + 60_000).toISOString() }, 202);
       }
+      if (path.endsWith('/registration/email/verify')) return json({ verified: true });
       throw new Error(`Unexpected request: ${path}`);
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -279,12 +887,18 @@ describe('COD workspace', () => {
     const dialog = await screen.findByRole('dialog', { name: '登录 COD' });
     fireEvent.click(within(dialog).getByRole('tab', { name: '注册账号' }));
     await waitFor(() => expect(renderTurnstile).toHaveBeenCalledTimes(1));
+    expect(renderTurnstile.mock.calls[0]?.[1]).toMatchObject({ sitekey: 'site-key', action: 'cod_registration_email' });
     fireEvent.change(within(dialog).getByLabelText('邮箱'), { target: { value: 'tester@kai.test' } });
     fireEvent.click(within(dialog).getByRole('button', { name: '发送邮箱验证码' }));
-    await within(dialog).findByLabelText('邮箱验证码');
-    expect(startBody).toEqual({ email: 'tester@kai.test', humanChallengeToken: 'human-token' });
+    const emailCode = await within(dialog).findByLabelText('邮箱验证码');
+    expect(startBody).toEqual({ email: 'tester@kai.test', humanChallengeToken: 'human-token-cod_registration_email' });
     expect(window.localStorage.getItem('humanChallengeToken')).toBeNull();
-    expect(remove).toHaveBeenCalledWith('widget-1');
+    expect(remove).toHaveBeenCalledWith('widget-cod_registration_email');
+    fireEvent.change(emailCode, { target: { value: '123456' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: '验证邮箱' }));
+    await within(dialog).findByLabelText('手机号');
+    await waitFor(() => expect(renderTurnstile).toHaveBeenCalledTimes(2));
+    expect(renderTurnstile.mock.calls[1]?.[1]).toMatchObject({ sitekey: 'site-key', action: 'cod_registration_phone' });
   });
 
   it('hands native registration to the secure web flow without calling OTP endpoints', async () => {
@@ -307,6 +921,25 @@ describe('COD workspace', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: /打开网页注册/ }));
     expect(openExternalUrl).toHaveBeenCalledWith('https://cod.kai.com/app/?auth=register');
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/auth/registration/'))).toBe(false);
+  });
+
+  it('fails closed when a native registration handoff URL uses a non-production origin', async () => {
+    const openExternalUrl = vi.fn(async () => undefined);
+    configureCodRuntime({ hostPlatform: 'ios', openExternalUrl });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input), window.location.href).pathname;
+      if (path === '/api/capabilities') return json({ ...capabilities, authentication: { ...capabilities.authentication, registrationWebOnly: true, publicRegistrationUrl: 'https://cod.kai.com:444/app/?auth=register' } });
+      if (path === '/api/model-catalog' || path === '/api/compute/offers') return json([]);
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+    render(<App />);
+    await screen.findByRole('heading', { name: '新对话' });
+    fireEvent.click(screen.getByTitle('登录'));
+    const dialog = await screen.findByRole('dialog', { name: '登录 COD' });
+    fireEvent.click(within(dialog).getByRole('tab', { name: '注册账号' }));
+    expect(within(dialog).getByText('注册地址暂未下发，请稍后刷新。')).toBeInTheDocument();
+    expect(within(dialog).queryByRole('button', { name: /打开网页注册/ })).not.toBeInTheDocument();
+    expect(openExternalUrl).not.toHaveBeenCalled();
   });
 
   it('clears a registration deep-link mode when Android back closes authentication', async () => {
@@ -526,6 +1159,33 @@ describe('COD workspace', () => {
     expect(within(dialog).getByRole('button', { name: /使用深色模式/ })).toBeInTheDocument();
   });
 
+  it('offers only the one-time legacy migration flow when public registration is closed', async () => {
+    const migrationCapabilities={...capabilities,authentication:{...capabilities.authentication,registrationEnabled:false,legacyMigrationEnabled:true}};
+    vi.stubGlobal('fetch',vi.fn(async()=>json(migrationCapabilities)));
+    render(<App />);
+    await screen.findByRole('heading',{name:'新对话'});
+    fireEvent.click(screen.getByTitle('登录'));
+    const dialog=await screen.findByRole('dialog',{name:'登录 COD'});
+    expect(within(dialog).queryByRole('tab',{name:'注册账号'})).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('tab',{name:'旧账号迁移'}));
+    expect(within(dialog).getByRole('heading',{name:'迁移旧账号'})).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('旧试点访问码')).toBeRequired();
+    expect(within(dialog).queryByLabelText('邀请码')).not.toBeInTheDocument();
+    expect(within(dialog).queryByText(/试用金|领取/)).not.toBeInTheDocument();
+    expect(within(dialog).getByRole('button',{name:/迁移旧账号/})).toBeInTheDocument();
+  });
+
+  it('does not expose enrollment while authentication capabilities are unavailable', async () => {
+    vi.stubGlobal('fetch',vi.fn(async()=>{throw new Error('offline');}));
+    render(<App />);
+    await screen.findByRole('heading',{name:'新对话'});
+    fireEvent.click(screen.getByTitle('登录'));
+    const dialog=await screen.findByRole('dialog',{name:'登录 COD'});
+    expect(within(dialog).queryByRole('tab',{name:'注册账号'})).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole('tab',{name:'旧账号迁移'})).not.toBeInTheDocument();
+    expect(within(dialog).getByText(/当前仅开放已有账号登录/)).toBeInTheDocument();
+  });
+
   it('keeps only two primary mobile context items outside the more disclosure', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => json(capabilities)));
     const { container } = render(<App />);
@@ -565,9 +1225,8 @@ describe('COD workspace', () => {
   });
 
   it('recovers mobile device registration after a transient cold-start failure and sends taskless chat', async () => {
-    window.localStorage.setItem('cod.session.token', 'mobile-recovery-token');
     window.localStorage.setItem('cod.device.id', 'stale-device');
-    configureCodRuntime({ hostPlatform: 'ios' });
+    configureAuthenticatedMobileRuntime('mobile-recovery-token', { hostPlatform: 'ios' });
     const account = { userId: 'mobile-user', displayName: 'mobile member', balanceCents: 5000, currency: 'CNY', plan: 'developer', role: 'member', billingExempt: false };
     const source = { id: 'ai-kai', label: 'AI.KAI.COM', status: 'live', callable: true, paymentDirection: '钱包 → ai.kai.com', note: '已连接', models: [{ id: 'mobile-model', label: '移动对话模型', contextWindow: 128000, inputPricePerMillionCents: 100, outputPricePerMillionCents: 200 }] };
     let deviceServiceAvailable = false;
@@ -585,6 +1244,7 @@ describe('COD workspace', () => {
         deviceRegistrations += 1;
         return json({ id: 'recovered-mobile-device', name: 'COD Mobile', platform: 'mobile', status: 'online', lastSeenAt: new Date().toISOString() }, 201);
       }
+      if (url.endsWith('/api/devices/recovered-mobile-device/heartbeat')) return json({ id: 'recovered-mobile-device', name: 'COD Mobile', platform: 'mobile', status: 'online', lastSeenAt: new Date().toISOString() });
       if (url.endsWith('/api/devices/stale-device/heartbeat')) return json({ error: 'device_not_found' }, 404);
       if (url.endsWith('/api/devices')) return deviceServiceAvailable ? json([]) : json({ error: 'temporary' }, 503);
       if (url.endsWith('/api/tasks') && init?.method === 'POST') {
@@ -593,9 +1253,9 @@ describe('COD workspace', () => {
       }
       if (url.endsWith('/api/tasks')) return json([]);
       if (/\/api\/tasks\/recovered-chat-task\/status$/.test(url)) {
-        const body = JSON.parse(String(init?.body)) as { status: 'running' | 'complete' };
+        const body = JSON.parse(String(init?.body)) as { status: 'running' | 'complete'; leaseToken?: string };
         taskVersion += 1;
-        return json({ id: 'recovered-chat-task', title: '恢复后发送', status: body.status, deviceId: 'recovered-mobile-device', updatedAt: new Date().toISOString(), version: taskVersion, result: body.status === 'complete' ? '设备恢复后的回复' : null, error: null });
+        return json({ id: 'recovered-chat-task', title: '恢复后发送', status: body.status, deviceId: 'recovered-mobile-device', updatedAt: new Date().toISOString(), version: taskVersion, result: body.status === 'complete' ? '设备恢复后的回复' : null, error: null, ...(body.status === 'running' ? { execution: { executionId: '20000000-0000-4000-8000-000000000002', leaseToken: body.leaseToken, leaseExpiresAt: new Date(Date.now() + 90_000).toISOString() } } : {}) });
       }
       if (url.endsWith('/v1/chat/completions')) {
         chatBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -825,10 +1485,9 @@ describe('COD workspace', () => {
   });
 
   it('lets only administrators inspect, filter, copy, paginate, update, and return from compute requests', async () => {
-    window.localStorage.setItem('cod.session.token', 'admin-token');
     window.localStorage.setItem('cod.device.id', 'web-device');
     const copyText = vi.fn(async () => undefined);
-    configureCodRuntime({ hostPlatform: 'android', copyText });
+    configureAuthenticatedMobileRuntime('admin-token', { hostPlatform: 'android', copyText });
     const account = { userId: 'admin', displayName: 'admin', balanceCents: 0, currency: 'CNY', plan: 'developer', role: 'admin', billingExempt: true };
     const requests = adminComputeRequests.map((request) => ({ ...request })) as ComputeRequest[];
     const adminSearches: Array<{ url: string; method: 'GET' | 'POST'; filters: { limit: number; cursor?: string; kind?: string; status?: string; q?: string } }> = [];
@@ -1093,7 +1752,7 @@ describe('COD workspace', () => {
     expect(screen.queryByText('wx_gpu_owner')).not.toBeInTheDocument();
     expect(window.localStorage.getItem('cod.session.token')).toBeNull();
     expect(screen.getByRole('heading', { name: '新对话' })).toBeInTheDocument();
-    expect(screen.getAllByText('登录已失效，请重新登录。').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('登录已过期，请重新登录。').length).toBeGreaterThan(0);
 
     revoked = false;
     fireEvent.click(screen.getByTitle('登录'));
@@ -1103,7 +1762,7 @@ describe('COD workspace', () => {
     fireEvent.click(within(loginDialog).getByRole('button', { name: '登录' }));
     await flushPromises();
     expect(screen.getByRole('heading', { name: '新建或选择任务' })).toBeInTheDocument();
-    expect(screen.queryByText('登录已失效，请重新登录。')).not.toBeInTheDocument();
+    expect(screen.queryByText('登录已过期，请重新登录。')).not.toBeInTheDocument();
   });
 
   it('discards a stale pagination response after an administrator changes filters', async () => {
@@ -1256,13 +1915,14 @@ describe('COD workspace', () => {
       if (url.endsWith('/api/account')) return json({ userId: 'user', displayName: 'developer', balanceCents: 5000, currency: 'CNY', plan: 'developer' });
       if (url.endsWith('/api/model-sources')) return json([{ id: 'ai-kai', label: 'AI.KAI.COM', status: 'live', callable: true, paymentDirection: '钱包 → ai.kai.com', note: '已连接', models: [{ id: 'model-a', label: '模型 A', contextWindow: 128000, inputPricePerMillionCents: 100, outputPricePerMillionCents: 200 }] }]);
       if (url.endsWith('/api/devices') && init?.method === 'POST') return json({ id: 'desktop-device', name: 'COD Desktop', platform: 'macos', status: 'online', lastSeenAt: new Date().toISOString() }, 201);
+      if (url.endsWith('/api/devices/desktop-device/heartbeat')) return json({ id: 'desktop-device', name: 'COD Desktop', platform: 'macos', status: 'online', lastSeenAt: new Date().toISOString() });
       if (url.endsWith('/api/devices')) return json([]);
       if (url.endsWith('/api/tasks') && init?.method === 'POST') return json({ id: taskId, title: 'Agent 根目录绑定', status: 'draft', deviceId: 'desktop-device', updatedAt: new Date().toISOString(), version: taskVersion }, 201);
       if (url.endsWith('/api/tasks')) return json([]);
       if (url.endsWith(`/api/tasks/${taskId}/status`)) {
-        const body = JSON.parse(String(init?.body)) as { status: string };
+        const body = JSON.parse(String(init?.body)) as { status: string; leaseToken?: string };
         taskVersion += 1;
-        return json({ id: taskId, title: 'Agent 根目录绑定', status: body.status, deviceId: 'desktop-device', updatedAt: new Date().toISOString(), version: taskVersion });
+        return json({ id: taskId, title: 'Agent 根目录绑定', status: body.status, deviceId: 'desktop-device', updatedAt: new Date().toISOString(), version: taskVersion, ...(body.status === 'running' ? { execution: { executionId: '60000000-0000-4000-8000-000000000006', leaseToken: body.leaseToken, leaseExpiresAt: new Date(Date.now() + 90_000).toISOString() } } : {}) });
       }
       if (url.endsWith('/api/credit-packs')) return json(creditPacks);
       if (url.endsWith('/api/products') || url.endsWith('/api/ledger')) return json([]);
@@ -1467,10 +2127,11 @@ describe('COD workspace', () => {
       if(url.endsWith('/api/account'))return json({userId:'user',displayName:'developer',balanceCents:5000,currency:'CNY',plan:'developer'});
       if(url.endsWith('/api/model-sources'))return json([{id:'ai-kai',label:'AI.KAI.COM',status:'live',callable:true,paymentDirection:'钱包 → ai.kai.com',note:'已连接',models:[{id:'model-a',label:'模型 A',contextWindow:128000,inputPricePerMillionCents:100,outputPricePerMillionCents:200}]}]);
       if(url.endsWith('/api/devices')&&init?.method==='POST')return json({id:'desktop-device',name:'COD Desktop',platform:'macos',status:'online',lastSeenAt:new Date().toISOString()},201);
+      if(url.endsWith('/api/devices/desktop-device/heartbeat'))return json({id:'desktop-device',name:'COD Desktop',platform:'macos',status:'online',lastSeenAt:new Date().toISOString()});
       if(url.endsWith('/api/devices'))return json([]);
       if(url.endsWith('/api/tasks')&&init?.method==='POST')return json({id:'task-race',title:'刷新竞态',status:'draft',deviceId:'desktop-device',updatedAt:new Date().toISOString(),version:taskVersion},201);
       if(url.endsWith('/api/tasks'))return json([]);
-      if(/\/api\/tasks\/task-race\/status$/.test(url)){const body=JSON.parse(String(init?.body)) as {status:'running'|'complete'};taskVersion+=1;return json({id:'task-race',title:'刷新竞态',status:body.status,deviceId:'desktop-device',updatedAt:new Date().toISOString(),version:taskVersion,result:body.status==='complete'?'已完成':null,error:null});}
+      if(/\/api\/tasks\/task-race\/status$/.test(url)){const body=JSON.parse(String(init?.body)) as {status:'running'|'complete';leaseToken?:string};taskVersion+=1;return json({id:'task-race',title:'刷新竞态',status:body.status,deviceId:'desktop-device',updatedAt:new Date().toISOString(),version:taskVersion,result:body.status==='complete'?'已完成':null,error:null,...(body.status==='running'?{execution:{executionId:'70000000-0000-4000-8000-000000000007',leaseToken:body.leaseToken,leaseExpiresAt:new Date(Date.now()+90_000).toISOString()}}:{})});}
       if(url.endsWith('/v1/chat/completions'))return json({choices:[{message:{content:'刷新竞态回复'}}],usage:{prompt_tokens:4,completion_tokens:6},cod_source:'ai-kai'});
       if(url.endsWith('/api/credit-packs'))return json(creditPacks);
       if(url.endsWith('/api/products')||url.endsWith('/api/ledger'))return json([]);
@@ -1502,6 +2163,20 @@ describe('COD workspace', () => {
 
   it('automatically continues the saved first message after login', async () => {
     let taskVersion = 1;
+    let secureToken: string | null = null;
+    let releasePersistence: () => void = () => undefined;
+    const persistenceGate = new Promise<void>((resolve) => { releasePersistence = resolve; });
+    let markPersistenceStarted: () => void = () => undefined;
+    const persistenceStarted = new Promise<void>((resolve) => { markPersistenceStarted = resolve; });
+    configureCodRuntime({
+      hostPlatform: 'android',
+      loadSessionToken: async () => secureToken,
+      saveSessionToken: async (token) => { markPersistenceStarted(); await persistenceGate; secureToken = token; },
+      clearSessionToken: async (expected) => {
+        if (expected !== undefined && secureToken !== null && secureToken !== expected) return false;
+        secureToken = null; return true;
+      },
+    });
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith('/api/capabilities')) return json(capabilities);
@@ -1509,14 +2184,15 @@ describe('COD workspace', () => {
       if (url.endsWith('/api/account')) return json({ userId: 'user', displayName: 'developer', balanceCents: 6839, currency: 'CNY', plan: 'developer' });
       if (url.endsWith('/api/model-sources')) return json([{ id: 'ai-kai', label: 'AI.KAI.COM', status: 'live', callable: true, paymentDirection: '钱包 → ai.kai.com', note: '已连接', models: [{ id: 'glm-5.2', label: 'glm-5.2', contextWindow: 0, inputPricePerMillionCents: 836, outputPricePerMillionCents: 2926 }] }]);
       if (url.endsWith('/api/devices') && init?.method === 'POST') return json({ id: 'web-device', name: 'COD Web', platform: 'web', status: 'online', lastSeenAt: new Date().toISOString() }, 201);
+      if (url.endsWith('/api/devices/web-device/heartbeat')) return json({ id: 'web-device', name: 'COD Web', platform: 'web', status: 'online', lastSeenAt: new Date().toISOString() });
       if (url.endsWith('/api/devices')) return json([]);
       if (url.endsWith('/api/tasks') && init?.method === 'POST') return json({ id: 'task-new', title: '登录后自动发送', status: 'draft', deviceId: 'web-device', updatedAt: new Date().toISOString(), version: taskVersion }, 201);
       if (url.endsWith('/api/tasks')) return json([]);
       if (url.endsWith('/api/credit-packs')) return json(creditPacks);
       if (/\/api\/tasks\/task-new\/status$/.test(url)) {
-        const body = JSON.parse(String(init?.body)) as { status: 'running' | 'complete' };
+        const body = JSON.parse(String(init?.body)) as { status: 'running' | 'complete'; leaseToken?:string };
         taskVersion += 1;
-        return json({ id: 'task-new', title: '登录后自动发送', status: body.status, deviceId: 'web-device', updatedAt: new Date().toISOString(), version: taskVersion, result: body.status === 'complete' ? '自动回复' : null, error: null });
+        return json({ id: 'task-new', title: '登录后自动发送', status: body.status, deviceId: 'web-device', updatedAt: new Date().toISOString(), version: taskVersion, result: body.status === 'complete' ? '自动回复' : null, error: null, ...(body.status==='running'?{execution:{executionId:'30000000-0000-4000-8000-000000000003',leaseToken:body.leaseToken,leaseExpiresAt:new Date(Date.now()+90_000).toISOString()}}:{}) });
       }
       if (url.endsWith('/v1/chat/completions')) return json({ choices: [{ message: { content: '自动回复' } }], usage: { prompt_tokens: 12, completion_tokens: 34 }, cod_source: 'ai-kai', cod_charge_cents: 1 });
       if (url.endsWith('/api/products') || url.endsWith('/api/ledger')) return json([]);
@@ -1532,11 +2208,185 @@ describe('COD workspace', () => {
     fireEvent.change(within(dialog).getByLabelText('邮箱'), { target: { value: 'developer@kai.com' } });
     fireEvent.change(within(dialog).getByLabelText('密码'), { target: { value: 'Password123' } });
     fireEvent.click(within(dialog).getByRole('button', { name: '登录并继续' }));
+    await persistenceStarted;
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/v1/chat/completions'))).toBe(false);
+    expect(screen.getByRole('dialog', { name: '登录后继续' })).toBeInTheDocument();
+    releasePersistence();
     expect(await screen.findByText('自动回复')).toBeInTheDocument();
     expect(screen.getByText(/输入 12 \/ 输出 34 Token/)).toBeInTheDocument();
     expect(screen.queryByText('¥0.01')).not.toBeInTheDocument();
     const chatCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/v1/chat/completions'));
     expect(JSON.parse(String(chatCall?.[1]?.body)).messages).toEqual([{ role: 'user', content: '登录后自动发送' }]);
+    const heartbeatIndex=fetchMock.mock.calls.findIndex(([url])=>String(url).endsWith('/api/devices/web-device/heartbeat'));const createIndex=fetchMock.mock.calls.findIndex(([url,init])=>String(url).endsWith('/api/tasks')&&init?.method==='POST');expect(heartbeatIndex).toBeGreaterThanOrEqual(0);expect(heartbeatIndex).toBeLessThan(createIndex);
+  });
+
+  it('does not load private workspace state or auto-send when secure persistence fails', async () => {
+    configureCodRuntime({
+      hostPlatform: 'ios',
+      loadSessionToken: async () => null,
+      saveSessionToken: async () => { throw new Error('keychain unavailable'); },
+      clearSessionToken: async () => true,
+    });
+    const fetchMock=vi.fn(async(input:RequestInfo|URL)=>{
+      const url=String(input);
+      if(url.endsWith('/api/capabilities'))return json(capabilities);
+      if(url.endsWith('/api/model-catalog'))return json([]);
+      if(url.endsWith('/api/auth/login'))return json({token:'new-mobile-session'});
+      if(url.endsWith('/api/account'))return json({userId:'private-user',displayName:'private developer',balanceCents:9876,currency:'CNY',plan:'developer'});
+      if(url.endsWith('/api/model-sources'))return json([{id:'ai-kai',label:'AI.KAI.COM',status:'live',callable:true,paymentDirection:'钱包 → ai.kai.com',note:'已连接',models:[]}]);
+      throw new Error(`Unexpected authenticated workspace request: ${url}`);
+    });
+    vi.stubGlobal('fetch',fetchMock);
+    render(<App/>);
+    await screen.findByRole('heading',{name:'新对话'});
+    const composer=screen.getByPlaceholderText('问 COD 任何问题...');
+    fireEvent.change(composer,{target:{value:'不要提前发送'}});
+    fireEvent.click(screen.getByRole('button',{name:'发送'}));
+    const dialog=await screen.findByRole('dialog',{name:'登录后继续'});
+    fireEvent.change(within(dialog).getByLabelText('邮箱'),{target:{value:'developer@kai.com'}});
+    fireEvent.change(within(dialog).getByLabelText('密码'),{target:{value:'Password123'}});
+    fireEvent.click(within(dialog).getByRole('button',{name:'登录并继续'}));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('无法安全保存移动端登录状态，请重试。');
+    expect(screen.getByRole('heading',{name:'新对话'})).toBeInTheDocument();
+    expect(screen.getByText('登录后查看')).toBeInTheDocument();
+    expect(screen.queryByText('private developer')).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue('不要提前发送')).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url])=>/\/api\/(devices|tasks|products|ledger|credit-packs)$/.test(String(url)))).toBe(false);
+    expect(fetchMock.mock.calls.some(([url])=>String(url).endsWith('/v1/chat/completions'))).toBe(false);
+  });
+
+  it('keeps a cleanup tombstone when closing login races a failed SecureStore rollback', async () => {
+    let secureToken:string|null=null;
+    let allowSecureClear=false;
+    let releaseSave:()=>void=()=>undefined;
+    const saveGate=new Promise<void>((resolve)=>{releaseSave=resolve;});
+    let markSaveStarted:()=>void=()=>undefined;
+    const saveStarted=new Promise<void>((resolve)=>{markSaveStarted=resolve;});
+    const clearSessionToken=vi.fn(async(expected?:string)=>{if(!allowSecureClear)throw new Error('secure deletion failed');if(expected!==undefined&&secureToken!==null&&secureToken!==expected)return false;secureToken=null;return true;});
+    configureCodRuntime({hostPlatform:'android',loadSessionToken:async()=>secureToken,saveSessionToken:async(token)=>{markSaveStarted();await saveGate;secureToken=token;},clearSessionToken});
+    const fetchMock=vi.fn(async(input:RequestInfo|URL)=>{
+      const url=String(input);
+      if(url.endsWith('/api/capabilities'))return json(capabilities);
+      if(url.endsWith('/api/model-catalog'))return json([]);
+      if(url.endsWith('/api/auth/login'))return json({token:'cancelled-mobile-session'});
+      if(url.endsWith('/api/account'))return json({userId:'user',displayName:'developer',balanceCents:0,currency:'CNY',plan:'developer'});
+      if(url.endsWith('/api/model-sources'))return json([]);
+      throw new Error(`Unexpected authenticated workspace request: ${url}`);
+    });
+    vi.stubGlobal('fetch',fetchMock);
+    render(<App/>);
+    await screen.findByRole('heading',{name:'新对话'});
+    fireEvent.change(screen.getByPlaceholderText('问 COD 任何问题...'),{target:{value:'取消登录'}});
+    fireEvent.click(screen.getByRole('button',{name:'发送'}));
+    const dialog=await screen.findByRole('dialog',{name:'登录后继续'});
+    fireEvent.change(within(dialog).getByLabelText('邮箱'),{target:{value:'developer@kai.com'}});
+    fireEvent.change(within(dialog).getByLabelText('密码'),{target:{value:'Password123'}});
+    fireEvent.click(within(dialog).getByRole('button',{name:'登录并继续'}));
+    await saveStarted;
+    fireEvent.click(within(dialog).getByTitle('关闭'));
+    releaseSave();
+    await waitFor(()=>expect(clearSessionToken).toHaveBeenCalledWith('cancelled-mobile-session'));
+    expect(secureToken).toBe('cancelled-mobile-session');
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBe('1');
+    expect(screen.queryByRole('dialog',{name:'登录后继续'})).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url])=>/\/api\/(devices|tasks|products|ledger|credit-packs)$/.test(String(url)))).toBe(false);
+    allowSecureClear=true;
+    await expect(resumeCodSession()).resolves.toBeNull();
+    expect(secureToken).toBeNull();
+    expect(window.localStorage.getItem('cod.session.logout-pending')).toBeNull();
+  });
+
+  it('signs out the active session after an authenticated runtime 401', async () => {
+    let expired=false;
+    const fetchMock=vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{
+      const url=String(input);const headers=new Headers(init?.headers);
+      if(expired&&headers.has('authorization'))return json({error:'unauthorized'},401);
+      if(url.endsWith('/api/capabilities'))return json(capabilities);
+      if(url.endsWith('/api/model-catalog')||url.endsWith('/api/compute/offers'))return json([]);
+      if(url.endsWith('/api/account'))return json({userId:'user',displayName:'developer',balanceCents:5000,currency:'CNY',plan:'developer'});
+      if(url.endsWith('/api/model-sources'))return json([{id:'ai-kai',label:'AI.KAI.COM',status:'live',callable:true,paymentDirection:'钱包 → ai.kai.com',note:'已连接',models:[{id:'model',label:'模型',contextWindow:128000,inputPricePerMillionCents:100,outputPricePerMillionCents:200}]}]);
+      if(url.endsWith('/api/devices/web-device/heartbeat'))return json({id:'web-device',name:'COD Web',platform:'web',status:'online',lastSeenAt:new Date().toISOString()});
+      if(url.endsWith('/api/devices'))return json([{id:'web-device',name:'COD Web',platform:'web',status:'online',lastSeenAt:new Date().toISOString()}]);
+      if(url.endsWith('/api/credit-packs'))return json(creditPacks);
+      if(url.endsWith('/api/referrals'))return json({inviteCode:'KAI-TEST',referredUsers:0,commissionRateBps:0,pendingCommissionCents:0,settledCommissionCents:0});
+      if(url.endsWith('/api/tasks')||url.endsWith('/api/products')||url.endsWith('/api/ledger')||url.endsWith('/api/compute/requests'))return json([]);
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal('fetch',fetchMock);window.localStorage.setItem('cod.session.token','active-session');window.localStorage.setItem('cod.device.id','web-device');
+    render(<App/>);expect(await screen.findByRole('heading',{name:'新建或选择任务'})).toBeInTheDocument();
+    expired=true;document.dispatchEvent(new Event('visibilitychange'));
+    expect((await screen.findAllByText('登录已过期，请重新登录。')).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByRole('heading',{name:'新对话'})).toBeInTheDocument();
+    expect(window.localStorage.getItem('cod.session.token')).toBeNull();
+  });
+
+  it('keeps the active session when a model provider authentication fails', async () => {
+    window.localStorage.setItem('cod.session.token','active-session');
+    const fetchMock=vi.fn(async(input:RequestInfo|URL)=>String(input).endsWith('/v1/chat/completions')
+      ?json({error:'ai_upstream_auth_failed',message:'KAI model provider authentication failed'},502)
+      :json({error:'unexpected'},500));
+    vi.stubGlobal('fetch',fetchMock);
+    await expect(sendChat('active-session','ai-kai','broken-model',[{role:'user',content:'hello'}])).rejects.toMatchObject({status:502,code:'ai_upstream_auth_failed'});
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(window.localStorage.getItem('cod.session.token')).toBe('active-session');
+  });
+
+  it('keeps ordinary chat taskless and never promotes its shell lease to an execution heartbeat', async () => {
+    let taskVersion = 1;
+    let taskStatus: 'draft' | 'running' | 'complete' = 'draft';
+    const taskId = '80000000-0000-4000-8000-000000000008';
+    const heartbeatBodies: Array<{ taskId?: string }> = [];
+    let chatBody: Record<string, unknown> = {};
+    let releaseChat: () => void = () => undefined;
+    const chatGate = new Promise<void>((resolve) => { releaseChat = resolve; });
+    let markChatStarted: () => void = () => undefined;
+    const chatStarted = new Promise<void>((resolve) => { markChatStarted = resolve; });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/api/capabilities')) return json(capabilities);
+      if (url.endsWith('/api/model-catalog') || url.endsWith('/api/compute/offers')) return json([]);
+      if (url.endsWith('/api/account')) return json({ userId: 'user', displayName: 'developer', balanceCents: 5000, currency: 'CNY', plan: 'developer' });
+      if (url.endsWith('/api/model-sources')) return json([{ id: 'ai-kai', label: 'AI.KAI.COM', status: 'live', callable: true, paymentDirection: '钱包 → ai.kai.com', note: '已连接', models: [{ id: 'model', label: '模型', contextWindow: 128000, inputPricePerMillionCents: 100, outputPricePerMillionCents: 200 }] }]);
+      if (url.endsWith('/api/devices/web-device/heartbeat')) {
+        heartbeatBodies.push(JSON.parse(String(init?.body)) as { taskId?: string });
+        return json({ id: 'web-device', name: 'COD Web', platform: 'web', status: 'online', lastSeenAt: new Date().toISOString() });
+      }
+      if (url.endsWith('/api/devices')) return json([{ id: 'web-device', name: 'COD Web', platform: 'web', status: 'online', lastSeenAt: new Date().toISOString() }]);
+      if (url.endsWith('/api/tasks')) return json([{ id: taskId, title: '任务壳对话', status: taskStatus, deviceId: 'web-device', updatedAt: new Date().toISOString(), version: taskVersion, result: taskStatus === 'complete' ? '完成' : null, error: null }]);
+      if (/\/api\/tasks\/[^/]+\/status$/.test(url)) {
+        const body = JSON.parse(String(init?.body)) as { status: 'running' | 'complete'; leaseToken?: string };
+        taskStatus = body.status;
+        taskVersion += 1;
+        return json({ id: taskId, title: '任务壳对话', status: taskStatus, deviceId: 'web-device', updatedAt: new Date().toISOString(), version: taskVersion, result: taskStatus === 'complete' ? '完成' : null, error: null, ...(taskStatus === 'running' ? { execution: { executionId: '90000000-0000-4000-8000-000000000009', leaseToken: body.leaseToken, leaseExpiresAt: new Date(Date.now() + 90_000).toISOString() } } : {}) });
+      }
+      if (url.endsWith('/v1/chat/completions')) {
+        chatBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        markChatStarted();
+        await chatGate;
+        return json({ choices: [{ message: { content: '普通对话完成' } }], usage: { prompt_tokens: 1, completion_tokens: 1 }, cod_source: 'ai-kai' });
+      }
+      if (url.endsWith('/api/credit-packs')) return json(creditPacks);
+      if (url.endsWith('/api/referrals')) return json({ inviteCode: 'KAI-TEST', referredUsers: 0, commissionRateBps: 0, pendingCommissionCents: 0, settledCommissionCents: 0 });
+      if (url.endsWith('/api/products') || url.endsWith('/api/ledger') || url.endsWith('/api/compute/requests')) return json([]);
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    window.localStorage.setItem('cod.session.token', 'test-token');
+    window.localStorage.setItem('cod.device.id', 'web-device');
+    render(<App />);
+    expect(await screen.findByRole('heading', { name: '任务壳对话', level: 1 })).toBeInTheDocument();
+    fireEvent.click(screen.getByTitle('普通对话'));
+    fireEvent.change(screen.getByPlaceholderText('问 COD 任何问题...'), { target: { value: '保持普通对话无任务绑定' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await chatStarted;
+    document.dispatchEvent(new Event('visibilitychange'));
+    await waitFor(() => expect(heartbeatBodies.length).toBeGreaterThanOrEqual(2));
+    expect(heartbeatBodies.every((body) => body.taskId === undefined)).toBe(true);
+    expect(chatBody).not.toHaveProperty('task_id');
+    releaseChat();
+    expect(await screen.findByText('普通对话完成')).toBeInTheDocument();
+    await waitFor(() => expect(taskStatus).toBe('complete'));
+    expect(screen.queryByText(/任务执行租约已失效/)).not.toBeInTheDocument();
   });
 
   it('terminates a running task, aborts the model request, and renders the synchronized cancelled state',async()=>{
@@ -1548,9 +2398,10 @@ describe('COD workspace', () => {
     expect(await screen.findByText(/已停止这次回复/)).toBeInTheDocument();expect(screen.getByText(/未结算的模型请求会释放预占额度/)).toBeInTheDocument();expect(chatSignal?.aborted).toBe(true);const chatCall=fetchMock.mock.calls.find(([url])=>String(url).endsWith('/v1/chat/completions'));expect(JSON.parse(String(chatCall?.[1]?.body))).not.toHaveProperty('task_id');expect(fetchMock.mock.calls.some(([url])=>String(url).endsWith('/api/tasks/task-cancel/cancel'))).toBe(true);
   });
 
-  it('runs the same prompt through two selected models and renders a comparison', async()=>{
-    let taskVersion=1;const fetchMock=vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{const url=String(input);if(url.endsWith('/api/capabilities'))return json(capabilities);if(url.endsWith('/api/auth/login'))return json({token:'test-token'});if(url.endsWith('/api/account'))return json({userId:'user',displayName:'developer',balanceCents:5000,currency:'CNY',plan:'developer'});if(url.endsWith('/api/model-sources'))return json([{id:'ai-kai',label:'AI.KAI.COM',status:'live',callable:true,paymentDirection:'钱包 → ai.kai.com',note:'已连接',models:[{id:'model-a',label:'模型 A',contextWindow:128000,inputPricePerMillionCents:100,outputPricePerMillionCents:200},{id:'model-b',label:'模型 B',contextWindow:128000,inputPricePerMillionCents:150,outputPricePerMillionCents:300}]}]);if(url.endsWith('/api/devices')&&init?.method==='POST')return json({id:'web-device',name:'COD Web',platform:'web',status:'online',lastSeenAt:new Date().toISOString()},201);if(url.endsWith('/api/devices'))return json([]);if(url.endsWith('/api/tasks')&&init?.method==='POST')return json({id:'compare-task',title:'同一个问题',status:'draft',deviceId:'web-device',updatedAt:new Date().toISOString(),version:taskVersion},201);if(url.endsWith('/api/tasks'))return json([]);if(/\/api\/tasks\/compare-task\/status$/.test(url)){const body=JSON.parse(String(init?.body)) as {status:'running'|'complete'};taskVersion+=1;return json({id:'compare-task',title:'同一个问题',status:body.status,deviceId:'web-device',updatedAt:new Date().toISOString(),version:taskVersion,result:body.status==='complete'?'比较完成':null,error:null});}if(url.endsWith('/v1/chat/completions')){const body=JSON.parse(String(init?.body)) as {model:string;messages:Array<{content:string}>};return json({choices:[{message:{content:`${body.model} 的回答`}}],usage:{prompt_tokens:10,completion_tokens:20},cod_source:'ai-kai'});}if(url.endsWith('/api/credit-packs'))return json(creditPacks);if(url.endsWith('/api/products')||url.endsWith('/api/ledger'))return json([]);throw new Error(`Unexpected request: ${url}`);});
-    vi.stubGlobal('fetch',fetchMock);render(<App/>);await screen.findByRole('heading',{name:'新对话'});fireEvent.click(screen.getByTitle('登录'));const dialog=await screen.findByRole('dialog',{name:'登录 COD'});fireEvent.change(within(dialog).getByLabelText('邮箱'),{target:{value:'developer@kai.com'}});fireEvent.change(within(dialog).getByLabelText('密码'),{target:{value:'Password123'}});fireEvent.click(within(dialog).getByRole('button',{name:'登录'}));await screen.findByRole('heading',{name:'新建或选择任务'});fireEvent.click(screen.getByTitle('普通对话'));const compareToggle=screen.getByRole('button',{name:/多模型对比/});expect(compareToggle).toHaveAttribute('aria-pressed','false');fireEvent.click(compareToggle);expect(screen.getByText('本次发送将产生 2 次独立计费请求')).toBeInTheDocument();const composer=screen.getByPlaceholderText('输入一个问题，同时询问 2 个模型...');fireEvent.change(composer,{target:{value:'同一个问题'}});fireEvent.click(screen.getByRole('button',{name:'发送'}));expect(await screen.findByText('model-a 的回答')).toBeInTheDocument();expect(screen.getByText('model-b 的回答')).toBeInTheDocument();expect(screen.getByText('同一问题 · 2 个模型')).toBeInTheDocument();const calls=fetchMock.mock.calls.filter(([url])=>String(url).endsWith('/v1/chat/completions'));expect(calls).toHaveLength(2);expect(calls.map(([,init])=>(JSON.parse(String(init?.body)) as {model:string}).model).sort()).toEqual(['model-a','model-b']);fireEvent.click(screen.getByRole('button',{name:'选用此回答'}));expect(screen.getByRole('combobox',{name:'模型'})).toHaveValue('model-b');expect(screen.getAllByText('已将 AI.KAI.COM · 模型 B 设为默认模型并用于后续上下文。').length).toBeGreaterThan(0);
+  it('runs model comparisons and preserves the session when one provider fails', async()=>{
+    let taskVersion=1;let partialFailure=false;const fetchMock=vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{const url=String(input);if(url.endsWith('/api/capabilities'))return json(capabilities);if(url.endsWith('/api/auth/login'))return json({token:'test-token'});if(url.endsWith('/api/account'))return json({userId:'user',displayName:'developer',balanceCents:5000,currency:'CNY',plan:'developer'});if(url.endsWith('/api/model-sources'))return json([{id:'ai-kai',label:'AI.KAI.COM',status:'live',callable:true,paymentDirection:'钱包 → ai.kai.com',note:'已连接',models:[{id:'model-a',label:'模型 A',contextWindow:128000,inputPricePerMillionCents:100,outputPricePerMillionCents:200},{id:'model-b',label:'模型 B',contextWindow:128000,inputPricePerMillionCents:150,outputPricePerMillionCents:300}]}]);if(url.endsWith('/api/devices')&&init?.method==='POST')return json({id:'web-device',name:'COD Web',platform:'web',status:'online',lastSeenAt:new Date().toISOString()},201);if(url.endsWith('/api/devices/web-device/heartbeat'))return json({id:'web-device',name:'COD Web',platform:'web',status:'online',lastSeenAt:new Date().toISOString()});if(url.endsWith('/api/devices'))return json([]);if(url.endsWith('/api/tasks')&&init?.method==='POST')return json({id:'compare-task',title:'同一个问题',status:'draft',deviceId:'web-device',updatedAt:new Date().toISOString(),version:taskVersion},201);if(url.endsWith('/api/tasks'))return json([]);if(/\/api\/tasks\/compare-task\/status$/.test(url)){const body=JSON.parse(String(init?.body)) as {status:'running'|'complete';leaseToken?:string};taskVersion+=1;return json({id:'compare-task',title:'同一个问题',status:body.status,deviceId:'web-device',updatedAt:new Date().toISOString(),version:taskVersion,result:body.status==='complete'?'比较完成':null,error:null,...(body.status==='running'?{execution:{executionId:'50000000-0000-4000-8000-000000000005',leaseToken:body.leaseToken,leaseExpiresAt:new Date(Date.now()+90_000).toISOString()}}:{})});}if(url.endsWith('/v1/chat/completions')){const body=JSON.parse(String(init?.body)) as {model:string;messages:Array<{content:string}>};if(partialFailure&&body.model==='model-a')return json({error:'ai_upstream_auth_failed',message:'KAI model provider authentication failed'},502);return json({choices:[{message:{content:`${body.model} 的回答`}}],usage:{prompt_tokens:10,completion_tokens:20},cod_source:'ai-kai'});}if(url.endsWith('/api/credit-packs'))return json(creditPacks);if(url.endsWith('/api/products')||url.endsWith('/api/ledger'))return json([]);throw new Error(`Unexpected request: ${url}`);});
+    vi.stubGlobal('fetch',fetchMock);render(<App/>);await screen.findByRole('heading',{name:'新对话'});fireEvent.click(screen.getByTitle('登录'));const dialog=await screen.findByRole('dialog',{name:'登录 COD'});fireEvent.change(within(dialog).getByLabelText('邮箱'),{target:{value:'developer@kai.com'}});fireEvent.change(within(dialog).getByLabelText('密码'),{target:{value:'Password123'}});fireEvent.click(within(dialog).getByRole('button',{name:'登录'}));await screen.findByRole('heading',{name:'新建或选择任务'});fireEvent.click(screen.getByTitle('普通对话'));fireEvent.click(screen.getByRole('button',{name:/多模型对比/}));expect(screen.getByText('本次发送将产生 2 次独立计费请求')).toBeInTheDocument();const composer=screen.getByPlaceholderText('输入一个问题，同时询问 2 个模型...');fireEvent.change(composer,{target:{value:'同一个问题'}});fireEvent.click(screen.getByRole('button',{name:'发送'}));expect(await screen.findByText('model-a 的回答')).toBeInTheDocument();expect(screen.getByText('model-b 的回答')).toBeInTheDocument();expect(screen.getByText('同一问题 · 2 个模型')).toBeInTheDocument();let calls=fetchMock.mock.calls.filter(([url])=>String(url).endsWith('/v1/chat/completions'));expect(calls).toHaveLength(2);expect(calls.map(([,init])=>(JSON.parse(String(init?.body)) as {model:string}).model).sort()).toEqual(['model-a','model-b']);fireEvent.click(screen.getByRole('button',{name:'选用此回答'}));expect(screen.getByRole('combobox',{name:'模型'})).toHaveValue('model-b');expect(screen.getAllByText('已将 AI.KAI.COM · 模型 B 设为默认模型并用于后续上下文。').length).toBeGreaterThan(0);
+    partialFailure=true;fireEvent.click(screen.getByRole('button',{name:/多模型对比/}));expect(screen.getByText('本次发送将产生 2 次独立计费请求')).toBeInTheDocument();fireEvent.change(composer,{target:{value:'继续比较'}});fireEvent.click(screen.getByRole('button',{name:'发送'}));expect(await screen.findByText('模型服务认证配置异常，本次失败未扣费。请切换其他模型或稍后再试。')).toBeInTheDocument();await waitFor(()=>expect(screen.getAllByText('model-b 的回答')).toHaveLength(2));calls=fetchMock.mock.calls.filter(([url])=>String(url).endsWith('/v1/chat/completions'));expect(calls).toHaveLength(4);expect(calls.filter(([,init])=>(JSON.parse(String(init?.body)) as {model:string}).model==='model-a')).toHaveLength(2);expect(window.localStorage.getItem('cod.session.token')).toBe('test-token');
   });
 
   it('loads synchronized tasks, filters them, and does not fake Web terminal output', async () => {
@@ -1596,6 +2447,7 @@ describe('COD workspace', () => {
     fireEvent.click(screen.getByTitle('普通对话'));
     expect(await screen.findByRole('heading', { name: '新建或选择任务', level: 1 })).toBeInTheDocument();
     expect(screen.getAllByText('已开始当前设备的新对话；原任务仍保留在任务列表中。').length).toBeGreaterThan(0);
+    expect(screen.getByDisplayValue('不能从目录源调用')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '终端' }));
     expect(screen.getByText('Web 端不会执行或伪造终端结果。请使用 COD Desktop。')).toBeInTheDocument();

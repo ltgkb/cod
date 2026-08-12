@@ -31,7 +31,7 @@ const account = {
 };
 
 describe('API session recovery', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     const values = new Map<string, string>();
     const storage: Storage = {
       get length() { return values.size; },
@@ -44,14 +44,14 @@ describe('API session recovery', () => {
     Object.defineProperty(window, 'localStorage', { configurable: true, value: storage });
     window.localStorage.clear();
     configureCodRuntime({ controlPlaneUrl: 'https://cod.test' });
-    logoutCod();
+    await logoutCod();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    await logoutCod().catch(() => false);
     configureCodRuntime({});
-    logoutCod();
     window.localStorage.clear();
   });
 
@@ -112,6 +112,7 @@ describe('API session recovery', () => {
   it('recovers a mobile native session after a transient bridge response', async () => {
     vi.useFakeTimers();
     let accountRequests = 0;
+    let secureToken: string | null = null;
     const nativeRequest = vi.fn(async (request: import('./runtime').NativeHttpRequest) => {
       if (request.url.endsWith('/api/account')) {
         accountRequests += 1;
@@ -122,8 +123,20 @@ describe('API session recovery', () => {
       if (request.url.endsWith('/api/model-sources')) return { status: 200, body: '[]' };
       throw new Error(`Unexpected request: ${request.url}`);
     });
-    configureCodRuntime({ controlPlaneUrl: 'https://cod.test', hostPlatform: 'ios', nativeRequest });
-    persistCodSession('native-token');
+    configureCodRuntime({
+      controlPlaneUrl: 'https://cod.test',
+      hostPlatform: 'ios',
+      nativeRequest,
+      loadSessionCleanupPending: async () => false,
+      loadSessionToken: async () => secureToken,
+      saveSessionToken: async (token) => { secureToken = token; },
+      clearSessionToken: async (expectedToken) => {
+        if (expectedToken !== undefined && secureToken !== null && secureToken !== expectedToken) return false;
+        secureToken = null;
+        return true;
+      },
+    });
+    await persistCodSession('native-token');
 
     const recovery = resumeCodSession();
     await vi.runAllTimersAsync();
@@ -350,32 +363,24 @@ describe('API session recovery', () => {
     expect(getTaskExecutionLease(task.id)).toBeNull();
   });
 
-  it('keeps the legacy task protocol usable when running succeeds without an execution lease', async () => {
+  it('rejects a running task response that omits the required execution lease', async () => {
     const task: RemoteTask = {
       id: '30000000-0000-4000-8000-000000000003', title: '旧协议任务', status: 'draft', deviceId: 'device-1',
       updatedAt: '2026-08-12T00:00:00.000Z', version: 1, result: null, error: null,
     };
-    let chatHeaders = new Headers();
-    let chatBody: Record<string, unknown> = {};
-    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith(`/api/tasks/${task.id}/status`)) {
         return Response.json({ ...task, status: 'running', version: 2 });
       }
-      if (url.endsWith('/v1/chat/completions')) {
-        chatHeaders = new Headers(init?.headers);
-        chatBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        return Response.json({ choices: [{ message: { content: '旧后端回复' } }], usage: { prompt_tokens: 1, completion_tokens: 1 } });
-      }
       throw new Error(`Unexpected request: ${url}`);
-    }));
+    });
+    vi.stubGlobal('fetch', fetcher);
 
-    await expect(updateRemoteTask('token', task, 'running')).resolves.toMatchObject({ status: 'running' });
+    await expect(updateRemoteTask('token', task, 'running')).rejects.toMatchObject({ status: 502, code: 'invalid_task_lease_response' });
     expect(getTaskExecutionLease(task.id)).toBeNull();
-    await expect(sendChat('token', 'demo', 'demo-model', [{ role: 'user', content: '测试' }], { taskId: task.id })).resolves.toMatchObject({ content: '旧后端回复' });
-    expect(chatBody).toMatchObject({ task_id: task.id });
-    expect(chatHeaders.has('x-cod-task-execution')).toBe(false);
-    expect(chatHeaders.has('x-cod-task-lease')).toBe(false);
+    await expect(sendChat('token', 'demo', 'demo-model', [{ role: 'user', content: '测试' }], { taskId: task.id })).rejects.toMatchObject({ status: 409, code: 'task_lease_required' });
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
   it('retries a task claim once with the same credentials and honors Retry-After', async () => {
