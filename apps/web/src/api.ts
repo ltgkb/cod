@@ -450,7 +450,10 @@ async function invalidateCodSession(expectedToken: string): Promise<void> {
 
 async function throwResponseError(status: number, body: ApiErrorBody, token: string | undefined, retryDelay: number | null = null): Promise<never> {
   const error = new ApiError(body.message ?? `Control plane request failed: ${status}`, status, body.error ?? 'request_failed', retryDelay);
-  if (token && status === 401) await invalidateCodSession(token);
+  // Only COD's authentication middleware may invalidate the local session. A
+  // model provider or webhook can also return 401, but that must never sign the
+  // user out of COD (especially during a multi-model comparison).
+  if (token && status === 401 && body.error === 'unauthorized') await invalidateCodSession(token);
   throw error;
 }
 
@@ -766,7 +769,7 @@ export async function sendChat(token: string, source: string, model: string, mes
     } catch (error) {
       lastError = error;
       if(options.signal?.aborted)throw error;
-      const retryable = !(error instanceof ApiError) || error.status === 429 || error.status >= 500;
+      const retryable = !(error instanceof ApiError) || error.status === 429 || (error.status >= 500 && error.code !== 'ai_upstream_auth_failed');
       if (!retryable || attempt === 1) throw error;
       await abortableDelay(500,options.signal);
     } finally { attemptSignal.dispose(); }

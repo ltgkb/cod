@@ -347,6 +347,29 @@ describe('control-plane production rules', () => {
     expect((await fetch(`${retryServer.base}/v1/chat/completions`,{method:'POST',headers:retryHeaders,body:retryBody})).status).toBe(200);expect(retryCalls).toBe(3);expect(upstreamKeys[0]).toMatch(/^cod-[a-f0-9]{48}$/);expect(new Set(upstreamKeys).size).toBe(1);
   });
 
+  it('maps upstream authentication failures to a sanitized gateway error',async()=>{
+    let chatCalls=0;let upstreamBodyCancelled=false;
+    const fetcher=vi.fn(async(input:RequestInfo|URL):Promise<Response>=>{
+      const url=String(input);
+      if(url.endsWith('/api/pricing'))return Response.json({data:[{model_name:'auth-fail-model',quota_type:0,model_ratio:1,completion_ratio:1,supported_endpoint_types:['openai']}]});
+      if(url.endsWith('/api/status'))return Response.json({data:{quota_per_unit:500000,price:7}});
+      if(url.endsWith('/models'))return Response.json({data:[{id:'auth-fail-model'}]});
+      if(url.endsWith('/chat/completions')){chatCalls+=1;return new Response(new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode('{"error":"invalid_api_key","secretDetail":"must-not-leak"}'));},cancel(){upstreamBodyCancelled=true;}}),{status:401,headers:{'content-type':'application/json'}});}
+      throw new Error(`Unexpected provider request: ${url}`);
+    });
+    const {base}=await start({KAI_API_KEY:'test-key'},fetcher as typeof fetch);
+    const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com',password:'Password123'})});
+    const {token}=await login.json() as {token:string};
+    const response=await fetch(`${base}/v1/chat/completions`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:JSON.stringify({source:'ai-kai',model:'auth-fail-model',messages:[{role:'user',content:'hello'}]})});
+    expect(response.status).toBe(502);
+    const body=await response.json();
+    expect(body).toEqual({error:'ai_upstream_auth_failed',message:'KAI model provider authentication failed'});
+    expect(JSON.stringify(body)).not.toContain('must-not-leak');
+    expect(chatCalls).toBe(1);
+    expect(upstreamBodyCancelled).toBe(true);
+    expect((await fetch(`${base}/api/account`,{headers:{authorization:`Bearer ${token}`}})).status).toBe(200);
+  });
+
   it('mints a 60-minute task-scoped Agent token and blocks every out-of-scope use',async()=>{
     const {base,database}=await start();const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com',password:'Password123'})});const {token,user}=await login.json() as {token:string;user:{id:string;email:string}};const full={authorization:`Bearer ${token}`,'content-type':'application/json'};
     const device=await (await fetch(`${base}/api/devices`,{method:'POST',headers:full,body:JSON.stringify({name:'Scoped Agent',platform:'macos'})})).json() as {id:string};
