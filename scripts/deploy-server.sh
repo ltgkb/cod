@@ -96,7 +96,10 @@ npm run typecheck
 npm test
 npm run lint
 npm run build
-npm audit --audit-level=high
+# This release contains only the Web client and control plane. Keep the server
+# gate scoped to those deployable workspaces so native Expo build tooling does
+# not block an otherwise unaffected server rollout.
+npm audit --workspace @cod/web --workspace @cod/control-plane --audit-level=high
 
 sudo install -d -m 755 "${release_root}"
 if [[ "${release}" == "${previous}" && -f "${release}/start.mjs" && -f "${release}/web/index.html" && -f "${release}/web/app/index.html" ]]; then
