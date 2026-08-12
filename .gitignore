@@ -10,4 +10,8 @@ coverage/
 apps/desktop/resources/bin/goose
 apps/desktop/resources/bin/goose.exe
 apps/mobile/release/
+apps/mobile/.expo/
+# Expo managed workflow: native projects are generated locally by prebuild/EAS.
+apps/mobile/android/
+apps/mobile/ios/
 work-server-bundle.mjs

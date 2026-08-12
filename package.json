@@ -9,23 +9,47 @@
     "services/*"
   ],
   "scripts": {
+    "postinstall": "node apps/mobile/scripts/patch-expo-dom-template.cjs && node apps/mobile/scripts/patch-react-native-webview.cjs",
+    "audit:high": "node scripts/check-npm-audit.mjs",
+    "test:audit-gate": "node --test scripts/check-npm-audit.test.mjs",
     "dev": "npm run dev -w @cod/web",
     "build": "npm run build -w @cod/web && npm run build -w @cod/desktop && npm run build -w @cod/control-plane",
-    "typecheck": "npm run typecheck -w @cod/web && npm run typecheck -w @cod/desktop && npm run typecheck -w @cod/control-plane",
-    "test": "npm run test -w @cod/web && npm run test -w @cod/control-plane",
+    "typecheck": "npm run typecheck -w @cod/web && npm run typecheck -w @cod/mobile && npm run typecheck -w @cod/desktop && npm run typecheck -w @cod/control-plane",
+    "test": "npm run test -w @cod/web && npm run test -w @cod/mobile && npm run test -w @cod/desktop && npm run test -w @cod/control-plane",
     "lint": "npm run lint -w @cod/web",
     "desktop": "npm run dev -w @cod/desktop",
     "package:linux": "npm run package:linux -w @cod/desktop",
     "package:mac": "npm run package:mac -w @cod/desktop",
     "package:mac:signed": "npm run package:mac:signed -w @cod/desktop",
     "package:win": "npm run package:win -w @cod/desktop",
-    "package:android": "npm run build:android -w @cod/mobile",
-    "package:ios": "npm run build:ios:simulator -w @cod/mobile",
-    "sync:mobile": "npm run sync -w @cod/mobile",
+    "mobile": "npm run start -w @cod/mobile",
+    "mobile:android": "npm run android -w @cod/mobile",
+    "mobile:ios": "npm run ios -w @cod/mobile",
+    "export:android": "npm run export:android -w @cod/mobile",
+    "export:ios": "npm run export:ios -w @cod/mobile",
     "prepare:goose": "node scripts/prepare-goose-sidecar.mjs",
     "control-plane": "npm run dev -w @cod/control-plane"
   },
   "engines": {
     "node": ">=22"
+  },
+  "devDependencies": {
+    "react": "19.2.3",
+    "react-dom": "19.2.3"
+  },
+  "overrides": {
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "yauzl": "3.3.1",
+    "xcode": {
+      "uuid": "11.1.1"
+    }
+  },
+  "allowScripts": {
+    "electron@39.8.10": true,
+    "electron-winstaller@5.4.0": true,
+    "esbuild@0.28.1": true,
+    "fsevents@2.3.3": true,
+    "@modelcontextprotocol/ext-apps": false
   }
 }

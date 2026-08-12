@@ -34,7 +34,7 @@ The review covers login and sessions, model routing, token settlement, wallet an
 - The Wiki adapter is restricted to the configured HTTPS origin, has time and response-size limits, and does not expose its API key.
 - Electron uses context isolation, sandboxing, no renderer Node integration, file-root approval, real-path containment, command allowlisting, and no shell interpolation.
 - Deployments run type checks, tests, lint, production builds, dependency audit, Nginx validation, readiness checks, atomic release switching, and rollback.
-- `npm audit` reports zero known vulnerabilities at the time of this audit.
+- The 2026-08-08 audit reported zero known vulnerabilities. A 2026-08-11 follow-up after the Expo refactor reports zero high/critical vulnerabilities in the control-plane/Web production workspaces; the full-tree gate allows only two Expo/Metro-propagated `image-size` DoS advisories, binds them to the exact lock graph and parser-disable tests, and expires after 2026-09-11. Every other advisory fails the release.
 
 ## Release blockers still requiring business credentials
 

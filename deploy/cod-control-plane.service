@@ -7,32 +7,40 @@ StartLimitBurst=10
 
 [Service]
 Type=simple
-User=ubuntu
-Group=ubuntu
+User=cod
+Group=cod
 WorkingDirectory=/opt/cod/current
 Environment=NODE_ENV=production
 Environment=COD_CONTROL_PORT=8787
-EnvironmentFile=/etc/cod/runtime.env
 EnvironmentFile=-/etc/cod/control-plane.env
+EnvironmentFile=/etc/cod/runtime.env
 EnvironmentFile=-/etc/cod/revision.env
-ExecStart=/home/ubuntu/.cache/hermit/pkg/node-24.10.0/bin/node /opt/cod/current/start.mjs
+ExecStart=/opt/cod/current/bin/node /opt/cod/current/start.mjs
 Restart=always
 RestartSec=3
 TimeoutStopSec=15
 NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
 PrivateTmp=true
 PrivateDevices=true
+PrivateIPC=true
 ProtectSystem=strict
-ProtectHome=read-only
+ProtectHome=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
+ProtectProc=invisible
+RestrictNamespaces=true
 RestrictSUIDSGID=true
 LockPersonality=true
 RestrictRealtime=true
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-InaccessiblePaths=/home/ubuntu/.ssh /root
+InaccessiblePaths=/root
 UMask=0077
 ReadOnlyPaths=/opt/cod/current
 

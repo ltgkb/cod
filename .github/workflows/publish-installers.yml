@@ -85,7 +85,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --target "$SOURCE_SHA" \
               --title "COD ${VERSION} (build ${GITHUB_RUN_NUMBER})" \
-              --notes "Automated internal-testing build from ${SOURCE_SHA}. macOS is ad-hoc signed and not notarized; Windows is not production-signed; Android is a debug APK; the iOS package is simulator-only." \
+              --notes "Automated internal-testing build from ${SOURCE_SHA}. macOS is ad-hoc signed and not notarized; Windows is not production-signed; Android/iOS files are Expo compile-test bundles, not installable apps." \
               --draft \
               --prerelease \
               --latest=false
@@ -155,7 +155,7 @@ jobs:
 
           gh release upload "$RELEASE_TAG" "${installers[@]}" "$checksum" --repo "$GITHUB_REPOSITORY" --clobber
 
-  android:
+  mobile-bundles:
     needs: [prepare, release]
     runs-on: ubuntu-latest
     permissions:
@@ -167,13 +167,11 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: 21
       - run: npm ci
-      - run: npm run package:android
-      - name: Upload Android APK to release
+      - run: npm run doctor -w @cod/mobile
+      - run: npm run export:android
+      - run: npm run export:ios
+      - name: Upload Expo compile-test bundles to release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -181,46 +179,18 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
-          source_path="apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk"
-          release_path="apps/mobile/android/app/build/outputs/apk/debug/COD-${VERSION}-android-debug.apk"
-          checksum="apps/mobile/android/app/build/outputs/apk/debug/SHA256SUMS-Android.txt"
-          cp "$source_path" "$release_path"
-          digest="$(sha256sum "$release_path" | awk '{print $1}')"
-          printf '%s  %s\n' "$digest" "$(basename "$release_path")" > "$checksum"
-          gh release upload "$RELEASE_TAG" "$release_path" "$checksum" --repo "$GITHUB_REPOSITORY" --clobber
-
-  ios-simulator:
-    needs: [prepare, release]
-    runs-on: macos-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 22
-      - run: npm ci
-      - run: npm run package:ios
-      - name: Archive and upload iOS simulator package
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          set -euo pipefail
-          release_path="apps/mobile/release/COD-${VERSION}-ios-simulator.zip"
-          checksum="apps/mobile/release/SHA256SUMS-iOS-Simulator.txt"
-          ditto -c -k --sequesterRsrc --keepParent apps/mobile/release/ios-simulator/Build/Products/Release-iphonesimulator/App.app "$release_path"
-          unzip -t "$release_path"
-          digest="$(shasum -a 256 "$release_path" | awk '{print $1}')"
-          printf '%s  %s\n' "$digest" "$(basename "$release_path")" > "$checksum"
-          gh release upload "$RELEASE_TAG" "$release_path" "$checksum" --repo "$GITHUB_REPOSITORY" --clobber
+          android_bundle="apps/mobile/release/COD-${VERSION}-android-expo-bundle.zip"
+          ios_bundle="apps/mobile/release/COD-${VERSION}-ios-expo-bundle.zip"
+          checksum="apps/mobile/release/SHA256SUMS-Mobile-Bundles.txt"
+          (cd apps/mobile/release/android && zip -qr "../$(basename "$android_bundle")" .)
+          (cd apps/mobile/release/ios && zip -qr "../$(basename "$ios_bundle")" .)
+          unzip -t "$android_bundle"
+          unzip -t "$ios_bundle"
+          sha256sum "$android_bundle" "$ios_bundle" | sed 's#apps/mobile/release/##' > "$checksum"
+          gh release upload "$RELEASE_TAG" "$android_bundle" "$ios_bundle" "$checksum" --repo "$GITHUB_REPOSITORY" --clobber
 
   publish-release:
-    needs: [prepare, release, desktop, android, ios-simulator]
+    needs: [prepare, release, desktop, mobile-bundles]
     runs-on: ubuntu-latest
     permissions:
       contents: write

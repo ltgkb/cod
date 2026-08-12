@@ -1,30 +1,72 @@
-import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, session, shell, type IpcMainInvokeEvent } from 'electron';
 import { execFile } from 'node:child_process';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer as createNetServer } from 'node:net';
 import { createHash, randomBytes } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import type { AgentGatewayConfig, TerminalResult, WorkspaceFile } from '@cod/contracts';
+import type { AgentGatewayConfig, DesktopPetLaunchConfig, DesktopPetLaunchResult, DesktopPetStatus, TerminalResult } from '@cod/contracts';
+import { startAcpProxy, type AcpProxy } from './acp-proxy.js';
+import { mintAgentSession } from './agent-session.js';
+import { commandPathCandidates, commandPolicyViolation, isWithinRoot, parseCommand, validateCommandPath } from './command-policy.js';
+import { commandTimedOut, executeGitCommand } from './git-command.js';
+import { desktopPetEnvironment, discoverDesktopPet, type DesktopPetInstallation } from './desktop-pet.js';
+import { collectUntrackedDiff, stagedGitDiffArguments, unstagedGitDiffArguments } from './git-diff.js';
+import { minimalGooseEnvironment } from './goose-environment.js';
+import { forceTerminateChildProcess, GooseLaunchCoordinator, terminateChildProcess } from './goose-lifecycle.js';
+import { cleanupAbandonedGooseSidecar, clearGooseOwnershipRecord, saveGooseOwnershipRecord } from './goose-ownership.js';
+import { isAllowedDevelopmentNavigation, isSafeExternalUrl } from './navigation-policy.js';
+import { resolveCommandInvocation } from './platform-command.js';
+import { loadApprovedProjectRoots, maximumApprovedProjectRoots, saveApprovedProjectRoots } from './project-roots.js';
+import { defaultDesktopControlPlaneUrl, defaultDesktopDevelopmentUrl, isTrustedRendererUrl, resolveDesktopRuntimeUrls } from './runtime-policy.js';
+import { resolveTaskboardUrl } from './taskboard-url.js';
+import { startPetChatProxy, type PetChatProxy } from './pet-chat-proxy.js';
+import { collectWorkspaceFiles, readWorkspaceTextFile } from './workspace-files.js';
 
 const execFileAsync = promisify(execFile);
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
-const developmentUrl = process.env.COD_DEV_SERVER_URL || 'http://127.0.0.1:5173';
-const allowedCommands = new Set(['npm', 'pnpm', 'cargo', 'git', 'node', 'just']);
+let controlPlaneUrl = defaultDesktopControlPlaneUrl;
+let developmentUrl = defaultDesktopDevelopmentUrl;
+let runtimeConfigurationError: Error | null = null;
+try {
+  ({ controlPlaneUrl, developmentUrl } = resolveDesktopRuntimeUrls(process.env, app.isPackaged));
+} catch (error) {
+  runtimeConfigurationError = error instanceof Error ? error : new Error('Desktop runtime configuration is invalid');
+}
+const packagedEntryPath = path.join(process.resourcesPath, 'web', 'app', 'index.html');
+const packagedEntryUrl = pathToFileURL(packagedEntryPath).href;
+const gitProbeTimeoutMilliseconds = 3_000;
+const gitDiffTimeoutMilliseconds = 15_000;
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) app.quit();
 const approvedProjectRoots = new Set<string>();
 let gooseSidecar: ChildProcess | null = null;
+let gooseAcpProxy: AcpProxy | null = null;
 let gooseAcpUrl: string | null = null;
 let gooseConfigurationKey: string | null = null;
+let gooseAgentTokenExpiresAt = 0;
+let desktopPetProcess: ChildProcess | null = null;
+let desktopPetProxy: PetChatProxy | null = null;
+const gooseLaunchCoordinator = new GooseLaunchCoordinator();
 
-function isTrustedExternalUrl(rawUrl: string): boolean {
-  try {
-    const url = new URL(rawUrl);
-    return url.protocol === 'https:' && (url.hostname === 'kai.com' || url.hostname.endsWith('.kai.com'));
-  } catch {
-    return false;
+function trustedRendererWebSocketOrigins(): string[] {
+  return app.isPackaged ? ['file://', 'null'] : [new URL(developmentUrl).origin];
+}
+
+function assertTrustedIpcSender(event: IpcMainInvokeEvent): void {
+  const senderUrl = event.senderFrame?.url ?? '';
+  if (!isTrustedRendererUrl(senderUrl, app.isPackaged, developmentUrl, packagedEntryUrl)) {
+    throw new Error('IPC request was not sent by the COD renderer');
   }
+}
+
+function openExternalUrl(rawUrl: string): void {
+  if (!isSafeExternalUrl(rawUrl)) return;
+  void shell.openExternal(rawUrl).catch(() => {
+    dialog.showErrorBox('无法打开链接', '系统浏览器没有接受这个 HTTPS 链接。请检查默认浏览器设置后重试。');
+  });
 }
 
 async function availablePort(): Promise<number> {
@@ -49,9 +91,12 @@ async function waitForGoose(port: number, processToWatch: ChildProcess, attempts
   processToWatch.once('exit', handleExit);
   try {
     for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (processToWatch.exitCode !== null || processToWatch.signalCode !== null) {
+        throw new Error(`Goose sidecar exited before becoming ready${processToWatch.exitCode !== null ? ` (exit ${processToWatch.exitCode})` : ` (${processToWatch.signalCode})`}`);
+      }
       if (startupError) throw startupError;
       try {
-        const response = await fetch(`http://127.0.0.1:${port}/status`);
+        const response = await fetch(`http://127.0.0.1:${port}/status`, { signal: AbortSignal.timeout(500) });
         if (response.ok) return;
       } catch {
         // The sidecar is still starting.
@@ -68,92 +113,279 @@ async function waitForGoose(port: number, processToWatch: ChildProcess, attempts
 
 async function stopGooseSidecar(): Promise<void> {
   const processToStop = gooseSidecar;
+  const processId = processToStop?.pid;
+  const proxyToStop = gooseAcpProxy;
   gooseSidecar = null;
+  gooseAcpProxy = null;
   gooseAcpUrl = null;
   gooseConfigurationKey = null;
-  if (!processToStop || processToStop.exitCode !== null) return;
-  await new Promise<void>((resolve) => {
-    const timeout = setTimeout(() => { processToStop.kill('SIGKILL'); resolve(); }, 2_000);
-    processToStop.once('exit', () => { clearTimeout(timeout); resolve(); });
-    processToStop.kill();
-  });
+  gooseAgentTokenExpiresAt = 0;
+  if (proxyToStop) await proxyToStop.close();
+  await terminateChildProcess(processToStop);
+  if (processId) await clearGooseOwnershipRecord(gooseOwnershipFile(), processId).catch(() => undefined);
+}
+
+function gooseOwnershipFile(): string {
+  return path.join(app.getPath('userData'), 'goose-sidecar-owner.json');
+}
+
+async function prepareGooseStorage(): Promise<{ pathRoot: string; stateHome: string | null }> {
+  // Never load plugins, provider credentials, or settings from a user's
+  // unrelated standalone Goose installation. COD owns an isolated state tree.
+  const pathRoot = path.join(app.getPath('userData'), 'goose-runtime');
+  await fs.mkdir(pathRoot, { recursive: true, mode: 0o700 });
+  if (process.platform === 'win32') return { pathRoot, stateHome: null };
+  await fs.chmod(pathRoot, 0o700);
+  const stateHome = path.join(pathRoot, 'xdg-state');
+  const logsDirectory = path.join(stateHome, 'goose', 'logs');
+  await fs.mkdir(logsDirectory, { recursive: true, mode: 0o700 });
+  await fs.chmod(logsDirectory, 0o700);
+  return { pathRoot, stateHome };
 }
 
 function validateAgentGatewayConfig(config: AgentGatewayConfig): void {
-  if (!config?.token || config.token.length > 8_192) throw new Error('A valid COD session is required');
-  if (!/^[a-z0-9-]{2,40}$/.test(config.sourceId)) throw new Error('Invalid model source');
-  if (!config.modelId || config.modelId.length > 200 || /[\r\n]/.test(config.modelId)) throw new Error('Invalid model');
-  if (!/^[a-f0-9-]{36}$/i.test(config.taskId)) throw new Error('Invalid task');
+  if (typeof config?.token !== 'string' || !config.token || config.token.length > 8_192 || /[\0\r\n]/.test(config.token)) {
+    throw new Error('A valid COD session is required');
+  }
+  if (typeof config.sourceId !== 'string' || !/^[a-z0-9-]{2,40}$/.test(config.sourceId)) throw new Error('Invalid model source');
+  if (typeof config.modelId !== 'string' || !config.modelId || config.modelId.length > 200 || /[\0\r\n]/.test(config.modelId)) throw new Error('Invalid model');
+  if (typeof config.taskId !== 'string' || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(config.taskId)) throw new Error('Invalid task');
+  if (typeof config.executionId !== 'string' || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(config.executionId)) throw new Error('Invalid task execution');
+  if (typeof config.leaseToken !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(config.leaseToken)) throw new Error('Invalid task lease');
+  if (typeof config.root !== 'string'
+    || !config.root
+    || config.root.length > 4_096
+    || /[\0\r\n]/.test(config.root)) throw new Error('Invalid project root');
 }
 
-async function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | null> {
+async function ensureGooseSidecarSerialized(config: AgentGatewayConfig, assertCurrent: () => void): Promise<string | null> {
   validateAgentGatewayConfig(config);
-  const configuredBase = process.env.COD_GOOSE_ACP_URL;
-  const configuredToken = process.env.COD_GOOSE_ACP_TOKEN;
-  if (configuredBase && configuredToken) {
+  const resolvedRoot = await approvedProjectRoot(config.root);
+  assertCurrent();
+  const configuredBase = app.isPackaged ? null : process.env.COD_GOOSE_ACP_URL;
+  const configuredToken = app.isPackaged ? null : process.env.COD_GOOSE_ACP_TOKEN;
+  const configurationKey = createHash('sha256').update(`${config.token}\0${config.sourceId}\0${config.modelId}\0${config.taskId}\0${config.executionId}\0${config.leaseToken}\0${resolvedRoot}`).digest('hex');
+  if (gooseAcpProxy && gooseAcpUrl && gooseConfigurationKey === configurationKey && gooseAgentTokenExpiresAt > Date.now() + 60_000) return gooseAcpUrl;
+  if (gooseSidecar || gooseAcpProxy) {
+    await stopGooseSidecar();
+    assertCurrent();
+  }
+
+  if (configuredBase || configuredToken) {
+    if (!configuredBase || !configuredToken) throw new Error('Both COD_GOOSE_ACP_URL and COD_GOOSE_ACP_TOKEN are required');
     const configured = new URL(configuredBase);
+    if ((configured.protocol !== 'ws:' && configured.protocol !== 'wss:')
+      || configured.username
+      || configured.password
+      || configured.hash) {
+      throw new Error('COD_GOOSE_ACP_URL must be a WebSocket URL without credentials or a fragment');
+    }
     configured.searchParams.set('token', configuredToken);
-    gooseAcpUrl = configured.toString();
+    const proxy = await startAcpProxy(configured.toString(), resolvedRoot, { allowedOrigins: trustedRendererWebSocketOrigins() });
+    try {
+      assertCurrent();
+    } catch (error) {
+      await proxy.close();
+      throw error;
+    }
+    gooseAcpProxy = proxy;
+    gooseAcpUrl = proxy.url;
+    gooseConfigurationKey = configurationKey;
+    gooseAgentTokenExpiresAt = Number.POSITIVE_INFINITY;
     return gooseAcpUrl;
   }
 
-  const configurationKey = createHash('sha256').update(`${config.token}\0${config.sourceId}\0${config.modelId}\0${config.taskId}`).digest('hex');
-  if (gooseAcpUrl && gooseConfigurationKey === configurationKey) return gooseAcpUrl;
-  if (gooseSidecar) await stopGooseSidecar();
-
   const packagedBinary = path.join(process.resourcesPath, 'bin', process.platform === 'win32' ? 'goose.exe' : 'goose');
-  const binary = process.env.COD_GOOSE_BINARY ?? packagedBinary;
+  const binary = !app.isPackaged && process.env.COD_GOOSE_BINARY ? process.env.COD_GOOSE_BINARY : packagedBinary;
   try {
     await fs.access(binary);
   } catch {
+    assertCurrent();
     return null;
   }
+  const resolvedBinary = await fs.realpath(binary);
+  assertCurrent();
+  const controlPlane = new URL(controlPlaneUrl);
+  const agentSession = await mintAgentSession(controlPlane, config);
+  assertCurrent();
+  const gooseStorage = await prepareGooseStorage();
+  assertCurrent();
   const port = await availablePort();
+  assertCurrent();
   const secret = randomBytes(24).toString('hex');
-  const controlPlane = new URL(process.env.COD_CONTROL_PLANE_URL ?? 'https://cod.kai.com');
-  if (controlPlane.protocol !== 'https:' && process.env.NODE_ENV === 'production') {
-    throw new Error('COD_CONTROL_PLANE_URL must use HTTPS in production');
-  }
   controlPlane.pathname = `${controlPlane.pathname.replace(/\/$/, '')}/v1/tasks/${encodeURIComponent(config.taskId)}/sources/${encodeURIComponent(config.sourceId)}`;
   controlPlane.search = '';
   controlPlane.hash = '';
-  const spawnedSidecar = spawn(binary, ['serve', '--host', '127.0.0.1', '--port', String(port), '--with-builtin', 'developer'], {
+  const spawnedSidecar = spawn(resolvedBinary, ['serve', '--host', '127.0.0.1', '--port', String(port), '--with-builtin', 'developer'], {
+    cwd: resolvedRoot,
     stdio: 'ignore',
+    windowsHide: true,
     env: {
-      ...process.env,
+      ...minimalGooseEnvironment(process.env),
       GOOSE_SERVER__SECRET_KEY: secret,
-      GOOSE_PROVIDER: process.env.GOOSE_PROVIDER ?? 'openai',
+      GOOSE_PATH_ROOT: gooseStorage.pathRoot,
+      GOOSE_WORKING_DIR: resolvedRoot,
+      GOOSE_TELEMETRY_ENABLED: 'false',
+      GOOSE_PROVIDER: !app.isPackaged && process.env.GOOSE_PROVIDER ? process.env.GOOSE_PROVIDER : 'openai',
       GOOSE_MODEL: config.modelId,
-      GOOSE_MODE: process.env.GOOSE_MODE ?? 'smart_approve',
+      GOOSE_MODE: !app.isPackaged && process.env.GOOSE_MODE ? process.env.GOOSE_MODE : 'smart_approve',
       OPENAI_MODEL: config.modelId,
       OPENAI_BASE_URL: controlPlane.toString().replace(/\/$/, ''),
-      OPENAI_API_KEY: config.token,
+      OPENAI_API_KEY: agentSession.token,
+      ...(gooseStorage.stateHome ? { XDG_STATE_HOME: gooseStorage.stateHome } : {}),
     },
   });
+  const sidecarPid = spawnedSidecar.pid;
+  if (!sidecarPid) {
+    await terminateChildProcess(spawnedSidecar);
+    throw new Error('Goose sidecar failed to expose a process ID');
+  }
   gooseSidecar = spawnedSidecar;
+  const ownershipReady = saveGooseOwnershipRecord(gooseOwnershipFile(), {
+    version: 1,
+    ownerPid: process.pid,
+    sidecarPid,
+    executablePath: resolvedBinary,
+    port,
+    createdAt: new Date().toISOString(),
+  });
   const clearSpawnedSidecar = () => {
+    void ownershipReady.then(() => clearGooseOwnershipRecord(gooseOwnershipFile(), sidecarPid)).catch(() => undefined);
     if (gooseSidecar !== spawnedSidecar) return;
+    const proxyToClose = gooseAcpProxy;
     gooseSidecar = null;
+    gooseAcpProxy = null;
     gooseAcpUrl = null;
     gooseConfigurationKey = null;
+    gooseAgentTokenExpiresAt = 0;
+    if (proxyToClose) void proxyToClose.close();
   };
   spawnedSidecar.once('exit', clearSpawnedSidecar);
   spawnedSidecar.once('error', clearSpawnedSidecar);
   try {
+    await ownershipReady;
     await waitForGoose(port, spawnedSidecar);
+    assertCurrent();
+    if (spawnedSidecar.exitCode !== null || gooseSidecar !== spawnedSidecar) {
+      throw new Error('Goose sidecar exited before accepting an ACP session');
+    }
   } catch (error) {
-    if (spawnedSidecar.exitCode === null && !spawnedSidecar.killed) spawnedSidecar.kill();
+    await terminateChildProcess(spawnedSidecar);
     clearSpawnedSidecar();
     throw error;
   }
-  gooseAcpUrl = `ws://127.0.0.1:${port}/acp?token=${secret}`;
+  let proxy: AcpProxy | null = null;
+  try {
+    proxy = await startAcpProxy(`ws://127.0.0.1:${port}/acp?token=${secret}`, resolvedRoot, {
+      allowedOrigins: trustedRendererWebSocketOrigins(),
+    });
+    assertCurrent();
+  } catch (error) {
+    if (proxy) await proxy.close();
+    await terminateChildProcess(spawnedSidecar);
+    clearSpawnedSidecar();
+    throw error;
+  }
+  if (spawnedSidecar.exitCode !== null || gooseSidecar !== spawnedSidecar) {
+    await proxy.close();
+    throw new Error('Goose sidecar exited before the ACP proxy was ready');
+  }
+  gooseAcpProxy = proxy;
+  gooseAcpUrl = proxy.url;
   gooseConfigurationKey = configurationKey;
+  gooseAgentTokenExpiresAt = agentSession.expiresAt;
   return gooseAcpUrl;
 }
 
-function isWithinRoot(root: string, target: string): boolean {
-  const relative = path.relative(path.resolve(root), path.resolve(target));
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+function ensureGooseSidecar(config: AgentGatewayConfig): Promise<string | null> {
+  return gooseLaunchCoordinator.run((assertCurrent) => ensureGooseSidecarSerialized(config, assertCurrent));
+}
+
+function invalidateAndStopGooseSidecar(): Promise<void> {
+  return gooseLaunchCoordinator.invalidate(stopGooseSidecar);
+}
+
+function desktopPetIsRunning(): boolean {
+  return Boolean(desktopPetProcess && desktopPetProcess.exitCode === null && desktopPetProcess.signalCode === null);
+}
+
+async function desktopPetDiscovery(): Promise<{ installation: DesktopPetInstallation | null; status: DesktopPetStatus }> {
+  const result = await discoverDesktopPet({
+    platform: process.platform,
+    homeDirectory: app.getPath('home'),
+    resourcesPath: process.resourcesPath,
+    environment: process.env,
+    developmentOverride: app.isPackaged ? undefined : process.env.COD_DESKTOP_PET_PATH,
+  });
+  return { ...result, status: { ...result.status, running: desktopPetIsRunning() } };
+}
+
+async function stopDesktopPet(): Promise<DesktopPetStatus> {
+  const processToStop = desktopPetProcess;
+  const proxyToStop = desktopPetProxy;
+  desktopPetProcess = null;
+  desktopPetProxy = null;
+  await terminateChildProcess(processToStop);
+  if (proxyToStop) await proxyToStop.close().catch(() => undefined);
+  return (await desktopPetDiscovery()).status;
+}
+
+function validateDesktopPetLaunchConfig(config: DesktopPetLaunchConfig): void {
+  if (typeof config?.token !== 'string' || !config.token || config.token.length > 8_192 || /[\0\r\n]/.test(config.token)) {
+    throw new Error('请先登录 COD，再启动桌面伙伴。');
+  }
+  if (typeof config.sourceId !== 'string' || !/^[a-z0-9-]{2,40}$/.test(config.sourceId)) throw new Error('请选择可用的模型源。');
+  if (typeof config.modelId !== 'string' || !config.modelId || config.modelId.length > 200 || /[\0\r\n]/.test(config.modelId)) {
+    throw new Error('请选择可用的模型。');
+  }
+}
+
+async function launchDesktopPet(config: DesktopPetLaunchConfig): Promise<DesktopPetLaunchResult> {
+  validateDesktopPetLaunchConfig(config);
+  const discovery = await desktopPetDiscovery();
+  if (!discovery.installation || !discovery.status.verified) {
+    const message = discovery.status.reason === 'integrity-failed'
+      ? '检测到桌宠文件，但它与已审计的 0.7.0 版本不一致，COD 已拒绝运行。'
+      : '尚未安装已审计的 COD 桌宠 0.7.0。';
+    throw new Error(message);
+  }
+  if (desktopPetIsRunning()) return { status: discovery.status, started: false, focusedExisting: false };
+  await stopDesktopPet();
+  const proxy = await startPetChatProxy({ controlPlaneUrl, ...config });
+  const installation = discovery.installation;
+  let spawned: ChildProcess;
+  try {
+    spawned = spawn(installation.executablePath, [], {
+      cwd: installation.rootPath,
+      stdio: 'ignore',
+      windowsHide: true,
+      env: desktopPetEnvironment(process.env, { url: proxy.url, secret: proxy.secret, model: config.modelId }),
+    });
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error) => { spawned.removeListener('spawn', onSpawn); reject(error); };
+      const onSpawn = () => { spawned.removeListener('error', onError); resolve(); };
+      spawned.once('error', onError);
+      spawned.once('spawn', onSpawn);
+    });
+  } catch (error) {
+    await proxy.close().catch(() => undefined);
+    throw error;
+  }
+  desktopPetProcess = spawned;
+  desktopPetProxy = proxy;
+  const clearDesktopPet = () => {
+    if (desktopPetProcess !== spawned) return;
+    desktopPetProcess = null;
+    const proxyToClose = desktopPetProxy;
+    desktopPetProxy = null;
+    if (proxyToClose) void proxyToClose.close().catch(() => undefined);
+  };
+  spawned.once('exit', clearDesktopPet);
+  spawned.once('error', clearDesktopPet);
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  const running = desktopPetProcess === spawned && spawned.exitCode === null && spawned.signalCode === null;
+  const status = { ...(await desktopPetDiscovery()).status, running };
+  return { status, started: running, focusedExisting: !running && spawned.exitCode === 0 };
 }
 
 async function resolveProjectRoot(root: string): Promise<string> {
@@ -169,46 +401,37 @@ async function approvedProjectRoot(root: string): Promise<string> {
   return resolved;
 }
 
-function parseCommand(rawCommand: string): string[] {
-  const parts: string[] = [];
-  let current = '';
-  let quote: '"' | "'" | null = null;
-  let escaped = false;
-  for (const character of rawCommand.trim()) {
-    if (escaped) { current += character; escaped = false; continue; }
-    if (character === '\\' && quote !== "'") { escaped = true; continue; }
-    if (quote) { if (character === quote) quote = null; else current += character; continue; }
-    if (character === '"' || character === "'") { quote = character; continue; }
-    if (/\s/.test(character)) { if (current) { parts.push(current); current = ''; } continue; }
-    current += character;
-  }
-  if (quote || escaped) throw new Error('Command contains an unfinished quote or escape');
-  if (current) parts.push(current);
-  return parts;
+function approvedProjectRootsFile(): string {
+  return path.join(app.getPath('userData'), 'approved-project-roots.json');
 }
 
-function isDestructiveGitCommand(parts: string[]): boolean {
-  if (parts[0] !== 'git') return false;
-  const subcommand = parts[1];
-  return subcommand === 'clean'
-    || (subcommand === 'reset' && parts.includes('--hard'))
-    || (subcommand === 'checkout' && parts.includes('--'))
-    || subcommand === 'restore'
-    || (subcommand === 'push' && parts.some((part) => part === '--force' || part === '-f'));
+async function restoreApprovedProjectRoots(): Promise<void> {
+  const restored = await loadApprovedProjectRoots(approvedProjectRootsFile());
+  approvedProjectRoots.clear();
+  for (const root of restored) approvedProjectRoots.add(root);
+  await saveApprovedProjectRoots(approvedProjectRootsFile(), approvedProjectRoots).catch(() => undefined);
 }
 
-async function collectFiles(root: string, directory = root, depth = 0): Promise<WorkspaceFile[]> {
-  if (depth > 4) return [];
-  const entries = await fs.readdir(directory, { withFileTypes: true });
-  const visible = entries.filter((entry) => !entry.name.startsWith('.') && entry.name !== 'node_modules' && entry.name !== 'dist' && entry.name !== 'target');
-  const files: WorkspaceFile[] = [];
-  for (const entry of visible.slice(0, 200)) {
-    const absolute = path.join(directory, entry.name);
-    const relativePath = path.relative(root, absolute);
-    files.push({ name: entry.name, path: relativePath, kind: entry.isDirectory() ? 'directory' : 'file', depth });
-    if (entry.isDirectory()) files.push(...await collectFiles(root, absolute, depth + 1));
+async function rememberApprovedProjectRoot(root: string): Promise<void> {
+  const previousRoots = [...approvedProjectRoots];
+  approvedProjectRoots.delete(root);
+  approvedProjectRoots.add(root);
+  while (approvedProjectRoots.size > maximumApprovedProjectRoots) {
+    const oldest = approvedProjectRoots.values().next().value as string | undefined;
+    if (!oldest) break;
+    approvedProjectRoots.delete(oldest);
   }
-  return files;
+  try {
+    await saveApprovedProjectRoots(approvedProjectRootsFile(), approvedProjectRoots);
+  } catch (error) {
+    approvedProjectRoots.clear();
+    for (const previousRoot of previousRoots) approvedProjectRoots.add(previousRoot);
+    throw error;
+  }
+}
+
+async function validateCommandPaths(root: string, candidates: string[]): Promise<void> {
+  for (const candidate of candidates) await validateCommandPath(root, candidate);
 }
 
 async function createWindow() {
@@ -223,90 +446,154 @@ async function createWindow() {
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(moduleDirectory, 'preload.cjs'),
+      additionalArguments: [`--cod-control-plane-url=${encodeURIComponent(controlPlaneUrl)}`],
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      devTools: !app.isPackaged,
       webSecurity: true,
       allowRunningInsecureContent: false,
+      backgroundThrottling: false,
       spellcheck: true,
     },
   });
 
   window.webContents.setWindowOpenHandler(({ url }) => {
-    if (isTrustedExternalUrl(url)) void shell.openExternal(url);
+    openExternalUrl(url);
     return { action: 'deny' };
   });
   window.webContents.on('will-navigate', (event, url) => {
-    const allowedDevelopmentNavigation = !app.isPackaged && url.startsWith(developmentUrl);
+    const allowedDevelopmentNavigation = !app.isPackaged && isAllowedDevelopmentNavigation(url, developmentUrl);
     if (allowedDevelopmentNavigation) return;
     event.preventDefault();
-    if (isTrustedExternalUrl(url)) void shell.openExternal(url);
+    openExternalUrl(url);
+  });
+  window.webContents.on('will-frame-navigate', (event) => {
+    if (!event.isMainFrame) event.preventDefault();
   });
   window.webContents.on('will-attach-webview', (event) => event.preventDefault());
+  window.webContents.on('did-start-navigation', (_event, _url, _isInPlace, isMainFrame) => {
+    if (isMainFrame) void invalidateAndStopGooseSidecar();
+  });
+  window.webContents.on('render-process-gone', () => { void invalidateAndStopGooseSidecar(); });
+  window.webContents.on('destroyed', () => { void invalidateAndStopGooseSidecar(); });
 
   if (!app.isPackaged) {
-    await window.loadURL(developmentUrl);
+    await window.loadURL(new URL('/app/', developmentUrl).href);
   } else {
-    await window.loadFile(path.join(process.resourcesPath, 'web', 'index.html'));
+    await window.loadFile(packagedEntryPath);
   }
 }
 
-ipcMain.handle('cod:select-project', async () => {
+ipcMain.handle('cod:select-project', async (event) => {
+  assertTrustedIpcSender(event);
   const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] });
   if (result.canceled) return null;
   const root = await resolveProjectRoot(result.filePaths[0]);
-  approvedProjectRoots.add(root);
+  await rememberApprovedProjectRoot(root);
   return root;
 });
 
-ipcMain.handle('cod:list-files', async (_event, root: string) => {
+ipcMain.handle('cod:list-files', async (event, root: string) => {
+  assertTrustedIpcSender(event);
   const resolvedRoot = await approvedProjectRoot(root);
-  return collectFiles(resolvedRoot);
+  return collectWorkspaceFiles(resolvedRoot);
 });
 
-ipcMain.handle('cod:read-text-file', async (_event, root: string, relativePath: string) => {
+ipcMain.handle('cod:read-text-file', async (event, root: string, relativePath: string) => {
+  assertTrustedIpcSender(event);
   const resolvedRoot = await approvedProjectRoot(root);
-  const target = await fs.realpath(path.join(resolvedRoot, relativePath));
-  if (!isWithinRoot(resolvedRoot, target)) throw new Error('File is outside the selected project');
-  const stats = await fs.stat(target);
-  if (stats.size > 1024 * 1024) throw new Error('File is larger than 1 MB');
-  return fs.readFile(target, 'utf8');
+  return readWorkspaceTextFile(resolvedRoot, relativePath);
 });
 
-ipcMain.handle('cod:git-diff', async (_event, root: string) => {
+ipcMain.handle('cod:git-diff', async (event, root: string) => {
+  assertTrustedIpcSender(event);
   try {
     const resolvedRoot = await approvedProjectRoot(root);
     try {
-      const { stdout } = await execFileAsync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: resolvedRoot, maxBuffer: 64 * 1024 });
+      const { stdout } = await executeGitCommand(resolvedRoot, ['rev-parse', '--is-inside-work-tree'], {
+        maxBuffer: 64 * 1024,
+        timeoutMilliseconds: gitProbeTimeoutMilliseconds,
+      });
       if (stdout.trim() !== 'true') return '当前目录不是 Git 工作区，暂无可显示的改动。';
-    } catch {
+    } catch (error) {
+      if (commandTimedOut(error)) return 'Git 状态读取超时；项目文件仍可正常使用。可检查仓库元数据权限后重试。';
       return '当前目录不是 Git 仓库，暂无可显示的改动。初始化 Git 后即可在这里查看变更。';
     }
-    const [{ stdout: unstaged }, { stdout: staged }] = await Promise.all([
-      execFileAsync('git', ['diff', '--no-ext-diff', '--'], { cwd: resolvedRoot, maxBuffer: 2 * 1024 * 1024 }),
-      execFileAsync('git', ['diff', '--cached', '--no-ext-diff', '--'], { cwd: resolvedRoot, maxBuffer: 2 * 1024 * 1024 }),
+    const [{ stdout: unstaged }, { stdout: staged }, untracked] = await Promise.all([
+      executeGitCommand(resolvedRoot, unstagedGitDiffArguments(), { maxBuffer: 2 * 1024 * 1024, timeoutMilliseconds: gitDiffTimeoutMilliseconds }),
+      executeGitCommand(resolvedRoot, stagedGitDiffArguments(), { maxBuffer: 2 * 1024 * 1024, timeoutMilliseconds: gitDiffTimeoutMilliseconds }),
+      collectUntrackedDiff(resolvedRoot),
     ]);
-    return [unstaged && '# Unstaged changes\n' + unstaged, staged && '# Staged changes\n' + staged].filter(Boolean).join('\n');
+    return [
+      unstaged && '# Unstaged changes\n' + unstaged,
+      staged && '# Staged changes\n' + staged,
+      untracked && '# Untracked files\n' + untracked,
+    ].filter(Boolean).join('\n');
   } catch (error) {
-    return error instanceof Error ? error.message : 'Unable to read git diff';
+    if (commandTimedOut(error)) return 'Git 改动读取超时；项目文件仍可正常使用。请缩小仓库范围或稍后重试。';
+    return 'Git 改动读取失败；项目文件仍可正常使用。';
   }
 });
 
-ipcMain.handle('cod:get-goose-acp-url', (_event, config: AgentGatewayConfig) => ensureGooseSidecar(config));
-ipcMain.handle('cod:stop-goose', () => stopGooseSidecar());
+ipcMain.handle('cod:get-goose-acp-url', (event, config: AgentGatewayConfig) => {
+  assertTrustedIpcSender(event);
+  return ensureGooseSidecar(config);
+});
+ipcMain.handle('cod:stop-goose', (event) => {
+  assertTrustedIpcSender(event);
+  return invalidateAndStopGooseSidecar();
+});
+ipcMain.handle('cod:get-taskboard-url', (event) => {
+  assertTrustedIpcSender(event);
+  return resolveTaskboardUrl({
+    configuredUrl: process.env.COD_TASKBOARD_URL,
+    configuredRuntimeFile: process.env.COD_TASKBOARD_RUNTIME_FILE,
+    homeDirectory: app.getPath('home'),
+    platform: process.platform,
+  });
+});
+ipcMain.handle('cod:get-desktop-pet-status', async (event) => {
+  assertTrustedIpcSender(event);
+  return (await desktopPetDiscovery()).status;
+});
+ipcMain.handle('cod:launch-desktop-pet', (event, config: DesktopPetLaunchConfig) => {
+  assertTrustedIpcSender(event);
+  return launchDesktopPet(config);
+});
+ipcMain.handle('cod:stop-desktop-pet', (event) => {
+  assertTrustedIpcSender(event);
+  return stopDesktopPet();
+});
 
-ipcMain.handle('cod:run-command', async (_event, root: string, rawCommand: string): Promise<TerminalResult> => {
+ipcMain.handle('cod:run-command', async (event, root: string, rawCommand: string): Promise<TerminalResult> => {
+  assertTrustedIpcSender(event);
+  if (typeof rawCommand !== 'string' || rawCommand.length > 32 * 1024) {
+    return { command: typeof rawCommand === 'string' ? rawCommand.slice(0, 200) : '', output: 'Command is invalid or too long.', exitCode: 126 };
+  }
   let parts: string[];
   try { parts = parseCommand(rawCommand); }
   catch (error) { return { command: rawCommand, output: error instanceof Error ? error.message : 'Invalid command', exitCode: 126 }; }
   const executable = parts.shift();
-  if (!executable || !allowedCommands.has(executable)) {
-    return { command: rawCommand, output: 'Command is not in the COD allowlist.', exitCode: 126 };
-  }
-  if (isDestructiveGitCommand([executable, ...parts])) return { command: rawCommand, output: 'Destructive Git commands are blocked in the embedded terminal.', exitCode: 126 };
+  if (!executable) return { command: rawCommand, output: 'Command is empty.', exitCode: 126 };
+  const policyViolation = commandPolicyViolation(executable, parts);
+  if (policyViolation) return { command: rawCommand, output: policyViolation, exitCode: 126 };
   try {
     const resolvedRoot = await approvedProjectRoot(root);
-    const { stdout, stderr } = await execFileAsync(executable, parts, { cwd: resolvedRoot, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
+    await validateCommandPaths(resolvedRoot, commandPathCandidates(executable, parts));
+    let invocation;
+    try {
+      invocation = resolveCommandInvocation(executable, parts);
+    } catch (error) {
+      return { command: rawCommand, output: error instanceof Error ? error.message : 'Command is invalid', exitCode: 126 };
+    }
+    const { stdout, stderr } = await execFileAsync(invocation.executable, invocation.args, {
+      cwd: resolvedRoot,
+      timeout: 120_000,
+      maxBuffer: 4 * 1024 * 1024,
+      killSignal: 'SIGKILL',
+      windowsHide: true,
+    });
     return { command: rawCommand, output: `${stdout}${stderr}`.trim(), exitCode: 0 };
   } catch (error) {
     const details = error as Error & { stdout?: string; stderr?: string; code?: number };
@@ -314,16 +601,53 @@ ipcMain.handle('cod:run-command', async (_event, root: string, rawCommand: strin
   }
 });
 
-app.whenReady().then(async () => {
-  session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
-  session.defaultSession.setPermissionCheckHandler(() => false);
-  await createWindow();
-  app.on('activate', async () => {
-    if (BrowserWindow.getAllWindows().length === 0) await createWindow();
+if (hasSingleInstanceLock) {
+  app.whenReady().then(async () => {
+    if (runtimeConfigurationError) {
+      dialog.showErrorBox('COD 启动配置无效', runtimeConfigurationError.message);
+      app.quit();
+      return;
+    }
+    session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+    session.defaultSession.setPermissionCheckHandler(() => false);
+    session.defaultSession.setDevicePermissionHandler(() => false);
+    session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => callback({}));
+    session.defaultSession.on('will-download', (event) => event.preventDefault());
+    await cleanupAbandonedGooseSidecar(gooseOwnershipFile()).catch(() => undefined);
+    await restoreApprovedProjectRoots();
+    await createWindow();
+    app.on('activate', async () => {
+      if (BrowserWindow.getAllWindows().length === 0) await createWindow();
+    });
   });
-});
 
-app.on('window-all-closed', () => {
-  void stopGooseSidecar();
-  if (process.platform !== 'darwin') app.quit();
-});
+  app.on('second-instance', () => {
+    const window = BrowserWindow.getAllWindows()[0];
+    if (!window) return;
+    if (window.isMinimized()) window.restore();
+    window.show();
+    window.focus();
+  });
+
+  app.on('window-all-closed', () => {
+    void invalidateAndStopGooseSidecar();
+    void stopDesktopPet();
+    if (process.platform !== 'darwin') app.quit();
+  });
+
+  app.on('before-quit', () => { void invalidateAndStopGooseSidecar(); void stopDesktopPet(); });
+  process.once('exit', () => { forceTerminateChildProcess(gooseSidecar); forceTerminateChildProcess(desktopPetProcess); });
+
+  let stoppingForSignal = false;
+  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
+    process.once(signal, () => {
+      if (stoppingForSignal) {
+        forceTerminateChildProcess(gooseSidecar);
+        forceTerminateChildProcess(desktopPetProcess);
+        process.exit(1);
+      }
+      stoppingForSignal = true;
+      void Promise.all([invalidateAndStopGooseSidecar(), stopDesktopPet()]).finally(() => { process.kill(process.pid, signal); });
+    });
+  }
+}

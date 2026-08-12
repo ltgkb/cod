@@ -1,21 +1,32 @@
 import type { ProjectSnapshot } from './types';
 
+export function desktopGitDiffError(diff: string): string | null {
+  return /^(?:Git (?:状态|改动)读取(?:超时|失败)|Unable to read git diff)/.test(diff) ? diff : null;
+}
+
 export const hasDesktopBridge = () => Boolean(window.codDesktop);
 
-export async function openProject(): Promise<ProjectSnapshot | null> {
+export async function selectProjectRoot(): Promise<string | null> {
   if (!window.codDesktop) return null;
-  const root = await window.codDesktop.selectProject();
-  if (!root) return null;
-  return loadProject(root);
+  return window.codDesktop.selectProject();
+}
+
+export async function loadProjectFiles(root: string): Promise<ProjectSnapshot | null> {
+  if (!window.codDesktop) return null;
+  const files = await window.codDesktop.listFiles(root);
+  return { root, files, diff: '', selectedFile: null, selectedContent: '' };
+}
+
+export async function loadProjectDiff(root: string): Promise<string | null> {
+  if (!window.codDesktop) return null;
+  return window.codDesktop.gitDiff(root);
 }
 
 export async function loadProject(root: string): Promise<ProjectSnapshot | null> {
-  if (!window.codDesktop) return null;
-  const [files, diff] = await Promise.all([
-    window.codDesktop.listFiles(root),
-    window.codDesktop.gitDiff(root),
-  ]);
-  return { root, files, diff, selectedFile: null, selectedContent: '' };
+  const snapshot = await loadProjectFiles(root);
+  if (!snapshot) return null;
+  const diff = await loadProjectDiff(root);
+  return diff === null ? null : { ...snapshot, diff };
 }
 
 export async function readProjectFile(root: string, relativePath: string): Promise<string> {

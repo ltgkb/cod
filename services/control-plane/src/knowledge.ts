@@ -8,6 +8,10 @@ const samples: KnowledgeHit[] = [
   { id: 'wiki-token-billing', title: 'KAI Token 计费说明', excerpt: '余额按模型实际输入和输出 Token 扣减，所有流水可追溯。', url: 'https://wiki.kai.com/token-billing', score: 0.88 },
 ];
 
+// Public-chat answers can include retrieval and generation; production calls
+// occasionally exceed 15 seconds even while the upstream remains healthy.
+const wikiRequestTimeoutMs = 45_000;
+
 export class KnowledgeAdapter {
   private readonly conversationIds = new Map<string, string>();
 
@@ -41,7 +45,7 @@ export class KnowledgeAdapter {
           conversation_id: conversationKey ? this.conversationIds.get(conversationKey) ?? null : null,
           language: 'zh-CN',
         }),
-        signal: AbortSignal.timeout(15_000),
+        signal: AbortSignal.timeout(wikiRequestTimeoutMs),
       });
     } catch {
       throw new HttpError('KAI Wiki is unavailable', 502, 'wiki_unavailable');

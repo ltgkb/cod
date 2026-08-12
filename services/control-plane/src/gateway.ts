@@ -59,6 +59,23 @@ const demoModels: ModelInfo[] = [
   { id: 'chat-fast', label: 'KAI Chat Fast', contextWindow: 128_000, inputPricePerMillionCents: 80, outputPricePerMillionCents: 320 },
 ];
 const preferredModelOrder = ['glm-5.2', 'glm-4.7', 'deepseek-v3.2', 'gpt-5.2'];
+const maximumCatalogModels = 200;
+const maximumModelIdLength = 200;
+
+function validModelId(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const id = value.trim();
+  return id && id.length <= maximumModelIdLength && !/[\u0000-\u001f\u007f]/u.test(id) ? id : null;
+}
+
+function advertisedModelIds(value: unknown): Set<string> {
+  if (!Array.isArray(value)) return new Set();
+  return new Set(value.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const id = validModelId((item as { id?: unknown }).id);
+    return id ? [id] : [];
+  }));
+}
 
 function responseData<T>(value: unknown): T {
   if (value && typeof value === 'object' && 'data' in value) return (value as { data: T }).data;
@@ -66,8 +83,7 @@ function responseData<T>(value: unknown): T {
 }
 
 function sourceNote(source: ModelSourceConfig, callable: boolean): string {
-  const attribution = source.commissionRateBps > 0 ? `，按 ${(source.commissionRateBps / 100).toFixed(2)}% 记录渠道分成` : '，分成比例待商务配置';
-  if (callable) return `界面按 ${source.label} 展示和归因；真实调用与主结算统一走 ${new URL(source.baseUrl).host}${attribution}`;
+  if (callable) return `界面按 ${source.label} 展示和归因；真实调用与主结算统一走 ${new URL(source.baseUrl).host}`;
   return `模型目录来自 ${new URL(source.catalogUrl).host}；配置 ai.kai.com 密钥后即可调用`;
 }
 
@@ -179,7 +195,27 @@ export class AiGateway {
       this.cache = { expiresAt: Date.now() + 60_000, value };
       return value;
     }
-    const value = await Promise.all(this.config.modelSources.map((source) => this.loadSource(source)));
+    const upstreamLoads = new Map<string, Promise<ModelSourceInfo>>();
+    const value = await Promise.all(this.config.modelSources.map(async (source) => {
+      const upstreamKey = [source.baseUrl, source.catalogUrl, source.statusUrl, source.apiKey ?? ''].join('\u0000');
+      let upstreamLoad = upstreamLoads.get(upstreamKey);
+      if (!upstreamLoad) {
+        upstreamLoad = this.loadSource(source);
+        upstreamLoads.set(upstreamKey, upstreamLoad);
+      }
+      const upstream = await upstreamLoad;
+      return {
+        ...upstream,
+        id: source.id,
+        label: source.label,
+        upstreamSourceId: source.upstreamSourceId,
+        paymentDirection: source.paymentDirection,
+        commissionRateBps: source.commissionRateBps,
+        note: upstream.status === 'unavailable'
+          ? `${source.label} 定价状态暂时无法验证，已停止调用和计费`
+          : sourceNote(source, upstream.callable),
+      };
+    }));
     this.cache = { expiresAt: Date.now() + 300_000, value };
     return value;
   }
@@ -199,9 +235,9 @@ export class AiGateway {
 
   async getModel(sourceId: string, modelId: string): Promise<{ source: ModelSourceInfo; model: ModelInfo }> {
     const source = await this.getSource(sourceId);
+    if (!source.callable) throw new HttpError('Selected model source is catalog-only until its API key is configured', 503, 'source_unavailable');
     const model = source.models.find((item) => item.id === modelId);
     if (!model) throw new HttpError('Unknown model for selected source', 400, 'unknown_model');
-    if (!source.callable) throw new HttpError('Selected model source is catalog-only until its API key is configured', 503, 'source_unavailable');
     return { source, model };
   }
 
@@ -219,7 +255,11 @@ export class AiGateway {
   }
 
   async proxyChat(sourceId: string, body: unknown, requestId: string = randomUUID(), signal?: AbortSignal): Promise<Response> {
-    if (sourceId === 'demo') return this.demoResponse(body);
+    if (sourceId === 'demo') {
+      const source = await this.getSource(sourceId);
+      if (source.upstreamSourceId !== 'demo' || source.status !== 'demo') throw new HttpError('Unknown model source', 400, 'unknown_source');
+      return this.demoResponse(body);
+    }
     const source = this.config.modelSources.find((item) => item.id === sourceId);
     if (!source?.apiKey) throw new HttpError('Selected model source is not configured', 503, 'source_unavailable');
     let lastError: unknown;
@@ -259,24 +299,50 @@ export class AiGateway {
       source.apiKey ? this.fetchJson(`${source.baseUrl.replace(/\/$/, '')}/models`, { authorization: `Bearer ${source.apiKey}` }) : Promise.resolve(null),
     ]);
     const pricing = pricingResult.status === 'fulfilled' ? responseData<PricingRow[]>(pricingResult.value) : [];
-    const status = statusResult.status === 'fulfilled' ? responseData<PricingStatus>(statusResult.value) : {};
-    const advertised = modelsResult.status === 'fulfilled' && modelsResult.value ? responseData<Array<{ id?: string }>>(modelsResult.value) : [];
-    const advertisedIds = new Set(advertised.map((item) => item.id).filter((id): id is string => Boolean(id)));
+    const status = statusResult.status === 'fulfilled' ? responseData<PricingStatus>(statusResult.value) : null;
+    const advertised = modelsResult.status === 'fulfilled' && modelsResult.value ? responseData<unknown>(modelsResult.value) : [];
+    const advertisedIds = advertisedModelIds(advertised);
     const authenticated = Boolean(source.apiKey && advertisedIds.size);
-    const quotaPerUnit = Number(status.quota_per_unit ?? 500_000);
-    const yuanPerUnit = Number(status.price ?? 7);
-    const models = (Array.isArray(pricing) ? pricing : []).flatMap((row): ModelInfo[] => {
-      const id = row.model_name?.trim(); const ratio = Number(row.model_ratio); const completionRatio = Number(row.completion_ratio ?? 1);
+    const quotaPerUnit = Number(status?.quota_per_unit);
+    const yuanPerUnit = Number(status?.price);
+    if (!Number.isFinite(quotaPerUnit) || quotaPerUnit <= 0 || !Number.isFinite(yuanPerUnit) || yuanPerUnit <= 0) {
+      return {
+        id: source.id,
+        label: source.label,
+        upstreamSourceId: source.upstreamSourceId,
+        status: 'unavailable',
+        callable: false,
+        paymentDirection: source.paymentDirection,
+        commissionRateBps: source.commissionRateBps,
+        models: [],
+        note: `${source.label} 定价状态暂时无法验证，已停止调用和计费`,
+      };
+    }
+    const parsedModels = (Array.isArray(pricing) ? pricing : []).flatMap((rawRow): ModelInfo[] => {
+      if (!rawRow || typeof rawRow !== 'object') return [];
+      const row = rawRow as PricingRow;
+      const id = validModelId(row.model_name); const ratio = Number(row.model_ratio); const completionRatio = Number(row.completion_ratio ?? 1);
       if (!id || row.quota_type !== 0 || !Number.isFinite(ratio) || ratio <= 0 || !Number.isFinite(completionRatio) || completionRatio <= 0) return [];
-      if (row.supported_endpoint_types && !row.supported_endpoint_types.includes('openai')) return [];
+      if (row.supported_endpoint_types !== undefined && (!Array.isArray(row.supported_endpoint_types) || !row.supported_endpoint_types.includes('openai'))) return [];
       if (authenticated && !advertisedIds.has(id)) return [];
       const inputPrice = Math.max(1, Math.ceil((ratio * 1_000_000 / quotaPerUnit) * yuanPerUnit * 100));
-      return [{ id, label: id, contextWindow: 0, inputPricePerMillionCents: inputPrice, outputPricePerMillionCents: Math.max(1, Math.ceil(inputPrice * completionRatio)) }];
+      const outputPrice = Math.max(1, Math.ceil(inputPrice * completionRatio));
+      if (!Number.isSafeInteger(inputPrice) || !Number.isSafeInteger(outputPrice)) return [];
+      return [{ id, label: id, contextWindow: 0, inputPricePerMillionCents: inputPrice, outputPricePerMillionCents: outputPrice }];
     }).sort((left, right) => {
       const leftRank = preferredModelOrder.indexOf(left.id); const rightRank = preferredModelOrder.indexOf(right.id);
       if (leftRank >= 0 || rightRank >= 0) return (leftRank < 0 ? Number.MAX_SAFE_INTEGER : leftRank) - (rightRank < 0 ? Number.MAX_SAFE_INTEGER : rightRank);
       return left.label.localeCompare(right.label);
     });
+    const conflicts = new Set<string>();
+    const uniqueModels = new Map<string, ModelInfo>();
+    for (const model of parsedModels) {
+      const existing = uniqueModels.get(model.id);
+      if (!existing) uniqueModels.set(model.id, model);
+      else if (existing.inputPricePerMillionCents !== model.inputPricePerMillionCents || existing.outputPricePerMillionCents !== model.outputPricePerMillionCents) conflicts.add(model.id);
+    }
+    for (const id of conflicts) uniqueModels.delete(id);
+    const models = [...uniqueModels.values()].slice(0, maximumCatalogModels);
     const callable = authenticated && models.length > 0;
     const statusName = callable ? 'live' : models.length ? 'catalog' : 'unavailable';
     return { id: source.id, label: source.label, upstreamSourceId: source.upstreamSourceId, status: statusName, callable, paymentDirection: source.paymentDirection, commissionRateBps: source.commissionRateBps, models, note: sourceNote(source, callable) };

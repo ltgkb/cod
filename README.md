@@ -31,7 +31,7 @@ npm run package:win
 
 ## Product behavior
 
-- Web and desktop clients use email/password authentication and retain the signed session on the current device. The deployed production configuration enables invite-only registration, and existing users can copy their immutable invite code from the account panel.
+- Web and desktop clients use email/password authentication and retain the signed session on the current device. Registration is open when enabled; invite codes are optional and only bind immutable referral attribution. Existing users can copy their code from the account panel.
 - Tasks, devices, status transitions, wallet entries, and audit records come from the control plane; the UI does not render static task or terminal-success fixtures.
 - The shared Web/mobile/desktop UI can create, search, synchronize, execute, retry, complete, and terminate tasks. Termination aborts task-bound model requests, stops the packaged Desktop Goose sidecar, releases reserved funds, persists the `cancelled` state, and remains visible from other devices. Local files, Git Diff, terminal commands, and Goose execution are available only through the desktop bridge.
 - Model sources are discovered from their live catalogs. The selected source controls the model list, upstream route, displayed price, wallet settlement, and ledger payment direction.
@@ -43,6 +43,9 @@ npm run package:win
 - The Feishu adapter supports official URL verification, signature validation, encrypted event decryption, tenant/open-id binding, message deduplication, `/run` and `/status`, and OpenAPI replies. WeCom remains behind the generic signed adapter until its application contract is supplied.
 - Hong Kong launches directly by default or with a five-minute signed SSO assertion when `KAI_HONGKONG_SSO_SECRET` is configured.
 - The packaged desktop receives its control-plane URL through `COD_CONTROL_PLANE_URL` and defaults to the current pilot server.
+- Desktop can discover an independently installed, loopback-only Dashi Taskboard companion as a transitional bridge. Setup and the data/security boundary are documented in `docs/DASHI_COMPANION_BRIDGE.md`; the license-safe native migration remains specified in `docs/DASHI_TASKBOARD_INTEGRATION.md`.
+- Desktop can verify and launch COD 桌面伙伴 0.7.0 on macOS, Windows, and Linux. Real chat uses an ephemeral loopback proxy so the companion never receives the COD login token. Installation paths, package hashes, and signing blockers are documented in `docs/DESKTOP_PET_INTEGRATION.md`.
+- The compute exchange covers rental, supply listing, third-party hosting, and equipment installment requests. Admins can review applicant details and issue an expiring quote; only the owning user can accept it before deployment. The lifecycle and responsibility boundary are documented in `docs/COMPUTE_MARKET_LIFECYCLE.md`.
 
 ## Production configuration
 
@@ -58,4 +61,4 @@ Configure model source keys only in `/etc/cod/control-plane.env`, for example `K
 
 `deploy/control-plane.env.example` lists all production-only secret and integration settings. Do not copy real values into Git.
 
-See `AUDIT_2026-08-10.md` for the latest verified production state, and `FUNCTION_AUDIT.md` for the broader internal scope and external integration boundaries.
+See `AUDIT_2026-08-10.md` for the latest verified production state, `FUNCTION_AUDIT.md` for the broader internal scope and external integration boundaries, `docs/KAI_ACCOUNT_INTEGRATION.md` for the reviewed KAI Account OIDC boundary and rollout gates, `docs/REGISTRATION_OPEN_RUNBOOK.md` for the OTP rollout gate, and `CLIENT_AUDIT_2026-08-11.md` for the latest Android, iOS, and Desktop validation.

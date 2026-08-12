@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 1,
+  "reviewExpiresOn": "2026-09-11",
+  "productionWorkspaces": [
+    "@cod/control-plane",
+    "@cod/web"
+  ],
+  "allowedAdvisories": [
+    {
+      "source": 1138808,
+      "ghsa": "GHSA-w3rx-r6r6-pgpr",
+      "url": "https://github.com/advisories/GHSA-w3rx-r6r6-pgpr",
+      "package": "image-size",
+      "severity": "high",
+      "range": "<=2.0.2"
+    },
+    {
+      "source": 1138809,
+      "ghsa": "GHSA-5p2g-fcmc-qvqq",
+      "url": "https://github.com/advisories/GHSA-5p2g-fcmc-qvqq",
+      "package": "image-size",
+      "severity": "high",
+      "range": "<=2.0.2"
+    }
+  ],
+  "affectedPackages": [
+    {
+      "name": "@expo/cli",
+      "nodePath": "node_modules/@expo/cli",
+      "version": "57.0.14",
+      "isDirect": false
+    },
+    {
+      "name": "@expo/metro",
+      "nodePath": "node_modules/@expo/metro",
+      "version": "56.0.0",
+      "isDirect": false
+    },
+    {
+      "name": "@expo/metro-config",
+      "nodePath": "node_modules/@expo/metro-config",
+      "version": "57.0.8",
+      "isDirect": false
+    },
+    {
+      "name": "@react-native/community-cli-plugin",
+      "nodePath": "node_modules/@react-native/community-cli-plugin",
+      "version": "0.86.2",
+      "isDirect": false
+    },
+    {
+      "name": "@react-native/virtualized-lists",
+      "nodePath": "node_modules/@react-native/virtualized-lists",
+      "version": "0.86.2",
+      "isDirect": false
+    },
+    {
+      "name": "expo",
+      "nodePath": "node_modules/expo",
+      "version": "57.0.12",
+      "isDirect": true
+    },
+    {
+      "name": "image-size",
+      "nodePath": "node_modules/image-size",
+      "version": "1.2.1",
+      "isDirect": false
+    },
+    {
+      "name": "metro",
+      "nodePath": "node_modules/metro",
+      "version": "0.84.4",
+      "isDirect": false
+    },
+    {
+      "name": "metro-config",
+      "nodePath": "node_modules/metro-config",
+      "version": "0.84.4",
+      "isDirect": false
+    },
+    {
+      "name": "metro-transform-worker",
+      "nodePath": "node_modules/metro-transform-worker",
+      "version": "0.84.4",
+      "isDirect": false
+    },
+    {
+      "name": "react-native",
+      "nodePath": "node_modules/react-native",
+      "version": "0.86.2",
+      "isDirect": true
+    }
+  ],
+  "lockfile": {
+    "lockfileVersion": 3,
+    "imageSize": {
+      "nodePath": "node_modules/image-size",
+      "version": "1.2.1",
+      "integrity": "sha512-rH+46sQJ2dlwfjfhCyNx5thzrv+dtmBIhPHk0zgRUukHzZ/kRueTJXoYYsclBaKcSMBWuGbOFXtioLpzTb5euw==",
+      "onlyParent": {
+        "nodePath": "node_modules/metro",
+        "dependencyType": "dependencies",
+        "dependencyName": "image-size",
+        "specifier": "^1.0.2"
+      }
+    },
+    "dependencyChain": [
+      {
+        "fromPath": "apps/mobile",
+        "dependencyType": "dependencies",
+        "dependencyName": "expo",
+        "specifier": "~57.0.12",
+        "toPath": "node_modules/expo",
+        "toVersion": "57.0.12"
+      },
+      {
+        "fromPath": "node_modules/expo",
+        "dependencyType": "dependencies",
+        "dependencyName": "@expo/metro",
+        "specifier": "~56.0.0",
+        "toPath": "node_modules/@expo/metro",
+        "toVersion": "56.0.0"
+      },
+      {
+        "fromPath": "node_modules/@expo/metro",
+        "dependencyType": "dependencies",
+        "dependencyName": "metro",
+        "specifier": "0.84.4",
+        "toPath": "node_modules/metro",
+        "toVersion": "0.84.4"
+      },
+      {
+        "fromPath": "node_modules/metro",
+        "dependencyType": "dependencies",
+        "dependencyName": "image-size",
+        "specifier": "^1.0.2",
+        "toPath": "node_modules/image-size",
+        "toVersion": "1.2.1"
+      }
+    ]
+  },
+  "mitigations": [
+    {
+      "path": "apps/mobile/metro.config.js",
+      "sha256": "5129af626ffdfc427a092d7b0e94902eb2c316f9378aa931ca0e0ce39d821e88",
+      "purpose": "Disable the unused HEIF, ICNS, JXL, and JXL-stream parsers before Metro processes assets."
+    },
+    {
+      "path": "apps/mobile/scripts/metro-security.test.cjs",
+      "sha256": "4b112a6332b59fcd1099279ee8a2c3f04f151b9a80cfd57e2f2853cc0cd29f6e",
+      "purpose": "Prove the vulnerable parsers reject input while supported PNG assets remain usable."
+    }
+  ],
+  "mitigationTest": {
+    "command": [
+      "node",
+      "--test",
+      "apps/mobile/scripts/metro-security.test.cjs"
+    ]
+  },
+  "rationale": "Expo 57 currently resolves image-size 1.2.1 through Metro and no upstream patched release is available. COD does not accept the vulnerable formats as Metro assets and disables all affected parsers before asset inspection. This exception is mobile-tooling-only, is not valid for the control-plane or Web production workspaces, and must be reviewed by the expiry date."
+}
