@@ -33,3 +33,10 @@ test('workspace entry, manifest, and service worker share the /app/ scope', asyn
   assert.match(serviceWorker, /if \(!url\.pathname\.startsWith\('\/app\/'\)\) return/);
   assert.match(serviceWorker, /caches\.match\('\/app\/'\)/);
 });
+
+test('compute entry keeps deep-link assets rooted at the public origin', async () => {
+  const compute = await read('../compute/index.html');
+  assert.match(compute, /<base href="\/" \/>/);
+  assert.match(compute, /src="\/src\/main\.tsx"/);
+  assert.match(compute, /<title>COD · 算力市场<\/title>/);
+});

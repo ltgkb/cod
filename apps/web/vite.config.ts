@@ -25,6 +25,7 @@ export default defineConfig(() => {
         input: {
           landing: resolve(__dirname, 'index.html'),
           app: resolve(__dirname, 'app/index.html'),
+          compute: resolve(__dirname, 'compute/index.html'),
         },
       },
     },
