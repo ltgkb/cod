@@ -230,12 +230,13 @@ describe('production-safe migrations and rate limits', () => {
     expect(deployScript.indexOf('sudo -u cod -- env -i')).toBeLessThan(deployScript.indexOf('release=%s (already active)'));
   });
 
-  it('keeps production registration closed until email ownership is verified', () => {
+  it('keeps the internal beta registration bypass explicit and separate from production secrets', () => {
     const runtime = readFileSync(new URL('../../../deploy/runtime.env', import.meta.url), 'utf8');
     const example = readFileSync(new URL('../../../deploy/control-plane.env.example', import.meta.url), 'utf8');
     const service = readFileSync(new URL('../../../deploy/cod-control-plane.service', import.meta.url), 'utf8');
 
-    expect(runtime).toMatch(/^COD_REGISTRATION_ENABLED=false$/m);
+    expect(runtime).toMatch(/^COD_REGISTRATION_ENABLED=true$/m);
+    expect(runtime).toMatch(/^COD_REGISTRATION_VERIFICATION_REQUIRED=false$/m);
     expect(runtime).toMatch(/^NODE_ENV=production$/m);
     expect(example).not.toMatch(/^COD_REGISTRATION_ENABLED=/m);
     expect(example).toContain('secret-file drift cannot reopen features');

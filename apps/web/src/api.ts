@@ -45,6 +45,12 @@ export interface VerifiedRegistrationInput {
   inviteCode?: string;
 }
 
+export interface DirectRegistrationInput {
+  email: string;
+  password: string;
+  inviteCode?: string;
+}
+
 export interface LegacyMigrationInput {
   email: string;
   password: string;
@@ -712,7 +718,7 @@ export async function verifyRegistrationPhone(challengeId: string, email: string
   });
 }
 
-export async function registerCod(input: VerifiedRegistrationInput | LegacyMigrationInput, options: AuthenticationRequestOptions = {}): Promise<string> {
+export async function registerCod(input: VerifiedRegistrationInput | DirectRegistrationInput | LegacyMigrationInput, options: AuthenticationRequestOptions = {}): Promise<string> {
   const headers = options.idempotencyKey ? { 'idempotency-key': options.idempotencyKey } : undefined;
   const registration = await request<{ token: string }>('/api/auth/register', undefined, {
     method: 'POST', body: JSON.stringify(input), headers, signal: options.signal,

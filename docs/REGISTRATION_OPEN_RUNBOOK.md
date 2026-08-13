@@ -1,6 +1,6 @@
 # Open registration runbook
 
-Status: code hardening complete; registration stays closed (`COD_REGISTRATION_ENABLED=false`) until an operator completes every step here and smoke-tests real delivery on a staging host. No step in this runbook commits secrets to Git, chat, or terminal output.
+Status: the controlled internal beta currently uses direct email-and-password registration (`COD_REGISTRATION_ENABLED=true`, `COD_REGISTRATION_VERIFICATION_REQUIRED=false`). This mode does not mark email or phone as verified and must not be used for public launch. The steps below are still required before switching `COD_REGISTRATION_VERIFICATION_REQUIRED=true`. No step in this runbook commits secrets to Git, chat, or terminal output.
 
 This runbook complements `COD_PROJECT_HANDOFF_2026-08-12.md`. The code changes in this round close the outbound DNS-rebinding TOCTOU, unify the decoy/resend semantics so accounts cannot be enumerated by status or timing, fill the env-example gaps, and add a fail-closed guard on the email-domain allowlist. None of these changes open registration by themselves.
 
@@ -55,7 +55,7 @@ COD_REGISTRATION_OUTBOUND_ALLOWED_HOSTS=<email-webhook-host>,<sms-webhook-host>
 
 - `COD_REGISTRATION_HMAC_KEY`: exactly 32 bytes, prefixed `base64url:` or `base64:`. Generate with `openssl rand 32 | base64` and prefix `base64url:`.
 - The webhook hostnames in `COD_REGISTRATION_OUTBOUND_ALLOWED_HOSTS` must exactly match the hosts in the two `*_WEBHOOK_URL` values (config cross-checks them).
-- `/etc/cod/runtime.env` (non-secret policy) already carries `COD_REGISTRATION_ENABLED=false`. Leave it `false` until section 4 passes.
+- `/etc/cod/runtime.env` (non-secret policy) may keep the controlled beta open with `COD_REGISTRATION_ENABLED=true` and `COD_REGISTRATION_VERIFICATION_REQUIRED=false`. Do not set verification to `true` until section 4 passes.
 
 ## 4. Smoke-test real delivery, then open the switch
 

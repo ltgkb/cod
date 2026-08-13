@@ -97,6 +97,7 @@ import {
   type PublicModelSourceInfo,
   type RemoteTask,
   type ReferralSummary,
+  type DirectRegistrationInput,
   type LegacyMigrationInput,
   type VerifiedRegistrationInput,
 } from './api';
@@ -393,7 +394,7 @@ interface LoginFormProps {
   onModeChange?: (mode: AuthMode) => void;
   onCancelAuthentication: () => void;
   onLogin: (email: string, password: string, signal: AbortSignal) => Promise<void>;
-  onRegister: (input: VerifiedRegistrationInput | LegacyMigrationInput, signal: AbortSignal, idempotencyKey?: string) => Promise<void>;
+  onRegister: (input: VerifiedRegistrationInput | DirectRegistrationInput | LegacyMigrationInput, signal: AbortSignal, idempotencyKey?: string) => Promise<void>;
 }
 
 function secondsUntil(value: string | undefined, now: number): number {
@@ -478,7 +479,9 @@ function LoginForm(props: LoginFormProps) {
   const migrationOnly = !registrationAvailable && capabilities?.authentication.legacyMigrationEnabled === true;
   const inviteRequired = capabilities?.authentication.inviteCodeRequired === true;
   const turnstileSiteKey = capabilities?.authentication.turnstileSiteKey?.trim() ?? '';
-  const nativeRegistration = Boolean(getCodRuntime().hostPlatform);
+  const verificationMethods = capabilities?.authentication.verificationMethods;
+  const verificationRequired = verificationMethods === undefined || verificationMethods.length > 0;
+  const nativeRegistration = Boolean(getCodRuntime().hostPlatform) && verificationRequired;
   const publicRegistrationUrl = safePublicRegistrationUrl(capabilities?.authentication.publicRegistrationUrl);
   const registering = mode === 'register';
   const emailResendSeconds = secondsUntil(emailDelivery?.resendAt, clock);
@@ -652,12 +655,22 @@ function LoginForm(props: LoginFormProps) {
     await execute((signal) => onRegister({ challengeId, email, phone, password, inviteCode: inviteCode.trim() || undefined }, signal, registrationIdempotencyKeyRef.current), '注册失败');
   };
 
+  const completeDirectRegistration = async () => {
+    if (password !== confirmPassword) {
+      setError('两次输入的密码不一致');
+      return;
+    }
+    if (!registrationIdempotencyKeyRef.current) registrationIdempotencyKeyRef.current = createClientId();
+    await execute((signal) => onRegister({ email: email.trim().toLowerCase(), password, inviteCode: inviteCode.trim() || undefined }, signal, registrationIdempotencyKeyRef.current), '注册失败');
+  };
+
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (mode === 'login') {
       await execute((signal) => onLogin(email.trim().toLowerCase(), password, signal), '登录失败');
       return;
     }
+    if (!verificationRequired) { await completeDirectRegistration(); return; }
     if (nativeRegistration) return;
     if (registrationStep === 'email') { await startEmailVerification(); return; }
     if (registrationStep === 'email-code') { await verifyEmailCode(); return; }
@@ -697,6 +710,7 @@ function LoginForm(props: LoginFormProps) {
 
   const primaryLabel = mode === 'login'
     ? resumeConversation ? '登录并继续' : '登录'
+    : !verificationRequired ? resumeConversation ? '注册并继续' : '注册并领取试用金'
     : registrationStep === 'email' ? '发送邮箱验证码'
     : registrationStep === 'email-code' ? '验证邮箱'
     : registrationStep === 'phone' ? '发送手机验证码'
@@ -711,9 +725,9 @@ function LoginForm(props: LoginFormProps) {
     <div className="login-copy">
       <span className="eyebrow">COD ACCOUNT</span>
       <h2>{resumeConversation ? `${mode === 'login' ? '登录' : '注册'}后继续对话` : mode === 'login' ? '登录 COD' : '注册 COD'}</h2>
-      <p>{resumeConversation ? '你的消息已保留，认证成功后会自动发送。' : mode === 'login' ? '已有账号可直接登录，新账号可从上方注册。' : `注册需同时验证邮箱和手机号。完成后获得 ¥10 试用金，有效期 30 天。${inviteRequired ? '需要有效邀请码。' : '邀请码选填。'}`}</p>
+      <p>{resumeConversation ? '你的消息已保留，认证成功后会自动发送。' : mode === 'login' ? '已有账号可直接登录，新账号可从上方注册。' : `${verificationRequired?'注册需同时验证邮箱和手机号。':'内测期间填写邮箱和密码即可注册。'}完成后获得 ¥10 试用金，有效期 30 天。${inviteRequired ? '需要有效邀请码。' : '邀请码选填。'}`}</p>
     </div>
-    {registering && !nativeRegistration && <ol className="registration-progress" aria-label="注册进度">
+    {registering && verificationRequired && !nativeRegistration && <ol className="registration-progress" aria-label="注册进度">
       {registrationSteps.map((step, index) => <li key={step.id} className={index < activeRegistrationIndex ? 'complete' : index === activeRegistrationIndex ? 'active' : ''} aria-current={index === activeRegistrationIndex ? 'step' : undefined}><span>{step.label}</span></li>)}
     </ol>}
     {capabilityError && <div className="notice error">{capabilityError}</div>}
@@ -722,28 +736,35 @@ function LoginForm(props: LoginFormProps) {
         <label>邮箱<input aria-label="邮箱" name="email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" required autoFocus /></label>
         <label>密码<input aria-label="密码" name="loginPassword" type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" minLength={6} maxLength={128} required /></label>
       </>}
+      {registering && !verificationRequired && <>
+        <label>邮箱<input aria-label="邮箱" name="registrationEmail" type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" required autoFocus /></label>
+        <label>设置密码<input aria-label="密码" name="newPassword" type="password" value={password} onChange={(event) => updateFinalCredential(() => setPassword(event.target.value))} autoComplete="new-password" minLength={6} maxLength={128} required /></label>
+        <label>确认密码<input aria-label="确认密码" name="confirmPassword" type="password" value={confirmPassword} onChange={(event) => updateFinalCredential(() => setConfirmPassword(event.target.value))} autoComplete="new-password" minLength={6} maxLength={128} required /></label>
+        <label>邀请码 <small>{inviteRequired ? '必填' : '选填'}</small><input aria-label="邀请码" name="inviteCode" value={inviteCode} onChange={(event) => updateFinalCredential(() => setInviteCode(event.target.value.toUpperCase()))} autoComplete="off" maxLength={32} placeholder="例如 KAI-XXXXXXXXXX" required={inviteRequired} /></label>
+        <p className="password-hint">密码须为 6-128 位，并同时包含字母和数字。内测期间暂不要求邮箱或手机验证码。</p>
+      </>}
       {registering && nativeRegistration && <div className="native-registration-handoff"><ShieldCheck weight="bold" /><div><strong>请先在网页完成注册</strong><p>邮箱、手机验证需在安全网页中完成。注册后回到 App 使用邮箱密码登录。</p>{!publicRegistrationUrl && <p className="native-registration-unavailable">注册地址暂未下发，请稍后刷新。</p>}</div>{publicRegistrationUrl && <button type="button" className="primary-button" onClick={() => void openCodExternalUrl(publicRegistrationUrl)}><ArrowSquareOut /> 打开网页注册</button>}</div>}
-      {registering && !nativeRegistration && registrationStep === 'email' && <>
+      {registering && verificationRequired && !nativeRegistration && registrationStep === 'email' && <>
         <label>邮箱<input aria-label="邮箱" name="registrationEmail" type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" required autoFocus /></label>
         {turnstileSiteKey && <TurnstileWidget siteKey={turnstileSiteKey} action="cod_registration_email" resetNonce={turnstileResetNonce} onToken={setHumanChallengeToken} onError={setError} />}
       </>}
-      {registering && !nativeRegistration && registrationStep === 'email-code' && <>
+      {registering && verificationRequired && !nativeRegistration && registrationStep === 'email-code' && <>
         <button type="button" className="auth-step-back" onClick={changeEmail} disabled={submitting}>更换邮箱</button>
         <label>邮箱验证码<input key="email-code" className="verification-code-input" aria-label="邮箱验证码" name="emailCode" value={emailCode} onChange={(event) => setEmailCode(event.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} required autoFocus /></label>
         <div className="verification-delivery" aria-live="polite"><span>验证码已发送至 <strong>{emailDelivery?.maskedDestination}</strong></span><button type="button" onClick={() => void resendEmailVerification()} disabled={submitting || emailResendSeconds > 0}>{emailResendSeconds > 0 ? `重新发送 (${emailResendSeconds}s)` : '重新发送'}</button></div>
       </>}
-      {registering && !nativeRegistration && registrationStep === 'phone' && <>
+      {registering && verificationRequired && !nativeRegistration && registrationStep === 'phone' && <>
         <button type="button" className="auth-step-back" onClick={changeEmail} disabled={submitting}>更换邮箱</button>
         <div className="verified-destination"><Check weight="bold" /><span>邮箱已验证<strong>{email}</strong></span></div>
         <label>手机号 <small>请包含国家或地区码</small><input aria-label="手机号" name="phone" type="tel" value={phone} onChange={(event) => setPhone(event.target.value)} inputMode="tel" autoComplete="tel" placeholder="+8613800138000" maxLength={24} required autoFocus /></label>
         {turnstileSiteKey && <TurnstileWidget siteKey={turnstileSiteKey} action="cod_registration_phone" resetNonce={turnstileResetNonce} onToken={setHumanChallengeToken} onError={setError} />}
       </>}
-      {registering && !nativeRegistration && registrationStep === 'phone-code' && <>
+      {registering && verificationRequired && !nativeRegistration && registrationStep === 'phone-code' && <>
         <button type="button" className="auth-step-back" onClick={changePhone} disabled={submitting}>更换手机号</button>
         <label>手机验证码<input key="phone-code" className="verification-code-input" aria-label="手机验证码" name="phoneCode" value={phoneCode} onChange={(event) => setPhoneCode(event.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} required autoFocus /></label>
         <div className="verification-delivery" aria-live="polite"><span>验证码已发送至 <strong>{phoneDelivery?.maskedDestination}</strong></span><button type="button" onClick={() => void resendPhoneVerification()} disabled={submitting || phoneResendSeconds > 0}>{phoneResendSeconds > 0 ? `重新发送 (${phoneResendSeconds}s)` : '重新发送'}</button></div>
       </>}
-      {registering && !nativeRegistration && registrationStep === 'password' && <>
+      {registering && verificationRequired && !nativeRegistration && registrationStep === 'password' && <>
         <button type="button" className="auth-step-back" onClick={changePhone} disabled={submitting}>更换手机号</button>
         <div className="verified-destination"><Check weight="bold" /><span>邮箱和手机号已验证<strong>{email}<i>{phone}</i></strong></span></div>
         <label>设置密码<input aria-label="密码" name="newPassword" type="password" value={password} onChange={(event) => updateFinalCredential(() => setPassword(event.target.value))} autoComplete="new-password" minLength={6} maxLength={128} required autoFocus /></label>
@@ -754,7 +775,7 @@ function LoginForm(props: LoginFormProps) {
       {error && <div className="notice error" role="alert">{error}</div>}
       {!nativeRegistration || mode === 'login' ? <button type="submit" className="primary-button" disabled={submitting}>{submitting ? <CircleNotch className="spin" /> : <Key />} {primaryLabel}</button> : null}
     </form>
-    <div className="capability-summary"><span className={capabilities?.ai.mode === 'live' ? 'live' : 'demo'}>模型：{capabilities?.ai.mode === 'live' ? '已连接' : capabilities?.ai.mode === 'demo' ? '演示模式' : '待检测'}</span><span>认证：{registering ? '邮箱 + 手机验证码' : 'COD 邮箱密码'}</span></div>
+    <div className="capability-summary"><span className={capabilities?.ai.mode === 'live' ? 'live' : 'demo'}>模型：{capabilities?.ai.mode === 'live' ? '已连接' : capabilities?.ai.mode === 'demo' ? '演示模式' : '待检测'}</span><span>认证：{registering ? verificationRequired?'邮箱 + 手机验证码':'邮箱密码（内测）' : 'COD 邮箱密码'}</span></div>
   </div>;
 }
 
@@ -1605,7 +1626,7 @@ export function App() {
     if(signal.aborted||authAttemptGenerationRef.current!==authAttemptGeneration)throw signal.reason??new DOMException('Authentication attempt superseded','AbortError');
     await establishAuthenticatedSession(nextSession,authAttemptGeneration,signal,resumeComputeAfterLogin?'compute':null);
   };
-  const handleRegister=async(input:VerifiedRegistrationInput|LegacyMigrationInput,signal:AbortSignal,idempotencyKey?:string)=>{
+  const handleRegister=async(input:VerifiedRegistrationInput|DirectRegistrationInput|LegacyMigrationInput,signal:AbortSignal,idempotencyKey?:string)=>{
     const authAttemptGeneration=++authAttemptGenerationRef.current;
     const issuedToken=await registerCod(input,{signal,idempotencyKey});
     if(signal.aborted||authAttemptGenerationRef.current!==authAttemptGeneration)throw signal.reason??new DOMException('Authentication attempt superseded','AbortError');

@@ -64,6 +64,7 @@ export interface ControlPlaneConfig {
   allowedEmailDomains: string[];
   allowedOrigins: string[];
   registrationEnabled: boolean;
+  registrationVerificationRequired: boolean;
   registrationVerification: RegistrationVerificationConfig;
   publicRegistrationUrl: string | null;
   inviteCodeRequired: boolean;
@@ -169,6 +170,7 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
   const databaseUrl = environment.DATABASE_URL ?? null;
   const pilotAccessCodeHash = environment.COD_PILOT_ACCESS_CODE_HASH ?? null;
   const registrationEnabled = environment.COD_REGISTRATION_ENABLED === undefined ? !production : environment.COD_REGISTRATION_ENABLED === 'true';
+  const registrationVerificationRequired = environment.COD_REGISTRATION_VERIFICATION_REQUIRED !== 'false';
   const allowedEmailDomains = (environment.COD_ALLOWED_EMAIL_DOMAINS ?? 'kai.com').split(',').map((value) => value.trim().toLowerCase()).filter(Boolean);
   const allowedOrigins = (environment.COD_ALLOWED_ORIGINS ?? (production
     ? 'https://cod.kai.com,https://localhost,capacitor://localhost,null'
@@ -281,7 +283,7 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     if (paymentWebhookSecret && Buffer.byteLength(paymentWebhookSecret, 'utf8') < 32) {
       throw new Error('COD_PAYMENT_WEBHOOK_SECRET must contain at least 32 bytes');
     }
-    if (registrationEnabled) {
+    if (registrationEnabled && registrationVerificationRequired) {
       if (decodedRegistrationHmacKey(registrationHmacKey)?.length !== 32) throw new Error('Production registration requires COD_REGISTRATION_HMAC_KEY with exactly 32 bytes');
       if (!registrationEmailWebhook) throw new Error('Production registration requires a complete Registration email webhook configuration');
       if (!registrationSmsWebhook) throw new Error('Production registration requires a complete Registration SMS webhook configuration');
@@ -361,6 +363,7 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     allowedEmailDomains,
     allowedOrigins,
     registrationEnabled,
+    registrationVerificationRequired,
     registrationVerification,
     publicRegistrationUrl,
     inviteCodeRequired,
