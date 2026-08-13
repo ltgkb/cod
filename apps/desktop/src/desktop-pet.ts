@@ -5,7 +5,7 @@ import path from 'node:path';
 import type { DesktopPetStatus } from '@cod/contracts';
 
 const desktopPetVersion = '0.7.0';
-const desktopPetAsarSha256 = '3ac8f66d8724e2bc5d5381791f2971e53f33d4fd2fc8848fc1204eb7d61d3a72';
+const desktopPetAsarSha256 = '00f337940b821a05e9bdf33dad3ef1fa83b49313c6a86ca7ece748ab3de51efb';
 const desktopPetHashes: Partial<Record<NodeJS.Platform, string>> = {
   darwin: '989179852e8ed2b2642001f1793dae2f5f0eef26dce8de4474d71f56a84700e4',
   win32: '63199769cfaeb23d5a7ac91900184288642dd821b11a1e4f8abc896cd1aa2172',
@@ -23,7 +23,7 @@ const fs = rawFileSystem.promises;
 export interface DesktopPetInstallation {
   rootPath: string;
   executablePath: string;
-  kind: 'bundle' | 'portable' | 'appimage';
+  kind: 'integrated' | 'bundle' | 'portable' | 'appimage';
 }
 
 interface DesktopPetDiscoveryOptions {
@@ -32,6 +32,7 @@ interface DesktopPetDiscoveryOptions {
   resourcesPath: string;
   environment?: NodeJS.ProcessEnv;
   developmentOverride?: string;
+  bundledResourcePath?: string;
 }
 
 function pathApi(platform: NodeJS.Platform): typeof path.posix {
@@ -134,12 +135,40 @@ async function verifiedInstallation(candidate: string, platform: NodeJS.Platform
   return installation;
 }
 
+async function verifiedBundledResource(candidate: string | undefined): Promise<DesktopPetInstallation | null> {
+  if (!candidate || !path.isAbsolute(candidate) || !await regularFileWithoutSymlink(candidate)) return null;
+  if (await sha256(candidate) !== desktopPetAsarSha256) return null;
+  return {
+    rootPath: path.dirname(candidate),
+    executablePath: candidate,
+    kind: 'integrated',
+  };
+}
+
 export async function discoverDesktopPet(options: DesktopPetDiscoveryOptions): Promise<{
   installation: DesktopPetInstallation | null;
   status: DesktopPetStatus;
 }> {
+  const bundledResourcePath = options.bundledResourcePath ?? path.join(options.resourcesPath, 'desktop-pet', 'app.asar');
+  const bundledInstallation = await verifiedBundledResource(bundledResourcePath);
+  if (bundledInstallation) {
+    return {
+      installation: bundledInstallation,
+      status: {
+        supported: true,
+        installed: true,
+        verified: true,
+        running: false,
+        version: desktopPetVersion,
+        publisherVerified: false,
+        reason: 'ready',
+      },
+    };
+  }
+  let bundledResourceFound = false;
+  try { bundledResourceFound = (await fs.lstat(bundledResourcePath)).isFile(); } catch { /* Optional on older builds. */ }
   const candidates = desktopPetCandidates(options);
-  let unverifiedFound = false;
+  let unverifiedFound = bundledResourceFound;
   for (const candidate of candidates) {
     try {
       await fs.lstat(candidate);

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mkdtemp, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { desktopPetCandidates, desktopPetEnvironment, discoverDesktopPet } from '../dist/desktop-pet.js';
@@ -30,6 +31,73 @@ test('passes only an allowlisted process environment and ephemeral chat credenti
   assert.equal(result.COD_DATABASE_URL, undefined);
   assert.equal(result.COD_CHAT_API_KEY, 'ephemeral');
   assert.equal(result.COD_CHAT_MODEL, 'gpt-test');
+});
+
+test('prefers the audited desktop pet bundled inside COD', async () => {
+  const resourceAsar = path.resolve('resources/desktop-pet/app.asar');
+  const result = await discoverDesktopPet({
+    platform: process.platform,
+    homeDirectory: os.homedir(),
+    resourcesPath: path.dirname(path.dirname(resourceAsar)),
+    bundledResourcePath: resourceAsar,
+  });
+  assert.equal(result.installation?.kind, 'integrated');
+  assert.equal(result.installation?.executablePath, resourceAsar);
+  assert.equal(result.status.installed, true);
+  assert.equal(result.status.verified, true);
+  assert.equal(result.status.reason, 'ready');
+});
+
+test('uses a calm pause message and a clear retry action for interrupted pet replies', async () => {
+  const require = createRequire(import.meta.url);
+  const asar = require('@electron/asar');
+  const resourceAsar = path.resolve('resources/desktop-pet/app.asar');
+  const renderer = asar.extractFile(resourceAsar, 'chat-renderer.js').toString('utf8');
+  assert.match(renderer, /这次回复已暂停。/);
+  assert.match(renderer, /重新回答/);
+  assert.doesNotMatch(renderer, /已停止生成。/);
+});
+
+test('keeps a live pet reply pending and only recovers stale persisted replies as paused', async () => {
+  const require = createRequire(import.meta.url);
+  const asar = require('@electron/asar');
+  const resourceAsar = path.resolve('resources/desktop-pet/app.asar');
+  const extracted = await mkdtemp(path.join(os.tmpdir(), 'cod-integrated-pet-store-test-'));
+  asar.extractAll(resourceAsar, extracted);
+  const { ChatStore } = require(path.join(extracted, 'chat-store.cjs'));
+  const storage = await mkdtemp(path.join(os.tmpdir(), 'cod-integrated-pet-state-test-'));
+  const liveStore = new ChatStore({ directory: storage });
+  const pendingMessage = {
+    id: 'pending-assistant',
+    role: 'assistant',
+    characterId: 'i',
+    content: '',
+    status: 'pending',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  const liveConversation = await liveStore.appendMessages('i', [pendingMessage]);
+  assert.equal(liveConversation.messages[0].status, 'pending');
+
+  const restartedStore = new ChatStore({ directory: storage });
+  const recoveredConversation = await restartedStore.getConversation('i');
+  assert.equal(recoveredConversation.messages[0].status, 'stopped');
+});
+
+test('rejects a modified bundled desktop pet resource', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'cod-integrated-pet-test-'));
+  const resourceAsar = path.join(directory, 'app.asar');
+  await writeFile(resourceAsar, 'modified desktop pet resource');
+  const result = await discoverDesktopPet({
+    platform: 'linux',
+    homeDirectory: directory,
+    resourcesPath: directory,
+    bundledResourcePath: resourceAsar,
+  });
+  assert.equal(result.installation, null);
+  assert.equal(result.status.installed, true);
+  assert.equal(result.status.verified, false);
+  assert.equal(result.status.reason, 'integrity-failed');
 });
 
 test('refuses a companion at a known path when its audited hashes do not match', async () => {

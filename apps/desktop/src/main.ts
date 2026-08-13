@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 import type { AgentGatewayConfig, DesktopPetLaunchConfig, DesktopPetLaunchResult, DesktopPetStatus, TerminalResult } from '@cod/contracts';
 import { startAcpProxy, type AcpProxy } from './acp-proxy.js';
 import { mintAgentSession } from './agent-session.js';
+import { BuiltInDesktopPet } from './built-in-desktop-pet.js';
 import { commandPathCandidates, commandPolicyViolation, isWithinRoot, parseCommand, validateCommandPath } from './command-policy.js';
 import { commandTimedOut, executeGitCommand } from './git-command.js';
 import { desktopPetEnvironment, discoverDesktopPet, type DesktopPetInstallation } from './desktop-pet.js';
@@ -49,6 +50,8 @@ let gooseConfigurationKey: string | null = null;
 let gooseAgentTokenExpiresAt = 0;
 let desktopPetProcess: ChildProcess | null = null;
 let desktopPetProxy: PetChatProxy | null = null;
+let builtInDesktopPet: BuiltInDesktopPet | null = null;
+let mainWindow: BrowserWindow | null = null;
 const gooseLaunchCoordinator = new GooseLaunchCoordinator();
 
 function trustedRendererWebSocketOrigins(): string[] {
@@ -306,7 +309,7 @@ function invalidateAndStopGooseSidecar(): Promise<void> {
 }
 
 function desktopPetIsRunning(): boolean {
-  return Boolean(desktopPetProcess && desktopPetProcess.exitCode === null && desktopPetProcess.signalCode === null);
+  return Boolean(builtInDesktopPet?.running || (desktopPetProcess && desktopPetProcess.exitCode === null && desktopPetProcess.signalCode === null));
 }
 
 async function desktopPetDiscovery(): Promise<{ installation: DesktopPetInstallation | null; status: DesktopPetStatus }> {
@@ -316,11 +319,15 @@ async function desktopPetDiscovery(): Promise<{ installation: DesktopPetInstalla
     resourcesPath: process.resourcesPath,
     environment: process.env,
     developmentOverride: app.isPackaged ? undefined : process.env.COD_DESKTOP_PET_PATH,
+    bundledResourcePath: app.isPackaged
+      ? undefined
+      : path.join(moduleDirectory, '..', 'resources', 'desktop-pet', 'app.asar'),
   });
   return { ...result, status: { ...result.status, running: desktopPetIsRunning() } };
 }
 
 async function stopDesktopPet(): Promise<DesktopPetStatus> {
+  builtInDesktopPet?.stop();
   const processToStop = desktopPetProcess;
   const proxyToStop = desktopPetProxy;
   desktopPetProcess = null;
@@ -349,8 +356,43 @@ async function launchDesktopPet(config: DesktopPetLaunchConfig): Promise<Desktop
       : '尚未安装已审计的 COD 桌宠 0.7.0。';
     throw new Error(message);
   }
-  if (desktopPetIsRunning()) return { status: discovery.status, started: false, focusedExisting: false };
+  if (desktopPetIsRunning()) {
+    if (builtInDesktopPet?.running) {
+      const result = await builtInDesktopPet.start();
+      return { status: { ...discovery.status, running: true }, ...result };
+    }
+    return { status: discovery.status, started: false, focusedExisting: false };
+  }
   await stopDesktopPet();
+  if (discovery.installation.kind === 'integrated') {
+    const proxy = await startPetChatProxy({ controlPlaneUrl, ...config });
+    builtInDesktopPet ??= new BuiltInDesktopPet({
+      resourceAsarPath: discovery.installation.executablePath,
+      onOpenCod: (prompt) => {
+        const window = mainWindow;
+        if (!window || window.isDestroyed()) {
+          void createWindow().then(() => {
+            mainWindow?.webContents.send('cod:desktop-pet-open-chat', prompt ?? null);
+          });
+          return;
+        }
+        if (window.isMinimized()) window.restore();
+        window.show();
+        window.focus();
+        window.webContents.send('cod:desktop-pet-open-chat', prompt ?? null);
+      },
+    });
+    builtInDesktopPet.configureChat({ endpoint: proxy.url, secret: proxy.secret, model: config.modelId });
+    try {
+      const result = await builtInDesktopPet.start();
+      desktopPetProxy = proxy;
+      const status = { ...(await desktopPetDiscovery()).status, running: builtInDesktopPet.running };
+      return { status, ...result };
+    } catch (error) {
+      await proxy.close().catch(() => undefined);
+      throw error;
+    }
+  }
   const proxy = await startPetChatProxy({ controlPlaneUrl, ...config });
   const installation = discovery.installation;
   let spawned: ChildProcess;
@@ -435,6 +477,12 @@ async function validateCommandPaths(root: string, candidates: string[]): Promise
 }
 
 async function createWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    return;
+  }
   const window = new BrowserWindow({
     width: 1500,
     height: 940,
@@ -457,6 +505,8 @@ async function createWindow() {
       spellcheck: true,
     },
   });
+  mainWindow = window;
+  window.on('closed', () => { if (mainWindow === window) mainWindow = null; });
 
   window.webContents.setWindowOpenHandler(({ url }) => {
     openExternalUrl(url);
@@ -617,12 +667,12 @@ if (hasSingleInstanceLock) {
     await restoreApprovedProjectRoots();
     await createWindow();
     app.on('activate', async () => {
-      if (BrowserWindow.getAllWindows().length === 0) await createWindow();
+      if (!mainWindow || mainWindow.isDestroyed()) await createWindow();
     });
   });
 
   app.on('second-instance', () => {
-    const window = BrowserWindow.getAllWindows()[0];
+    const window = mainWindow;
     if (!window) return;
     if (window.isMinimized()) window.restore();
     window.show();

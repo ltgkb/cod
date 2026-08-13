@@ -30,6 +30,11 @@ const bridge: DesktopBridge = {
   getDesktopPetStatus: () => ipcRenderer.invoke('cod:get-desktop-pet-status'),
   launchDesktopPet: (config) => ipcRenderer.invoke('cod:launch-desktop-pet', config),
   stopDesktopPet: () => ipcRenderer.invoke('cod:stop-desktop-pet'),
+  onDesktopPetOpenChat: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, prompt: string | null) => callback(prompt);
+    ipcRenderer.on('cod:desktop-pet-open-chat', listener);
+    return () => ipcRenderer.removeListener('cod:desktop-pet-open-chat', listener);
+  },
 };
 
 contextBridge.exposeInMainWorld('codDesktop', bridge);

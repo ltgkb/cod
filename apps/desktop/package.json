@@ -58,6 +58,10 @@
       {
         "from": "resources/bin",
         "to": "bin"
+      },
+      {
+        "from": "resources/desktop-pet/app.asar",
+        "to": "desktop-pet/app.asar"
       }
     ],
     "linux": {
