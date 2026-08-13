@@ -37,6 +37,9 @@ describe('control-plane production rules', () => {
     expect(config.developmentTopupEnabled).toBe(false);
     expect(config.registrationEnabled).toBe(false);
     expect(config.inviteCodeRequired).toBe(false);
+    const internalBetaConfig=loadConfig({...productionEnvironment,COD_REGISTRATION_ENABLED:'true',COD_REGISTRATION_VERIFICATION_REQUIRED:'false'});
+    expect(internalBetaConfig.registrationEnabled).toBe(true);
+    expect(internalBetaConfig.registrationVerificationRequired).toBe(false);
     expect(loadConfig({ NODE_ENV: 'test' }).demoMode).toBe(false);
     expect(loadConfig({ NODE_ENV: 'test', COD_DEMO_MODE: 'false' }).demoMode).toBe(false);
     expect(loadConfig({ NODE_ENV: 'test', COD_DEMO_MODE: 'true' }).demoMode).toBe(true);
@@ -83,6 +86,25 @@ describe('control-plane production rules', () => {
     const { token } = await login.json() as { token: string };
     const topup = await fetch(`${base}/api/topups`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'idempotency-key': 'test' }, body: JSON.stringify({ amountCents: 1000, channel: 'pilot' }) });
     expect(topup.status).toBe(403);
+  });
+
+  it('allows rate-limited email and password registration in explicit internal beta mode', async () => {
+    const {base,database}=await start({COD_REGISTRATION_ENABLED:'true',COD_REGISTRATION_VERIFICATION_REQUIRED:'false'});
+    const capabilities=await (await fetch(`${base}/api/capabilities`)).json();
+    expect(capabilities).toMatchObject({authentication:{registrationEnabled:true,verificationMethods:[],registrationWebOnly:false,turnstileSiteKey:null}});
+    const registration=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'internal-beta@kai.com',password:'BetaPass123'})});
+    expect(registration.status).toBe(201);
+    expect(await registration.json()).toMatchObject({token:expect.any(String),user:{email:'internal-beta@kai.com'},referred:false});
+    expect(await database.findIdentityByEmail('internal-beta@kai.com')).toMatchObject({phoneE164:null,emailVerifiedAt:null,phoneVerifiedAt:null});
+    expect((await database.getCreditSummary({userId:`usr_${createHash('sha256').update('internal-beta@kai.com').digest('hex').slice(0,20)}`,tenantId:'tenant_kai_com',email:'internal-beta@kai.com',role:'member'})).grants).toHaveLength(1);
+    const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'internal-beta@kai.com',password:'BetaPass123'})});
+    expect(login.status).toBe(200);
+    const duplicate=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'internal-beta@kai.com',password:'BetaPass123'})});
+    expect(duplicate.status).toBe(409);
+    const weak=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'weak@kai.com',password:'123456'})});
+    expect(weak.status).toBe(400);
+    const outsideBeta=await fetch(`${base}/api/auth/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'outside@example.com',password:'BetaPass123'})});
+    expect(outsideBeta.status).toBe(403);
   });
 
   it('revalidates the current role and identity before honoring an existing admin session', async () => {

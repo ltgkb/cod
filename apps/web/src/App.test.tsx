@@ -905,6 +905,29 @@ describe('COD workspace', () => {
     expect(screen.getByRole('dialog', { name: '登录 COD' })).toBe(dialog);
   });
 
+  it('shows direct email and password registration during the internal beta', async () => {
+    const internalCapabilities={...capabilities,authentication:{...capabilities.authentication,verificationMethods:[] as [],registrationWebOnly:false}};
+    const fetchMock=vi.fn(async(input:RequestInfo|URL)=>{
+      const path=new URL(String(input),window.location.href).pathname;
+      if(path==='/api/capabilities')return json(internalCapabilities);
+      if(path==='/api/model-catalog'||path==='/api/compute/offers')return json([]);
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal('fetch',fetchMock);
+    render(<App/>);
+    await screen.findByRole('heading',{name:'新对话'});
+    fireEvent.click(screen.getByTitle('登录'));
+    const dialog=await screen.findByRole('dialog',{name:'登录 COD'});
+    fireEvent.click(within(dialog).getByRole('tab',{name:'注册账号'}));
+    expect(within(dialog).getByText(/内测期间填写邮箱和密码即可注册/)).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('邮箱')).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('密码')).toHaveAttribute('minlength','6');
+    expect(within(dialog).getByLabelText('确认密码')).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('邀请码')).not.toBeRequired();
+    expect(within(dialog).queryByText('请先在网页完成注册')).not.toBeInTheDocument();
+    expect(within(dialog).queryByLabelText('邮箱验证码')).not.toBeInTheDocument();
+  });
+
   it('opens a capability-gated registration deep link and consumes its URL intent', async () => {
     window.history.replaceState({}, '', '/app/?auth=register');
     vi.stubGlobal('fetch', vi.fn(async () => json(capabilities)));

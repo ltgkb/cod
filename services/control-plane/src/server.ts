@@ -1,4 +1,4 @@
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type ServerResponse } from 'node:http';
 import { isIP } from 'node:net';
 import type { ComputeRequestKind, ComputeRequestStatus, TaskStatus, UsageEvent } from '@cod/contracts';
@@ -369,8 +369,13 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
   const registration = new RegistrationVerification(config.registrationVerification, registrationDelivery, registrationPinnedFetcher,options.registrationEndpointValidator);
   const now = options.now ?? (() => new Date());
   const requireRegistration = () => {
-    if (!config.registrationEnabled || !registration.available) throw new HttpError('账号注册暂未开放', 503, 'registration_unavailable');
+    if (!config.registrationEnabled || (config.registrationVerificationRequired && !registration.available)) throw new HttpError('账号注册暂未开放', 503, 'registration_unavailable');
   };
+  const requireVerifiedRegistration = () => {
+    requireRegistration();
+    if (!config.registrationVerificationRequired || !registration.available) throw new HttpError('验证码注册暂不可用', 503, 'registration_verification_unavailable');
+  };
+  const directRegistrationRateLimitKey = (scope: string, value: string) => createHmac('sha256', config.sessionSecret).update(`${scope}\0${value}`).digest('hex');
   const consumeRegistrationLimits = async (request: import('node:http').IncomingMessage, scope: string, destination: string, instant: Date) => {
     const address = registrationClientAddress(request);
     await database.consumeRegistrationRateLimit({
@@ -429,7 +434,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       if (request.method === 'GET' && url.pathname === '/api/capabilities') {
         const legacyIdentity=config.developmentLoginEnabled&&config.pilotAccessCodeHash?await database.findIdentityByEmail(config.developmentLoginEmail):null;
         return sendJson(response, 200, {
-        authentication: { mode: 'password', registrationEnabled: config.registrationEnabled&&registration.available, legacyMigrationEnabled: Boolean(legacyIdentity&&!legacyIdentity.passwordHash), inviteCodeOptional: !config.inviteCodeRequired, inviteCodeRequired: config.inviteCodeRequired, accessCodeRequired: false, verificationMethods: ['email_otp','sms_otp'], turnstileSiteKey: config.registrationVerification.turnstileSiteKey, registrationWebOnly: true, publicRegistrationUrl: config.publicRegistrationUrl },
+        authentication: { mode: 'password', registrationEnabled: config.registrationEnabled&&(!config.registrationVerificationRequired||registration.available), legacyMigrationEnabled: Boolean(legacyIdentity&&!legacyIdentity.passwordHash), inviteCodeOptional: !config.inviteCodeRequired, inviteCodeRequired: config.inviteCodeRequired, accessCodeRequired: false, verificationMethods: config.registrationVerificationRequired?['email_otp','sms_otp']:[], turnstileSiteKey: config.registrationVerificationRequired?config.registrationVerification.turnstileSiteKey:null, registrationWebOnly: config.registrationVerificationRequired, publicRegistrationUrl: config.publicRegistrationUrl },
         ai: { mode: await gateway.mode(), streaming: true, streamingMode: 'buffered-sse' },
         knowledge: { mode: knowledge.mode() },
         payments: {
@@ -459,7 +464,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         return sendJson(response, 200, { token, user: { id: principal.userId, email } });
       }
       if (request.method === 'POST' && url.pathname === '/api/auth/registration/email/start') {
-        requireRegistration();
+        requireVerifiedRegistration();
         const body=await readJson<{email?:unknown;humanChallengeToken?:unknown}|null>(request);
         const email=normalizeRegistrationEmail(body?.email);
         const instant=now();
@@ -481,7 +486,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         return sendJson(response,202,{challengeId:challenge.challengeId,maskedDestination:maskRegistrationDestination('email',email),expiresAt:challenge.expiresAt,resendAt:new Date(instant.getTime()+challenge.retryAfterSeconds*1000).toISOString(),notice:emailRegistrationNotice});
       }
       if (request.method === 'POST' && url.pathname === '/api/auth/registration/email/verify') {
-        requireRegistration();
+        requireVerifiedRegistration();
         const body=await readJson<{challengeId?:unknown;email?:unknown;code?:unknown}|null>(request);
         const challengeId=validateRegistrationChallengeId(body?.challengeId);const email=normalizeRegistrationEmail(body?.email);const code=validateRegistrationCode(body?.code);const instant=now();
         await database.consumeRegistrationRateLimit({scope:'registration-email-verify:address',keyHash:registration.rateLimitKey('registration-email-verify:address',registrationClientAddress(request)),now:instant,windowSeconds:60*60,limit:40});
@@ -489,7 +494,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         return sendJson(response,200,{verified:true});
       }
       if (request.method === 'POST' && url.pathname === '/api/auth/registration/phone/start') {
-        requireRegistration();
+        requireVerifiedRegistration();
         const body=await readJson<{challengeId?:unknown;email?:unknown;phone?:unknown;humanChallengeToken?:unknown}|null>(request);
         const challengeId=validateRegistrationChallengeId(body?.challengeId);const email=normalizeRegistrationEmail(body?.email);const phone=normalizeRegistrationPhone(body?.phone);const instant=now();
         await registration.verifyHuman(body?.humanChallengeToken,'cod_registration_phone',registrationClientIp(request));
@@ -507,7 +512,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         return sendJson(response,202,{challengeId:challenge.challengeId,maskedDestination:maskRegistrationDestination('phone',phone),expiresAt:challenge.expiresAt,resendAt:new Date(instant.getTime()+challenge.retryAfterSeconds*1000).toISOString(),notice:phoneRegistrationNotice});
       }
       if (request.method === 'POST' && url.pathname === '/api/auth/registration/phone/verify') {
-        requireRegistration();
+        requireVerifiedRegistration();
         const body=await readJson<{challengeId?:unknown;email?:unknown;phone?:unknown;code?:unknown}|null>(request);
         const challengeId=validateRegistrationChallengeId(body?.challengeId);const email=normalizeRegistrationEmail(body?.email);const phone=normalizeRegistrationPhone(body?.phone);const code=validateRegistrationCode(body?.code);const instant=now();
         await database.consumeRegistrationRateLimit({scope:'registration-phone-verify:address',keyHash:registration.rateLimitKey('registration-phone-verify:address',registrationClientAddress(request)),now:instant,windowSeconds:60*60,limit:40});
@@ -528,6 +533,17 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         const principal:Principal={userId:userIdFor(email),tenantId:tenantIdFor(email),email,role:'member'};
         let result;
         if(allowExisting){result=await database.registerIdentity(principal,await hashPassword(password),inviteCode,true);await database.audit(result.identity.principal,'auth.legacy_migrated','user',result.identity.principal.userId,{inviteCodeUsed:result.identity.referralCodeUsed});}
+        else if(!config.registrationVerificationRequired){
+          const domain=email.split('@')[1]??'';
+          if(!config.allowedEmailDomains.includes(domain))throw new HttpError('该邮箱域名暂不在内测范围',403,'registration_email_domain_forbidden');
+          const instant=now();const address=registrationClientAddress(request);
+          await Promise.all([
+            database.consumeRegistrationRateLimit({scope:'registration-direct:address',keyHash:directRegistrationRateLimitKey('registration-direct:address',address),now:instant,windowSeconds:60*60,limit:20}),
+            database.consumeRegistrationRateLimit({scope:'registration-direct:email',keyHash:directRegistrationRateLimitKey('registration-direct:email',email),now:instant,windowSeconds:60*60,limit:5}),
+          ]);
+          result=await database.registerIdentity(principal,await hashPassword(password),inviteCode,false);
+          await database.audit(result.identity.principal,'auth.register','user',result.identity.principal.userId,{inviteCodeUsed:result.identity.referralCodeUsed,verification:'internal-beta-bypass'});
+        }
         else{
           const challengeId=validateRegistrationChallengeId(body?.challengeId);const phone=normalizeRegistrationPhone(body?.phone);const idempotencyKey=validateIdempotencyKey(request.headers['idempotency-key']);
           const fingerprint=registration.requestFingerprint({challengeId,email,phone,password,inviteCode});
