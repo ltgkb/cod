@@ -799,8 +799,10 @@ describe('COD workspace', () => {
   it('starts and completes a mobile model conversation without an online Desktop or task-bound chat claim', async () => {
     configureAuthenticatedMobileRuntime('mobile-token', { hostPlatform: 'ios' });
     let taskVersion = 1;
+    let taskListReads = 0;
     let registeredDevice: Record<string, unknown> | null = null;
     let chatBody: Record<string, unknown> | null = null;
+    const historyTask = { id: 'mobile-history', title: '历史对话', status: 'complete', deviceId: 'mobile-device', updatedAt: new Date(Date.now() - 60_000).toISOString(), version: 1, result: '历史回答', error: null };
     const account = { userId: 'mobile-user', displayName: 'mobile member', balanceCents: 5000, currency: 'CNY', plan: 'developer', role: 'member', billingExempt: false };
     const source = { id: 'ai-kai', label: 'AI.KAI.COM', status: 'live', callable: true, paymentDirection: '钱包 → ai.kai.com', note: '已连接', models: [{ id: 'mobile-model', label: '移动对话模型', contextWindow: 128000, inputPricePerMillionCents: 100, outputPricePerMillionCents: 200 }] };
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -818,7 +820,7 @@ describe('COD workspace', () => {
       if (url.endsWith('/api/tasks') && init?.method === 'POST') {
         return json({ id: 'mobile-conversation', title: '移动端你好', status: 'draft', deviceId: 'mobile-device', updatedAt: new Date().toISOString(), version: taskVersion }, 201);
       }
-      if (url.endsWith('/api/tasks')) return json([]);
+      if (url.endsWith('/api/tasks')) { taskListReads += 1; return json([historyTask]); }
       if (/\/api\/tasks\/mobile-conversation\/status$/.test(url)) {
         const body = JSON.parse(String(init?.body)) as { status: 'running' | 'complete'; leaseToken?: string };
         taskVersion += 1;
@@ -844,6 +846,10 @@ describe('COD workspace', () => {
     expect(sidebar).not.toBeNull();
     fireEvent.click(within(sidebar as HTMLElement).getByRole('button', { name: '新对话' }));
     expect(screen.queryByRole('dialog', { name: '新建任务' })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '休息一下，把任务交给 COD' })).toBeInTheDocument();
+    document.dispatchEvent(new Event('visibilitychange'));
+    await waitFor(() => expect(taskListReads).toBeGreaterThan(1));
+    expect(screen.getByRole('heading', { name: '休息一下，把任务交给 COD' })).toBeInTheDocument();
 
     const composer = screen.getByPlaceholderText('问 COD 任何问题...');
     fireEvent.change(composer, { target: { value: '移动端你好' } });
