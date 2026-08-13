@@ -3,6 +3,7 @@ import type { FormEvent, ReactNode } from 'react';
 import QRCode from 'qrcode';
 import { ArrowClockwise } from '@phosphor-icons/react/ArrowClockwise';
 import { ArrowSquareOut } from '@phosphor-icons/react/ArrowSquareOut';
+import { Buildings } from '@phosphor-icons/react/Buildings';
 import { CaretDown } from '@phosphor-icons/react/CaretDown';
 import { ChatCircleDots } from '@phosphor-icons/react/ChatCircleDots';
 import { Check } from '@phosphor-icons/react/Check';
@@ -40,11 +41,10 @@ import type { AdminComputeRequestSummary, DesktopPetStatus, DeviceRecord, Knowle
 import {
   cancelRemoteTask,
   createRemoteTask,
-  createComputeRequest,
-  decideComputeRequestQuote,
   createClientId,
   createPaymentOrder,
   getCapabilities,
+  getControlPlaneUrl,
   getAdminComputeRequest,
   getCreditPacks,
   getPaymentOrder,
@@ -53,7 +53,6 @@ import {
   heartbeatDevice,
   hydrateCodSession,
   listDevices,
-  listComputeOffers,
   listComputeRequests,
   listAdminComputeRequests,
   listLedger,
@@ -84,6 +83,7 @@ import {
   type CapabilityReport,
   ApiError,
   type CodSession,
+  type ComputeRequest,
   type CreditPackState,
   type LedgerEntry,
   type PaymentCheckout,
@@ -95,6 +95,7 @@ import {
   type LegacyMigrationInput,
   type VerifiedRegistrationInput,
 } from './api';
+import { ComputeApp } from './compute-market/ComputeApp';
 import { desktopGitDiffError, hasDesktopBridge, loadProject, loadProjectDiff, loadProjectFiles, readProjectFile, selectProjectRoot } from './desktop';
 import { chatFailureMessage } from './chat-errors';
 import { filterModelCatalog, groupModelCatalog, uniqueCallableModels } from './model-catalog';
@@ -124,19 +125,6 @@ interface ChatMessage { id: string; role: 'user' | 'assistant' | 'comparison'; c
 interface ActiveRun { taskId:string; controller:AbortController; cancelled:boolean; leaseAcquired:boolean; finalizing:boolean; terminalCommitted:boolean; mode:WorkspaceMode }
 interface CurrentDeviceSnapshot { device:DeviceRecord; devices:DeviceRecord[] }
 interface CurrentDeviceRequest { token:string; authGeneration:number; promise:Promise<CurrentDeviceSnapshot> }
-interface ComputeDraft {
-  tab: ComputeRequestInput['kind']; offerId: string; imageId: string; company: string; contactName: string; contactPhone: string;
-  city: string; gpuModel: string; quantity: number; durationHours: number; termMonths: number; requirements: string;
-  hostingPeriodMonths: number; rackUnits: number; powerKilowatts: number; networkMbps: number;
-  availabilityNotes: string; settlementPreference: string; hostingRequirements: string;
-}
-
-const initialComputeDraft: ComputeDraft = {
-  tab: 'rental', offerId: '', imageId: '', company: '', contactName: '', contactPhone: '', city: '', gpuModel: 'NVIDIA H100 80GB', quantity: 1,
-  durationHours: 100, termMonths: 24, requirements: '', hostingPeriodMonths: 12, rackUnits: 0, powerKilowatts: 0,
-  networkMbps: 0, availabilityNotes: '', settlementPreference: '固定托管费（月结）', hostingRequirements: '',
-};
-
 function comparisonResultKey(result: ComparisonResult): string {
   return `${result.sourceId}::${result.modelId ?? result.model}`;
 }
@@ -791,93 +779,6 @@ function ModelLibrary({ sources, error, signedIn, onLogin }: { sources: PublicMo
   </div>;
 }
 
-function ComputeMarket({ offers, requests, signedIn, draft, onDraftChange, onLogin, onSubmit, onQuoteDecision }: { offers: ComputeOffer[]; requests: ComputeRequest[]; signedIn: boolean; draft: ComputeDraft; onDraftChange: (draft: ComputeDraft) => void; onLogin: () => void; onSubmit: (input: ComputeRequestInput) => Promise<void>; onQuoteDecision: (request: ComputeRequest, decision: 'accepted' | 'declined') => Promise<void> }) {
-  const [submitting, setSubmitting] = useState(false);
-  const [decidingId, setDecidingId] = useState('');
-  const [error, setError] = useState('');
-  const {
-    tab, offerId, imageId, company, contactName, contactPhone, city, gpuModel, quantity, durationHours, termMonths, requirements,
-    hostingPeriodMonths, rackUnits, powerKilowatts, networkMbps, availabilityNotes, settlementPreference, hostingRequirements,
-  } = draft;
-  const updateDraft = (next: Partial<ComputeDraft>) => onDraftChange({ ...draft, ...next });
-  const selectedOffer = offers.find((offer) => offer.id === offerId) ?? offers[0];
-  const unitLabel: Record<ComputeOffer['priceUnit'], string> = { 'card-hour': '卡时', 'server-hour': '整机时', month: '月', quote: '询价' };
-  const statusLabel: Record<ComputeRequest['status'], string> = { submitted: '已提交', contacting: '联系中', quoted: '待确认报价', approved: '已确认', deploying: '部署中', running: '运行中', action_required: '待处理', completed: '已完成', closed: '已关闭' };
-  const requestKindLabel: Record<ComputeRequestInput['kind'], string> = { rental: '算力租赁', supply: '供方上架', hosting: '第三方托管', installment: '显卡分期' };
-  const formTitle: Record<ComputeRequestInput['kind'], string> = { rental: '提交租赁需求', supply: '成为算力供方', hosting: '申请第三方机房托管', installment: '申请设备融资方案' };
-  const formSummary: Record<ComputeRequestInput['kind'], string> = {
-    rental: '确认库存与交付环境后出具正式报价',
-    supply: '机房、卡况、网络与产权核验通过后上架',
-    hosting: '提交设备参数后，由 COD 记录需求并匹配第三方托管商',
-    installment: 'COD 仅撮合申请，不自行授信或放款',
-  };
-  const requirementsPlaceholder: Record<Exclude<ComputeRequestInput['kind'], 'hosting'>, string> = {
-    rental: '训练框架、镜像、存储、带宽、开始时间…',
-    supply: '机房位置、卡况、服务器配置、可售时段…',
-    installment: '设备配置、预算、首付能力、发票与交付要求…',
-  };
-  const chooseOffer = (offer: ComputeOffer) => updateDraft({ tab: 'rental', offerId: offer.id, imageId: offer.images?.[0]?.id ?? '', gpuModel: offer.gpuModel, quantity: offer.gpuCount, durationHours: offer.minimumUnits });
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!signedIn) { onLogin(); return; }
-    if (tab === 'hosting' && !rackUnits && !powerKilowatts && !networkMbps && !availabilityNotes.trim()) {
-      setError('请填写机架空间、预计功耗、所需带宽中的至少一项，或补充设备与可用条件。');
-      return;
-    }
-    setSubmitting(true); setError('');
-    try {
-      await onSubmit({
-        kind: tab,
-        offerId: tab === 'rental' ? selectedOffer?.id ?? null : null,
-        imageId: tab === 'rental' ? imageId || selectedOffer?.images?.[0]?.id || null : null,
-        company,
-        contactName,
-        contactPhone,
-        city,
-        gpuModel,
-        quantity,
-        durationHours: tab === 'rental' ? durationHours : null,
-        termMonths: tab === 'installment' ? termMonths : null,
-        requirements: tab === 'hosting' ? hostingRequirements : requirements,
-        ...(tab === 'hosting' ? {
-          hostingPeriodMonths,
-          rackUnits: rackUnits || null,
-          powerKilowatts: powerKilowatts || null,
-          networkMbps: networkMbps || null,
-          availabilityNotes,
-          settlementPreference,
-          hostingRequirements,
-        } : {}),
-      });
-      updateDraft({ requirements: '', rackUnits: 0, powerKilowatts: 0, networkMbps: 0, availabilityNotes: '', hostingRequirements: '' });
-    } catch (nextError) { setError(nextError instanceof Error ? nextError.message : '提交失败，请稍后重试'); }
-    finally { setSubmitting(false); }
-  };
-  const decideQuote = async (request: ComputeRequest, decision: 'accepted' | 'declined') => {
-    if (decidingId) return;setDecidingId(request.id);setError('');
-    try { await onQuoteDecision(request, decision); }
-    catch (nextError) { setError(nextError instanceof Error ? nextError.message : '报价处理失败，请刷新后重试'); }
-    finally { setDecidingId(''); }
-  };
-  const assetCount=requests.filter((request)=>['approved','deploying','running','action_required','completed'].includes(request.status)).length;
-  const hostedCount=requests.filter((request)=>['hosting','supply'].includes(request.kind)&&['approved','deploying','running','action_required'].includes(request.status)).length;
-  const rentalCount=requests.filter((request)=>request.kind==='rental'&&['deploying','running','action_required'].includes(request.status)).length;
-  return <div className="compute-market">
-    <section className="compute-hero"><div><span className="eyebrow">COD COMPUTE EXCHANGE</span><h2>让 GPU 找到合适的使用方式</h2><p>租用算力、上架闲置卡、申请第三方机房托管或设备分期。所有方案先核验设备、网络与交付条件，再由相关方确认合同。</p></div><div className="compute-hero-metrics"><span><strong>H100</strong><small>机房直供</small></span><span><strong>托管</strong><small>第三方撮合</small></span><span><strong>SLA</strong><small>签约前确认</small></span></div></section>
-    <section className="compute-deal"><nav aria-label="算力业务类型"><button type="button" className={tab === 'rental' ? 'active' : ''} aria-pressed={tab === 'rental'} onClick={() => updateDraft({ tab: 'rental' })}><HardDrives />租算力</button><button type="button" className={tab === 'supply' ? 'active' : ''} aria-pressed={tab === 'supply'} onClick={() => updateDraft({ tab: 'supply' })}><Storefront />上架闲置卡</button><button type="button" className={tab === 'hosting' ? 'active' : ''} aria-pressed={tab === 'hosting'} onClick={() => updateDraft({ tab: 'hosting' })}><Buildings />第三方托管</button><button type="button" className={tab === 'installment' ? 'active' : ''} aria-pressed={tab === 'installment'} onClick={() => updateDraft({ tab: 'installment' })}><CreditCard />显卡分期</button></nav>{tab === 'rental' && <div className="compute-offers">{offers.map((offer) => <article className={selectedOffer?.id === offer.id ? 'selected' : ''} key={offer.id}><header><span className={offer.availability}>{offer.availability === 'ready' ? `参考规模 ${offer.inventoryCards ?? 0} 卡` : offer.availability === 'limited' ? `参考规模 ${offer.inventoryCards ?? 0} 卡` : '企业询价'}</span>{offer.verified && <i><ShieldCheck weight="fill" /> 配置已核验</i>}</header><HardDrives weight="duotone" /><h3>{offer.title}</h3><p>{offer.gpuModel} · {offer.gpuCount} 卡 · {offer.gpuMemoryGb}GB/卡</p><strong>{offer.priceCents === null ? '企业询价' : `¥${(offer.priceCents / 100).toFixed(2)}`}<small>{offer.priceCents === null ? '' : ` / ${unitLabel[offer.priceUnit]}起`}</small></strong><dl><div><dt>CPU</dt><dd>{offer.specs?.cpuModel ?? '成交前确认'}{offer.specs?.cpuCores ? ` · ${offer.specs?.cpuCores} 核` : ''}</dd></div><div><dt>内存</dt><dd>{offer.specs?.memoryGb ? `${offer.specs?.memoryGb} GB` : '成交前确认'}</dd></div><div><dt>磁盘</dt><dd>{offer.specs?.systemDiskGb ? `${offer.specs?.systemDiskGb} GB 系统盘 + ${offer.specs?.dataDiskGb} GB 数据盘` : '成交前确认'}</dd></div><div><dt>环境</dt><dd>驱动 {offer.specs?.driverVersion ?? '待确认'} · CUDA {offer.specs?.cudaMaxVersion ?? '待确认'}</dd></div><div><dt>区域</dt><dd>{offer.region}</dd></div><div><dt>交付</dt><dd>{offer.delivery}</dd></div></dl><footer>{offer.tags.map((tag) => <span key={tag}>{tag}</span>)}</footer><button type="button" onClick={() => chooseOffer(offer)}>查看配置并预约</button></article>)}</div>}<form onSubmit={submit} noValidate={!signedIn}>
-      <div className="compute-form-head"><div>{tab === 'rental' ? <HardDrives /> : tab === 'supply' ? <Storefront /> : tab === 'hosting' ? <Buildings /> : <Handshake />}</div><span><strong>{formTitle[tab]}</strong><small>{formSummary[tab]}</small></span></div>
-      {tab === 'hosting' && <ol className="compute-hosting-flow compute-wide" aria-label="第三方托管办理流程"><li><strong>提交设备信息</strong><small>COD 记录需求并匹配托管商</small></li><li><strong>托管商初筛</strong><small>确认机位、电力、网络与档期</small></li><li><strong>现场验机签约</strong><small>双方验收设备并签署机房合同</small></li><li><strong>上线与结算</strong><small>双方确认 SLA、保险和账期</small></li></ol>}
-      {tab === 'rental' && <><label className="compute-wide">算力商品<select aria-label="算力商品" value={selectedOffer?.id ?? ''} onChange={(event) => { const offer = offers.find((item) => item.id === event.target.value); if (offer) chooseOffer(offer); }}>{offers.map((offer) => <option key={offer.id} value={offer.id}>{offer.title} · {offer.priceCents === null ? '询价' : `¥${(offer.priceCents / 100).toFixed(2)}/${unitLabel[offer.priceUnit]}`}</option>)}</select></label>{selectedOffer && <section className="compute-configurator compute-wide" aria-label="租赁配置"><header><strong>选择镜像</strong><small>下单前仍由交付人员复核版本与驱动兼容性</small></header><div className="compute-image-options">{(selectedOffer.images ?? []).map((image) => <button type="button" className={(imageId || selectedOffer.images?.[0]?.id)===image.id?'active':''} aria-pressed={(imageId || selectedOffer.images?.[0]?.id)===image.id} key={image.id} onClick={()=>updateDraft({imageId:image.id})}><strong>{image.name} {image.frameworkVersion}</strong><small>Python {image.pythonVersion} · CUDA {image.cudaVersion}</small></button>)}</div><div className="compute-periods"><span>支持周期</span>{(selectedOffer.supportedPeriods ?? []).map((period)=><i key={period}>{period==='hour'?'按时':period==='day'?'按天':'按月'}</i>)}<b>{selectedOffer.inventoryCards===null?'可用资源成交前确认':`最高 ${selectedOffer.inventoryCards} 卡可申请 · 最终人工确认`}</b></div></section>}</>}
-      <label>公司 / 团队<input aria-label="公司或团队" value={company} onChange={(event) => updateDraft({ company: event.target.value })} required minLength={2} maxLength={120} placeholder="公司或团队名称" autoComplete="organization" /></label><label>联系人<input aria-label="联系人" value={contactName} onChange={(event) => updateDraft({ contactName: event.target.value })} required maxLength={60} autoComplete="name" /></label><label>手机 / 微信<input aria-label="手机或微信" value={contactPhone} onChange={(event) => updateDraft({ contactPhone: event.target.value })} required pattern={String.raw`(?:[0-9+\(\)\-\s]{6,40}|[A-Za-z][A-Za-z0-9_\-]{5,39})`} placeholder="手机号或微信号" autoComplete="tel" /></label><label>所在城市<input aria-label="所在城市" value={city} onChange={(event) => updateDraft({ city: event.target.value })} required maxLength={80} autoComplete="address-level2" /></label>
-      <label>GPU 型号<input aria-label="GPU 型号" value={gpuModel} onChange={(event) => updateDraft({ gpuModel: event.target.value })} required maxLength={100} /></label><label>卡数<input aria-label="卡数" type="number" min={1} max={4096} value={quantity} onChange={(event) => updateDraft({ quantity: Number(event.target.value) })} required /></label>{tab === 'rental' && <label>预计卡时<input aria-label="预计卡时" type="number" min={1} max={1000000} value={durationHours} onChange={(event) => updateDraft({ durationHours: Number(event.target.value) })} required /></label>}{tab === 'installment' && <label>期数<select aria-label="分期期数" value={termMonths} onChange={(event) => updateDraft({ termMonths: Number(event.target.value) })}><option value={12}>12 个月</option><option value={24}>24 个月</option><option value={36}>36 个月</option></select></label>}
-      {tab === 'hosting' && <><label>托管周期<select aria-label="托管周期" value={hostingPeriodMonths} onChange={(event) => updateDraft({ hostingPeriodMonths: Number(event.target.value) })}><option value={1}>1 个月</option><option value={3}>3 个月</option><option value={6}>6 个月</option><option value={12}>12 个月</option><option value={24}>24 个月</option></select></label><label>机架空间 <small>选填</small><input aria-label="机架空间" type="number" min={1} max={256} value={rackUnits || ''} onChange={(event) => updateDraft({ rackUnits: Number(event.target.value) })} placeholder="U 数" inputMode="numeric" /></label><label>预计功耗 <small>选填</small><span className="compute-input-unit"><input aria-label="预计功耗" type="number" min={0.1} max={1000} step={0.1} value={powerKilowatts || ''} onChange={(event) => updateDraft({ powerKilowatts: Number(event.target.value) })} placeholder="例如 6.5" inputMode="decimal" /><i>kW</i></span></label><label>所需带宽 <small>选填</small><span className="compute-input-unit"><input aria-label="所需带宽" type="number" min={1} max={1000000} value={networkMbps || ''} onChange={(event) => updateDraft({ networkMbps: Number(event.target.value) })} placeholder="例如 1000" inputMode="numeric" /><i>Mbps</i></span></label><label className="compute-wide">设备与可用条件 <small>参数不全时必填</small><textarea aria-label="设备与可用条件" value={availabilityNotes} onChange={(event) => updateDraft({ availabilityNotes: event.target.value })} required={!rackUnits && !powerKilowatts && !networkMbps} maxLength={1000} placeholder="服务器形态、整机尺寸、当前供电与网络接口、可进场时间；不清楚精确参数时可注明待现场确认。" /></label><label className="compute-wide">期望结算方式<select aria-label="期望结算方式" value={settlementPreference} onChange={(event) => updateDraft({ settlementPreference: event.target.value })} required><option>固定托管费（月结）</option><option>算力收益分成（月结）</option><option>保底费用 + 收益分成</option><option>托管商报价后确认</option></select></label><label className="compute-wide">机房与服务要求<textarea aria-label="机房与服务要求" value={hostingRequirements} onChange={(event) => updateDraft({ hostingRequirements: event.target.value })} required maxLength={2000} placeholder="城市范围、机房等级、温湿度、门禁监控、保险、远程运维和 SLA 要求。" /></label></>}
-      {tab !== 'hosting' && <label className="compute-wide">需求说明<textarea aria-label="需求说明" value={requirements} onChange={(event) => updateDraft({ requirements: event.target.value })} maxLength={2000} placeholder={requirementsPlaceholder[tab]} /></label>}
-      {tab === 'hosting' && <div className="compute-compliance compute-hosting-responsibility compute-wide" role="note"><ShieldCheck /> <span><strong>第三方托管责任边界</strong>COD 仅提供需求撮合与过程记录，不接收或保管设备，也不代签合同或代为结算。设备验收、机房合同、SLA、保险和费用结算，须由你与第三方托管商书面确认。</span></div>}{tab === 'installment' && <div className="compute-compliance compute-wide"><ShieldCheck /> 融资租赁申请将由具备相应资质的合作机构独立审核并签署书面合同；提交申请不代表授信通过。</div>}{error && <div className="notice error compute-wide">{error}</div>}{signedIn ? <button type="submit" className="primary-button compute-wide" disabled={submitting}>{submitting ? <CircleNotch className="spin" /> : <PaperPlaneTilt weight="fill" />}{tab === 'hosting' ? '提交托管需求' : '提交并等待报价'}</button> : <button type="button" className="primary-button compute-wide" onClick={onLogin}><Key /> {tab === 'hosting' ? '登录后提交托管需求' : '登录后提交需求'}</button>}
-    </form></section>
-    {requests.length > 0 && <section className="compute-requests"><header><strong>我的算力</strong><small>报价由你确认，确认后才进入交付</small></header><div className="compute-asset-summary"><span><small>我的资产</small><strong>{assetCount}</strong></span><span><small>托管设备</small><strong>{hostedCount}</strong></span><span><small>设备租赁</small><strong>{rentalCount}</strong></span></div>{requests.map((request) => <article key={request.id}><div className="compute-request-line"><span><strong>{requestKindLabel[request.kind]} · {request.gpuModel}</strong><small>{request.quantity} 卡{request.durationHours ? ` · ${request.durationHours} 卡时` : ''}{request.termMonths ? ` · ${request.termMonths} 个月` : ''}{request.hostingPeriodMonths ? ` · 托管 ${request.hostingPeriodMonths} 个月` : ''} · {formatTime(request.createdAt)}</small></span><i className={request.status}>{statusLabel[request.status]}</i></div>{request.quote&&<div className="compute-quote"><span><small>COD 报价</small><strong>¥{(request.quote.amountCents/100).toFixed(2)}</strong>{request.quote.cardHoursMilli!==null&&<small>{(request.quote.cardHoursMilli/1000).toFixed(3)} 卡时</small>}</span><p>{request.quote.terms}<small>有效至 {formatAdminDate(request.quote.validUntil)}</small></p>{request.status==='quoted'?<div><button type="button" className="secondary" disabled={decidingId===request.id||new Date(request.quote.validUntil).getTime()<=Date.now()} onClick={()=>void decideQuote(request,'declined')}>拒绝报价</button><button type="button" disabled={decidingId===request.id||new Date(request.quote.validUntil).getTime()<=Date.now()} onClick={()=>void decideQuote(request,'accepted')}>{decidingId===request.id?<CircleNotch className="spin"/>:<Check weight="bold"/>}确认报价</button></div>:request.quoteDecision&&<b>{request.quoteDecision==='accepted'?'已由你确认':'已由你拒绝'}</b>}</div>}</article>)}</section>}
-  </div>;
-}
-
 const computeKindLabels: Record<ComputeRequest['kind'], string> = {
   rental: '算力租赁', supply: '供方上架', hosting: '第三方托管', installment: '显卡分期',
 };
@@ -1084,6 +985,7 @@ export function App() {
   const [compareEnabled, setCompareEnabled] = useState(false);
   const [compareModelKeys, setCompareModelKeys] = useState<string[]>([]);
   const [products, setProducts] = useState<ProductManifest[]>([]);
+  const [computeRequests, setComputeRequests] = useState<ComputeRequest[]>([]);
   const [computePath, setComputePath] = useState(() => window.location.pathname.startsWith('/compute') ? `${window.location.pathname}${window.location.search}` : '/compute');
   const [computeLoginReturnTo, setComputeLoginReturnTo] = useState<string | null>(null);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
@@ -1092,7 +994,7 @@ export function App() {
   const [mode, setMode] = useState<WorkspaceMode>(() => hasDesktopBridge() ? 'code' : 'chat');
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>('changes');
   const [inspectorOpen, setInspectorOpen] = useState(initialInspectorOpen);
-  const [overlay, setOverlay] = useState<Overlay>(null);
+  const [overlay, setOverlay] = useState<Overlay>(() => window.location.pathname.startsWith('/compute') ? 'compute' : null);
   const [taskboardUrl, setTaskboardUrl] = useState<string | null>(null);
   const [desktopPetStatus, setDesktopPetStatus] = useState<DesktopPetStatus | null>(null);
   const [desktopPetBusy, setDesktopPetBusy] = useState(false);
@@ -1133,6 +1035,7 @@ export function App() {
   const validatedProjectDiffStatusRef=useRef<ProjectDiffStatus>('idle');
   const projectRootRef=useRef(project.root);
   projectRootRef.current=project.root;
+  const workspaceUrl=useRef(window.location.pathname.startsWith('/compute') ? '/' : `${window.location.pathname}${window.location.search}${window.location.hash}`);
   const sessionToken = session?.token ?? null;
   const sessionTokenRef=useRef<string|null>(sessionToken);
   sessionTokenRef.current=sessionToken;
@@ -1204,7 +1107,7 @@ export function App() {
     permissionResolver.current?.(null);permissionResolver.current=null;
     void window.codDesktop?.stopGoose();
     void window.codDesktop?.stopDesktopPet?.().then(setDesktopPetStatus).catch(() => undefined);
-    setSession(null);setTasks([]);setDevices([]);setLedger([]);setCreditPacks({ packs: [], summary: { availableCents: 0, grants: [] } });setComputeRequests([]);setReferralSummary(null);setKnowledgeHits([]);setKnowledgeLoading(false);setPaymentOrder(null);setPaymentCheckout(null);setPaymentBusy(false);setCurrentDeviceId('');setTargetDeviceId('');setActiveTaskId(null);setMessagesByTask({});setPrompt('');setPendingSend(null);setResumeComputeAfterLogin(false);setPendingPermission(null);setIsSending(false);setAgentStatus('就绪');setNotice(message);setOverlay(null);setAuthState('signed-out');
+    setSession(null);setTasks([]);setDevices([]);setLedger([]);setCreditPacks({ packs: [], summary: { availableCents: 0, grants: [] } });setComputeRequests([]);setReferralSummary(null);setKnowledgeHits([]);setKnowledgeLoading(false);setPaymentOrder(null);setPaymentCheckout(null);setPaymentBusy(false);setCurrentDeviceId('');setTargetDeviceId('');setActiveTaskId(null);setMessagesByTask({});setPrompt('');setPendingSend(null);setComputeLoginReturnTo(null);setPendingPermission(null);setIsSending(false);setAgentStatus('就绪');setNotice(message);setOverlay(null);setAuthState('signed-out');
   }, []);
 
   const closeTopmostUi = useCallback(() => {
@@ -1217,7 +1120,6 @@ export function App() {
         return;
       }
       if (overlay === 'login') {
-        authGenerationRef.current += 1;
         setPendingSend(null);
         if (computeLoginReturnTo) {
           setComputeLoginReturnTo(null);
@@ -1260,8 +1162,12 @@ export function App() {
           authRequestControllerRef.current=null;
           authAttemptGenerationRef.current += 1;
           setPendingSend(null);
-          setResumeComputeAfterLogin(false);
           setInitialAuthMode('login');
+          if (computeLoginReturnTo) {
+            setComputeLoginReturnTo(null);
+            setOverlay('compute');
+            return;
+          }
         }
         setOverlay(null);
       });
@@ -1272,7 +1178,7 @@ export function App() {
       return;
     }
     setCodNativeBackHandler(null);
-  }, [overlay, sidebarOpen]);
+  }, [computeLoginReturnTo, overlay, sidebarOpen]);
 
   useEffect(() => {
     if (!sidebarOpen || overlay) return;
@@ -1317,8 +1223,6 @@ export function App() {
     window.addEventListener('focus',handleFocus);
     return()=>{cancelled=true;window.clearInterval(interval);window.removeEventListener('focus',handleFocus);};
   }, []);
-
-  useEffect(() => { listComputeOffers().then(setComputeOffers).catch(() => setComputeOffers([])); }, []);
 
   useEffect(() => {
     if (!sessionToken) { setComputeRequests([]); return; }
@@ -1619,23 +1523,27 @@ export function App() {
       }
       throw error;
     }
-    sessionTokenRef.current=nextSession.token;setSession(nextSession);setAuthState('signed-in');setInitialAuthMode('login');setOverlay(nextOverlay);setResumeComputeAfterLogin(false);
+    sessionTokenRef.current=nextSession.token;setSession(nextSession);setAuthState('signed-in');setInitialAuthMode('login');setOverlay(nextOverlay);
   };
   const handleLogin = async (email: string, password: string, signal: AbortSignal) => {
+    const computeReturnTo=computeLoginReturnTo;
     const authAttemptGeneration=++authAttemptGenerationRef.current;
     const issuedToken=await loginCod(email,password,{signal});
     if(signal.aborted||authAttemptGenerationRef.current!==authAttemptGeneration)throw signal.reason??new DOMException('Authentication attempt superseded','AbortError');
     const nextSession=await hydrateCodSession(issuedToken,signal);
     if(signal.aborted||authAttemptGenerationRef.current!==authAttemptGeneration)throw signal.reason??new DOMException('Authentication attempt superseded','AbortError');
-    await establishAuthenticatedSession(nextSession,authAttemptGeneration,signal,resumeComputeAfterLogin?'compute':null);
+    await establishAuthenticatedSession(nextSession,authAttemptGeneration,signal,computeReturnTo?'compute':null);
+    if(computeReturnTo){setComputePath(computeReturnTo);setComputeLoginReturnTo(null);}
   };
   const handleRegister=async(input:VerifiedRegistrationInput|DirectRegistrationInput|LegacyMigrationInput,signal:AbortSignal,idempotencyKey?:string)=>{
+    const computeReturnTo=computeLoginReturnTo;
     const authAttemptGeneration=++authAttemptGenerationRef.current;
     const issuedToken=await registerCod(input,{signal,idempotencyKey});
     if(signal.aborted||authAttemptGenerationRef.current!==authAttemptGeneration)throw signal.reason??new DOMException('Authentication attempt superseded','AbortError');
     const nextSession=await hydrateCodSession(issuedToken,signal);
     if(signal.aborted||authAttemptGenerationRef.current!==authAttemptGeneration)throw signal.reason??new DOMException('Authentication attempt superseded','AbortError');
-    await establishAuthenticatedSession(nextSession,authAttemptGeneration,signal,resumeComputeAfterLogin?'compute':null);
+    await establishAuthenticatedSession(nextSession,authAttemptGeneration,signal,computeReturnTo?'compute':null);
+    if(computeReturnTo){setComputePath(computeReturnTo);setComputeLoginReturnTo(null);}
   };
   const handleLogout = () => {
     const expectedToken=sessionTokenRef.current??undefined;
@@ -1648,11 +1556,10 @@ export function App() {
     setManualRefreshBusy(true);
     try {
       if (!session) {
-        const [capabilitiesResult, catalogResult, offersResult] = await Promise.allSettled([getCapabilities(), listModelCatalog(), listComputeOffers()]);
+        const [capabilitiesResult, catalogResult] = await Promise.allSettled([getCapabilities(), listModelCatalog()]);
         if (capabilitiesResult.status === 'fulfilled') { setCapabilities(capabilitiesResult.value); setCapabilityError(''); }
         if (catalogResult.status === 'fulfilled') { setModelCatalog(catalogResult.value); setModelCatalogError(''); }
-        if (offersResult.status === 'fulfilled') setComputeOffers(offersResult.value);
-        const failed = [capabilitiesResult.status === 'rejected' ? '服务状态' : '', catalogResult.status === 'rejected' ? '模型目录' : '', offersResult.status === 'rejected' ? '算力市场' : ''].filter(Boolean);
+        const failed = [capabilitiesResult.status === 'rejected' ? '服务状态' : '', catalogResult.status === 'rejected' ? '模型目录' : ''].filter(Boolean);
         setNotice(failed.length ? `${failed.join('、')}刷新失败，请检查网络后重试。` : '公开服务信息已刷新。');
         return;
       }
@@ -1762,14 +1669,6 @@ export function App() {
     try{const result=await purchaseCreditPack(token,packId);if(sessionTokenRef.current!==token)return;setSession((current)=>current?.token===token?{...current,account:result.account}:current);setCreditPacks((current)=>({...current,summary:result.summary}));const nextLedger=await listLedger(token);if(sessionTokenRef.current!==token)return;setLedger(nextLedger);setNotice(`${result.grant.name} 已到账，有效至 ${new Date(result.grant.expiresAt).toLocaleDateString('zh-CN')}。`);}
     catch(error){if(sessionTokenRef.current===token)setNotice(error instanceof Error?error.message:'购买额度包失败');}
     finally{if(sessionTokenRef.current===token)setPurchasingPackId('');}
-  };
-  const handleComputeRequest = async (input:ComputeRequestInput) => {
-    if(!session){setOverlay('login');return;}
-    const token=session.token;const created=await createComputeRequest(token,input);if(sessionTokenRef.current!==token)return;setComputeRequests((current)=>[created,...current.filter((item)=>item.id!==created.id)]);setNotice(input.kind==='hosting'?'托管需求已记录，COD 将匹配第三方托管商；待机位、电力、网络与档期核验后会联系你。':'需求已提交，商务确认库存和交付条件后会联系你。');
-  };
-  const handleComputeQuoteDecision = async (request:ComputeRequest,decision:'accepted'|'declined') => {
-    if(!session){setOverlay('login');return;}const token=session.token;const updated=await decideComputeRequestQuote(token,request.id,decision,request.status);if(sessionTokenRef.current!==token)return;
-    setComputeRequests((current)=>current.map((item)=>item.id===updated.id?updated:item));setNotice(decision==='accepted'?'报价已确认，COD 将按条款推进交付。':'报价已拒绝，该需求已关闭。');
   };
   const handleSourceChange = (sourceId: string) => {
     if (!session) return;
@@ -2124,10 +2023,6 @@ export function App() {
     attention:computeRequests.filter((item)=>item.status==='action_required').length,
   };
 
-  const openComputeMarket = () => {
-    setComputePath('/compute');
-    setOverlay('compute');
-  };
   const exitComputeMarket = () => {
     window.history.replaceState({}, '', workspaceUrl.current);
     setComputePath('/compute');
@@ -2180,9 +2075,8 @@ export function App() {
         </div></section>
     </main>
     {inspectorOpen && <aside className="inspector"><div className="inspector-tabs"><button className={inspectorTab === 'changes' ? 'active' : ''} onClick={() => setInspectorTab('changes')}><GitDiff /> 改动</button><button className={inspectorTab === 'files' ? 'active' : ''} onClick={() => setInspectorTab('files')}><Folder /> 文件</button><button className={inspectorTab === 'terminal' ? 'active' : ''} onClick={() => setInspectorTab('terminal')}><TerminalWindow /> 终端</button><button className="inspector-close" title="隐藏右侧面板" onClick={toggleInspector}><X /></button></div><div className={`inspector-body ${inspectorTab}`}>{inspectorTab === 'changes' && <><div className="panel-title"><span><GitDiff /> 未提交改动</span><button title="刷新" onClick={refreshProject}><ArrowClockwise /></button></div>{!project.root?<div className="panel-empty">Web 端不伪造 Diff。请在 COD Desktop 中选择本机项目。</div>:projectDiffStatus==='loading'?<div className="panel-empty">正在读取 Git 改动…</div>:projectDiffStatus==='error'?<div className="panel-empty">Git 改动读取失败，可点击刷新重试。</div>:<CodeBlock text={project.diff || '当前项目没有未提交改动。'} />}</>}{inspectorTab === 'files' && <>{project.root ? <><div className="panel-title"><span><Folder /> 项目文件</span><small>{project.files.length}</small></div><FileTree files={project.files} selected={project.selectedFile} onSelect={handleFileSelect} />{project.selectedFile && <div className="file-preview"><strong>{project.selectedFile}</strong><CodeBlock text={project.selectedContent} /></div>}</> : <div className="panel-empty">本机文件仅在 COD Desktop 中可用。</div>}</>}{inspectorTab === 'terminal' && <>{window.codDesktop && project.root ? <><div className="panel-title"><span><TerminalWindow /> 本地终端</span><small>desktop</small></div><div className="terminal"><pre>{terminalOutput}</pre><div className="terminal-command"><span>$</span><input aria-label="终端命令" value={command} onChange={(event) => setCommand(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && handleRun()} /><button onClick={handleRun}>运行</button></div></div></> : <div className="panel-empty">Web 端不会执行或伪造终端结果。请使用 COD Desktop。</div>}</>}</div></aside>}
-    {overlay === 'login' && <Modal title={pendingSend ? '登录后继续' : initialAuthMode === 'register' ? '注册 COD' : '登录 COD'} onClose={() => { cancelAuthentication();setPendingSend(null);setResumeComputeAfterLogin(false);setInitialAuthMode('login');setOverlay(null); }}><LoginForm capabilities={capabilities} capabilityError={capabilityError} resumeConversation={Boolean(pendingSend)} initialMode={initialAuthMode} onModeChange={setInitialAuthMode} onCancelAuthentication={cancelAuthentication} onLogin={handleLogin} onRegister={handleRegister} /></Modal>}
+    {overlay === 'login' && <Modal title={pendingSend ? '登录后继续' : initialAuthMode === 'register' ? '注册 COD' : '登录 COD'} onClose={() => { cancelAuthentication();setInitialAuthMode('login');closeTopmostUi(); }}><LoginForm capabilities={capabilities} capabilityError={capabilityError} resumeConversation={Boolean(pendingSend)} initialMode={initialAuthMode} onModeChange={setInitialAuthMode} onCancelAuthentication={cancelAuthentication} onLogin={handleLogin} onRegister={handleRegister} /></Modal>}
     {overlay === 'models' && <Modal title="模型库" wide onClose={() => setOverlay(null)}><ModelLibrary sources={modelCatalog} error={modelCatalogError} signedIn={Boolean(session)} onLogin={() => setOverlay('login')} /></Modal>}
-    {overlay === 'compute' && <Modal title="COD 算力市场 · 租赁 / 上架 / 托管 / 分期" wide onClose={() => setOverlay(null)}><ComputeMarket offers={computeOffers} requests={computeRequests} signedIn={Boolean(session)} draft={computeDraft} onDraftChange={setComputeDraft} onLogin={() => { setResumeComputeAfterLogin(true); setOverlay('login'); }} onSubmit={handleComputeRequest} onQuoteDecision={handleComputeQuoteDecision} /></Modal>}
     {overlay === 'compute-admin' && session?.account.role === 'admin' && <Modal title="管理员 · 算力申请" wide onClose={() => setOverlay('account')}><AdminComputeRequests token={session.token} /></Modal>}
     {overlay === 'taskboard' && taskboardUrl && <section className="product-overlay taskboard-overlay" role="dialog" aria-modal="true" aria-label="任务看板"><header><div><Kanban weight="fill" /><span><strong>任务看板</strong><small>本地 Dashi Taskboard</small></span></div><button type="button" onClick={() => setOverlay(null)}><X /> 关闭</button></header><iframe title="Dashi Taskboard" src={taskboardUrl} referrerPolicy="no-referrer" sandbox="allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts" /></section>}
     {overlay === 'desktop-pet' && <Modal title="COD 桌面伙伴" onClose={() => setOverlay(null)}><div className="desktop-pet-panel"><div className="desktop-pet-state"><span className={desktopPetStatus?.running?'is-running':desktopPetStatus?.verified?'is-ready':'is-blocked'}><ChatCircleDots weight="fill" /></span><div><strong>{desktopPetStatus?.running?'正在运行':desktopPetStatus?.verified?'已就绪':desktopPetStatus?.reason==='integrity-failed'?'文件校验失败':'尚未安装'}</strong><p>{desktopPetStatus?.running?`已通过 COD 临时代理连接 ${selectedSource?.label??'当前模型'} · ${selectedModelInfo?.label??selectedModelInfo?.id??''}`:desktopPetStatus?.verified?`已审计版本 ${desktopPetStatus.version}，点击后连接当前登录账户与模型。`:desktopPetStatus?.reason==='integrity-failed'?'检测到的文件与已审计版本不一致，COD 不会运行它。':'请先安装 COD 桌宠 0.7.0，再刷新检测状态。'}</p></div></div><div className="desktop-pet-audit"><ShieldCheck weight="bold" /><div><strong>完整性已校验，发行签名未完成</strong><p>三端业务包哈希一致；macOS 尚无 Developer ID/公证，Windows 尚无 Authenticode。当前仅建议内部测试，不会随 COD 静默自启。</p></div></div><div className="desktop-pet-actions"><button type="button" className="secondary-button" disabled={desktopPetBusy} onClick={() => void refreshDesktopPetStatus()}>{desktopPetBusy?<CircleNotch className="spin"/>:<ArrowClockwise/>}刷新检测</button>{desktopPetStatus?.running?<button type="button" className="primary-button" disabled={desktopPetBusy} onClick={() => void handleDesktopPetStop()}><Stop weight="fill"/>停止桌宠</button>:<button type="button" className="primary-button" disabled={desktopPetBusy||!desktopPetStatus?.verified||!session||!selectedSource?.callable||!selectedModelInfo} onClick={() => void handleDesktopPetLaunch()}><Play weight="fill"/>连接并启动</button>}</div>{!session&&<p className="desktop-pet-help">登录 COD 后，桌宠才会启用真实模型对话；未登录时不会以演示回复冒充模型结果。</p>}</div></Modal>}

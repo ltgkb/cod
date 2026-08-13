@@ -2,6 +2,7 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto
 import { createServer, type ServerResponse } from 'node:http';
 import { isIP } from 'node:net';
 import type { ComputeRequestKind, ComputeRequestStatus, TaskStatus, UsageEvent } from '@cod/contracts';
+import type { ComputePrincipal } from '@cod/contracts/compute-market-v2';
 import { AGENT_SESSION_TTL_MS, createAgentSessionToken, createSessionToken, hashPassword, validatePassword, verifyAgentSessionToken, verifyPassword, verifySessionToken } from './auth.js';
 import { BotService, parseBotCommand, parseFeishuWebhook, replyFeishuMessage, verifyWebhookSignature, type BotPlatform } from './bots.js';
 import { loadConfig, type ControlPlaneConfig } from './config.js';
@@ -14,6 +15,8 @@ import { MemoryDatabase } from './memory-database.js';
 import { ProductRegistry } from './products.js';
 import { beginRequest, recordRequest, recordUsageReservationLeaseFailure, renderMetrics } from './metrics.js';
 import { computeOfferCatalog, validateComputeQuote, validateComputeRequest } from './compute-market.js';
+import { computeRequestFromNode, createComputeMarketV2Router } from './compute-market-v2/router.js';
+import { createComputeReviewCatalog } from './compute-market-v2/review-catalog.js';
 import { OfficialPaymentService } from './payments.js';
 import { defaultPinnedFetcher, maskRegistrationDestination, normalizeRegistrationEmail, normalizeRegistrationPhone, RegistrationVerification, registrationDeliveryFromConfig, validateRegistrationChallengeId, validateRegistrationCode, type PinnedFetcher, type RegistrationDelivery, type RegistrationEndpointValidator } from './registration-verification.js';
 

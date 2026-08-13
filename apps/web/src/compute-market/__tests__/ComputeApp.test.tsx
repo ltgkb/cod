@@ -62,7 +62,7 @@ describe('ComputeApp', () => {
   });
 
   it('uses a four-step hosting form and keeps the draft locally', async () => {
-    mockFetch(); const session = { token: 'token', account: { userId: 'user', displayName: '测试用户', balanceCents: 0, currency: 'CNY' as const, plan: 'developer' as const } };
+    mockFetch(); const session = { token: 'token', account: { userId: 'user', displayName: '测试用户', balanceCents: 0, currency: 'CNY' as const, plan: 'developer' as const, role: 'member' as const, billingExempt: false } };
     render(<ComputeApp {...props} session={session} initialPath="/compute/hosting/apply" />);
     expect(await screen.findByRole('heading', { name: '主体与联系方式' })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('联系人'), { target: { value: '设备负责人' } }); fireEvent.change(screen.getByLabelText('联系电话'), { target: { value: '13800001111' } });
@@ -77,7 +77,7 @@ describe('ComputeApp', () => {
       if (url.endsWith('/api/compute/v2/devices')) return json({ items: [], nextCursor: null });
       return undefined;
     });
-    const session = { token: 'token', account: { userId: 'user', displayName: '测试用户', balanceCents: 0, currency: 'CNY' as const, plan: 'developer' as const } };
+    const session = { token: 'token', account: { userId: 'user', displayName: '测试用户', balanceCents: 0, currency: 'CNY' as const, plan: 'developer' as const, role: 'member' as const, billingExempt: false } };
     render(<ComputeApp {...props} session={session} initialPath="/compute/me" />);
     expect(await screen.findByText('统一 COD 账户')).toBeInTheDocument(); expect(screen.queryByText('优惠券')).not.toBeInTheDocument(); expect(screen.queryByText('地址管理')).not.toBeInTheDocument(); expect(document.body).not.toHaveTextContent('提现');
   });

@@ -186,6 +186,7 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
   // without a provider key stay unavailable instead of silently appearing to
   // complete a real model request.
   const demoMode = environment.COD_DEMO_MODE === 'true';
+  const computeReviewMode = !production && environment.COD_COMPUTE_REVIEW_MODE === 'true';
   const paymentWebhookSecret = environment.COD_PAYMENT_WEBHOOK_SECRET ?? null;
   const paymentPublicBaseUrl = environment.COD_PAYMENT_PUBLIC_BASE_URL?.replace(/\/$/, '') ?? null;
   const configuredGroup = <T extends Record<string, string | undefined>>(name: string, values: T): { [K in keyof T]: string } | null => {

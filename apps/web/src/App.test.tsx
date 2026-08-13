@@ -1493,80 +1493,12 @@ describe('COD workspace', () => {
     render(<App />);
     await screen.findByRole('heading', { name: '新对话' });
     fireEvent.click(screen.getByTitle('算力市场'));
-    const dialog = await screen.findByRole('dialog', { name: 'COD 算力市场 · 租赁 / 上架 / 托管 / 分期' });
-    expect(within(dialog).getByText('H100 80GB 单卡算力')).toBeInTheDocument();
-    expect(within(dialog).getByText('¥18.80')).toBeInTheDocument();
-    expect(within(dialog).getByText('/ 卡时起')).toBeInTheDocument();
-    fireEvent.click(within(dialog).getByRole('button', { name: /显卡分期/ }));
-    expect(within(dialog).getByText(/COD 仅撮合申请，不自行授信或放款/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/具备相应资质的合作机构独立审核/)).toBeInTheDocument();
-    expect(within(dialog).getByRole('button', { name: '登录后提交需求' })).toBeInTheDocument();
-  });
-
-  it('submits a third-party GPU hosting request with explicit custody and settlement boundaries', async () => {
-    window.localStorage.setItem('cod.session.token', 'hosting-test-token');
-    const account = { userId: 'user', displayName: 'gpu-owner', balanceCents: 5000, currency: 'CNY', plan: 'developer', role: 'member', billingExempt: false };
-    let submitted: Record<string, unknown> | null = null;
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url.endsWith('/api/capabilities')) return json(capabilities);
-      if (url.endsWith('/api/model-catalog')) return json([]);
-      if (url.endsWith('/api/account')) return json(account);
-      if (url.endsWith('/api/model-sources')) return json([]);
-      if (url.endsWith('/api/compute/offers')) return json([]);
-      if (url.endsWith('/api/compute/requests') && init?.method === 'POST') {
-        submitted = JSON.parse(String(init.body)) as Record<string, unknown>;
-        return json({ ...submitted, id: 'hosting-request-1', email: 'owner@example.com', status: 'submitted', fulfillmentMode: 'third-party-manual-match', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, 201);
-      }
-      if (url.endsWith('/api/compute/requests')) return json([]);
-      if (url.endsWith('/api/devices') && init?.method === 'POST') return json({ id: 'web-device', name: 'COD Web', platform: 'web', status: 'online', lastSeenAt: new Date().toISOString() }, 201);
-      if (url.endsWith('/api/devices') || url.endsWith('/api/tasks')) return json([]);
-      if (url.endsWith('/api/products') || url.endsWith('/api/ledger')) return json([]);
-      if (url.endsWith('/api/credit-packs')) return json(creditPacks);
-      if (url.endsWith('/api/referrals')) return json({ inviteCode: 'TESTCODE', referredUsers: 0, commissionRateBps: 0, pendingCommissionCents: 0, settledCommissionCents: 0 });
-      throw new Error(`Unexpected request: ${url}`);
-    });
-    vi.stubGlobal('fetch', fetchMock);
-    render(<App />);
-    await screen.findByRole('heading', { name: '新建或选择任务' });
-    fireEvent.click(screen.getByTitle('算力市场'));
-    const dialog = await screen.findByRole('dialog', { name: 'COD 算力市场 · 租赁 / 上架 / 托管 / 分期' });
-    fireEvent.click(within(dialog).getByRole('button', { name: /第三方托管/ }));
-
-    expect(within(dialog).getByRole('button', { name: /第三方托管/ })).toHaveAttribute('aria-pressed', 'true');
-    expect(within(dialog).getByRole('list', { name: '第三方托管办理流程' })).toBeInTheDocument();
-    expect(within(dialog).getByText(/COD 仅提供需求撮合与过程记录/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/设备验收、机房合同、SLA、保险和费用结算/)).toBeInTheDocument();
-    expect(within(dialog).getByLabelText('设备与可用条件')).toBeRequired();
-    expect(within(dialog).getByLabelText('机房与服务要求')).toBeRequired();
-    expect(within(dialog).getByLabelText('手机或微信')).toHaveAttribute('pattern', String.raw`(?:[0-9+\(\)\-\s]{6,40}|[A-Za-z][A-Za-z0-9_\-]{5,39})`);
-
-    fireEvent.change(within(dialog).getByLabelText('公司或团队'), { target: { value: '星港算力' } });
-    fireEvent.change(within(dialog).getByLabelText('联系人'), { target: { value: '林工' } });
-    fireEvent.change(within(dialog).getByLabelText('手机或微信'), { target: { value: '13800138000' } });
-    fireEvent.change(within(dialog).getByLabelText('所在城市'), { target: { value: '深圳' } });
-    fireEvent.change(within(dialog).getByLabelText('GPU 型号'), { target: { value: 'NVIDIA RTX 4090 24GB' } });
-    fireEvent.change(within(dialog).getByLabelText('卡数'), { target: { value: '8' } });
-    fireEvent.change(within(dialog).getByLabelText('托管周期'), { target: { value: '6' } });
-    fireEvent.change(within(dialog).getByLabelText('机架空间'), { target: { value: '4' } });
-    expect(within(dialog).getByLabelText('设备与可用条件')).not.toBeRequired();
-    fireEvent.change(within(dialog).getByLabelText('预计功耗'), { target: { value: '6.5' } });
-    fireEvent.change(within(dialog).getByLabelText('所需带宽'), { target: { value: '1000' } });
-    fireEvent.change(within(dialog).getByLabelText('设备与可用条件'), { target: { value: '4U 双电源服务器，月底可进场' } });
-    fireEvent.change(within(dialog).getByLabelText('期望结算方式'), { target: { value: '算力收益分成（月结）' } });
-    fireEvent.change(within(dialog).getByLabelText('机房与服务要求'), { target: { value: '需门禁记录、远程运维、设备保险及书面 SLA' } });
-    fireEvent.click(within(dialog).getByRole('button', { name: '提交托管需求' }));
-
-    await waitFor(() => expect(submitted).not.toBeNull());
-    expect(submitted).toMatchObject({
-      kind: 'hosting', offerId: null, company: '星港算力', contactName: '林工', contactPhone: '13800138000', city: '深圳',
-      gpuModel: 'NVIDIA RTX 4090 24GB', quantity: 8, durationHours: null, termMonths: null, requirements: '需门禁记录、远程运维、设备保险及书面 SLA',
-      hostingPeriodMonths: 6, rackUnits: 4, powerKilowatts: 6.5, networkMbps: 1000, availabilityNotes: '4U 双电源服务器，月底可进场',
-      settlementPreference: '算力收益分成（月结）', hostingRequirements: '需门禁记录、远程运维、设备保险及书面 SLA',
-    });
-    expect(within(dialog).getByText('第三方托管 · NVIDIA RTX 4090 24GB')).toBeInTheDocument();
-    expect(within(dialog).getByText(/托管 6 个月/)).toBeInTheDocument();
-    expect(await screen.findAllByText(/托管需求已记录，COD 将匹配第三方托管商/)).not.toHaveLength(0);
+    expect(await screen.findByText('算力市场尚未开放')).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(window.location.pathname).toBe('/compute');
+    fireEvent.click(screen.getByRole('button', { name: '返回 COD' }));
+    expect(await screen.findByRole('heading', { name: '新对话' })).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/');
   });
 
   it('lets only administrators inspect, filter, copy, paginate, update, and return from compute requests', async () => {
