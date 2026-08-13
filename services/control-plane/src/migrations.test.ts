@@ -181,7 +181,7 @@ describe('production-safe migrations and rate limits', () => {
     expect(siteConfig).toMatch(/location = \/index\.html \{[\s\S]*?try_files \$uri =404;[\s\S]*?expires -1;[\s\S]*?\}/);
     expect(siteConfig).toMatch(/location = \/compute \{[\s\S]*?try_files \/compute\/index\.html =404;[\s\S]*?expires -1;[\s\S]*?\}/);
     expect(siteConfig).toMatch(/location \^~ \/compute\/ \{[\s\S]*?try_files \$uri \/compute\/index\.html;[\s\S]*?expires -1;[\s\S]*?\}/);
-    expect(siteConfig).toContain('location = /compute/index.html');
+    expect(siteConfig).not.toContain('location = /compute/index.html');
     expect(siteConfig).not.toContain('return 308 /compute/;');
     const assetLocation = siteConfig.match(/location \/assets\/ \{([\s\S]*?)\n    \}/)?.[1] ?? '';
     const rateLimitLocation = siteConfig.match(/location @cod_rate_limited \{([\s\S]*?)\n    \}/)?.[1] ?? '';
