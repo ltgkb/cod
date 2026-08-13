@@ -260,6 +260,7 @@ export interface DesktopBridge {
   getDesktopPetStatus?(): Promise<DesktopPetStatus>;
   launchDesktopPet?(config: DesktopPetLaunchConfig): Promise<DesktopPetLaunchResult>;
   stopDesktopPet?(): Promise<DesktopPetStatus>;
+  onDesktopPetOpenChat?(callback: (prompt: string | null) => void): () => void;
 }
 
 declare global {

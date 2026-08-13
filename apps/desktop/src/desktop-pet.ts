@@ -23,7 +23,7 @@ const fs = rawFileSystem.promises;
 export interface DesktopPetInstallation {
   rootPath: string;
   executablePath: string;
-  kind: 'bundle' | 'portable' | 'appimage';
+  kind: 'integrated' | 'bundle' | 'portable' | 'appimage';
 }
 
 interface DesktopPetDiscoveryOptions {
@@ -32,6 +32,7 @@ interface DesktopPetDiscoveryOptions {
   resourcesPath: string;
   environment?: NodeJS.ProcessEnv;
   developmentOverride?: string;
+  bundledResourcePath?: string;
 }
 
 function pathApi(platform: NodeJS.Platform): typeof path.posix {
@@ -134,12 +135,40 @@ async function verifiedInstallation(candidate: string, platform: NodeJS.Platform
   return installation;
 }
 
+async function verifiedBundledResource(candidate: string | undefined): Promise<DesktopPetInstallation | null> {
+  if (!candidate || !path.isAbsolute(candidate) || !await regularFileWithoutSymlink(candidate)) return null;
+  if (await sha256(candidate) !== desktopPetAsarSha256) return null;
+  return {
+    rootPath: path.dirname(candidate),
+    executablePath: candidate,
+    kind: 'integrated',
+  };
+}
+
 export async function discoverDesktopPet(options: DesktopPetDiscoveryOptions): Promise<{
   installation: DesktopPetInstallation | null;
   status: DesktopPetStatus;
 }> {
+  const bundledResourcePath = options.bundledResourcePath ?? path.join(options.resourcesPath, 'desktop-pet', 'app.asar');
+  const bundledInstallation = await verifiedBundledResource(bundledResourcePath);
+  if (bundledInstallation) {
+    return {
+      installation: bundledInstallation,
+      status: {
+        supported: true,
+        installed: true,
+        verified: true,
+        running: false,
+        version: desktopPetVersion,
+        publisherVerified: false,
+        reason: 'ready',
+      },
+    };
+  }
+  let bundledResourceFound = false;
+  try { bundledResourceFound = (await fs.lstat(bundledResourcePath)).isFile(); } catch { /* Optional on older builds. */ }
   const candidates = desktopPetCandidates(options);
-  let unverifiedFound = false;
+  let unverifiedFound = bundledResourceFound;
   for (const candidate of candidates) {
     try {
       await fs.lstat(candidate);

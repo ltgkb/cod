@@ -32,6 +32,37 @@ test('passes only an allowlisted process environment and ephemeral chat credenti
   assert.equal(result.COD_CHAT_MODEL, 'gpt-test');
 });
 
+test('prefers the audited desktop pet bundled inside COD', async () => {
+  const resourceAsar = path.resolve('resources/desktop-pet/app.asar');
+  const result = await discoverDesktopPet({
+    platform: process.platform,
+    homeDirectory: os.homedir(),
+    resourcesPath: path.dirname(path.dirname(resourceAsar)),
+    bundledResourcePath: resourceAsar,
+  });
+  assert.equal(result.installation?.kind, 'integrated');
+  assert.equal(result.installation?.executablePath, resourceAsar);
+  assert.equal(result.status.installed, true);
+  assert.equal(result.status.verified, true);
+  assert.equal(result.status.reason, 'ready');
+});
+
+test('rejects a modified bundled desktop pet resource', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'cod-integrated-pet-test-'));
+  const resourceAsar = path.join(directory, 'app.asar');
+  await writeFile(resourceAsar, 'modified desktop pet resource');
+  const result = await discoverDesktopPet({
+    platform: 'linux',
+    homeDirectory: directory,
+    resourcesPath: directory,
+    bundledResourcePath: resourceAsar,
+  });
+  assert.equal(result.installation, null);
+  assert.equal(result.status.installed, true);
+  assert.equal(result.status.verified, false);
+  assert.equal(result.status.reason, 'integrity-failed');
+});
+
 test('refuses a companion at a known path when its audited hashes do not match', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'cod-pet-test-'));
   const executable = path.join(directory, 'cod-desktop-pet');

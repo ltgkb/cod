@@ -721,7 +721,9 @@ describe('COD workspace', () => {
     const getDesktopPetStatus=vi.fn(async()=>readyStatus);
     const launchDesktopPet=vi.fn(async()=>({status:runningStatus,started:true,focusedExisting:false}));
     const stopDesktopPet=vi.fn(async()=>readyStatus);
-    window.codDesktop={platform:'darwin',controlPlaneUrl:'https://cod.example',selectProject:vi.fn(async()=>null),listFiles:vi.fn(async()=>[]),gitDiff:vi.fn(async()=>''),readTextFile:vi.fn(async()=>''),runCommand:vi.fn(async(_root,command)=>({command,output:'',exitCode:0})),getGooseAcpUrl:vi.fn(async()=>null),stopGoose:vi.fn(async()=>undefined),getDesktopPetStatus,launchDesktopPet,stopDesktopPet};
+    let openDesktopPetChat:((prompt:string|null)=>void)|undefined;
+    const onDesktopPetOpenChat=vi.fn((callback:(prompt:string|null)=>void)=>{openDesktopPetChat=callback;return vi.fn();});
+    window.codDesktop={platform:'darwin',controlPlaneUrl:'https://cod.example',selectProject:vi.fn(async()=>null),listFiles:vi.fn(async()=>[]),gitDiff:vi.fn(async()=>''),readTextFile:vi.fn(async()=>''),runCommand:vi.fn(async(_root,command)=>({command,output:'',exitCode:0})),getGooseAcpUrl:vi.fn(async()=>null),stopGoose:vi.fn(async()=>undefined),getDesktopPetStatus,launchDesktopPet,stopDesktopPet,onDesktopPetOpenChat};
     const source={id:'ai-kai',label:'AI.KAI.COM',status:'live',callable:true,paymentDirection:'钱包 → ai.kai.com',note:'已连接',models:[{id:'pet-model',label:'桌宠模型',contextWindow:128000,inputPricePerMillionCents:100,outputPricePerMillionCents:200}]};
     const account={userId:'pet-user',displayName:'pet user',balanceCents:5000,currency:'CNY',plan:'developer',role:'member',billingExempt:false};
     const fetchMock=vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{
@@ -741,11 +743,13 @@ describe('COD workspace', () => {
     fireEvent.click(screen.getByTitle('命令面板'));
     fireEvent.click(await screen.findByRole('button',{name:/桌面伙伴/}));
     const dialog=await screen.findByRole('dialog',{name:'COD 桌面伙伴'});
-    fireEvent.click(within(dialog).getByRole('button',{name:/连接并启动/}));
+    fireEvent.click(within(dialog).getByRole('button',{name:/启动内置桌宠/}));
     await waitFor(()=>expect(launchDesktopPet).toHaveBeenCalledWith({token:'pet-user-token',sourceId:'ai-kai',modelId:'pet-model'}));
     expect(await within(dialog).findByText('正在运行')).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole('button',{name:/停止桌宠/}));
     await waitFor(()=>expect(stopDesktopPet).toHaveBeenCalledTimes(1));
+    act(()=>openDesktopPetChat?.('把这个问题带回 COD'));
+    expect(screen.getByPlaceholderText('问 COD 任何问题...')).toHaveValue('把这个问题带回 COD');
   });
 
   it('closes the topmost Web UI before releasing Android back navigation', async () => {
