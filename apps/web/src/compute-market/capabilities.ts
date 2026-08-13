@@ -19,7 +19,8 @@ export const computeAccountEnabled = (capabilities: ComputeCapabilities): boolea
 export function visibleBottomTabs(capabilities: ComputeCapabilities) {
   return [
     { path: '/compute', label: '首页', visible: true },
-    { path: '/compute/hosting', label: '设备托管', visible: capabilities.hosting },
+    { path: '/compute/hosting', label: '设备托管', visible: capabilities.enabled },
+    { path: '/compute/assets', label: '我的资产', visible: capabilities.enabled },
     { path: '/compute/news', label: '资讯', visible: capabilities.news },
     { path: '/compute/rankings', label: '排行榜', visible: capabilities.rankings },
     { path: '/compute/me', label: '我的', visible: computeAccountEnabled(capabilities) },

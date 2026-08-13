@@ -5,7 +5,7 @@ import { ComputeShell } from './components/ComputeShell';
 import { activeTab, normalizeComputePath, parseComputeRoute, routeParam } from './routes';
 import type { ComputeAppProps } from './types';
 import { useComputeResource } from './hooks/useComputeResource';
-import { AssetsPage } from './pages/AssetsPage';
+import { AssetsPage, AssetsShowcasePage } from './pages/AssetsPage';
 import { CheckoutPage } from './pages/CheckoutPage';
 import { DeviceDetailPage } from './pages/DeviceDetailPage';
 import { DevicesPage } from './pages/DevicesPage';
@@ -46,13 +46,13 @@ export function ComputeApp(props: ComputeAppProps) {
 
   let page: React.ReactNode;
   if (!routeAvailable) page = <ErrorState title="能力尚未开放" message="该页面依赖的真实服务尚未接入，当前不会接受或保存相关操作。" onRetry={() => navigate('/compute')} />;
-  else if (route.path === '/compute') page = <HomePage {...pageProps} />;
+  else if (route.path === '/compute') page = <HomePage {...pageProps} showProductShowcase={resolvedCapabilities.enabled} />;
   else if (route.path === '/compute/offers') page = <OffersPage {...pageProps} initialQuery={route.query} />;
   else if (/^\/compute\/offers\/[^/]+$/.test(route.path)) page = <OfferDetailPage {...pageProps} offerId={routeParam(route.path)} purchasingEnabled={computePurchasingEnabled(resolvedCapabilities)} />;
   else if (route.path.startsWith('/compute/checkout/')) page = props.session ? <CheckoutPage {...pageProps} skuId={routeParam(route.path)} query={route.query} /> : <LoginRedirect returnTo={location} requireLogin={requireLogin} />;
   else if (route.path === '/compute/orders') page = props.session ? <OrdersPage {...pageProps} /> : <LoginRedirect returnTo={location} requireLogin={requireLogin} />;
   else if (/^\/compute\/orders\/[^/]+$/.test(route.path)) page = props.session ? <OrderDetailPage {...pageProps} orderId={routeParam(route.path)} /> : <LoginRedirect returnTo={location} requireLogin={requireLogin} />;
-  else if (route.path === '/compute/hosting') page = <HostingPage {...pageProps} />;
+  else if (route.path === '/compute/hosting') page = <HostingPage {...pageProps} interactive={resolvedCapabilities.hosting} />;
   else if (route.path === '/compute/hosting/guide') page = <HostingGuidePage />;
   else if (route.path === '/compute/hosting/apply') page = props.session ? <HostingApplyPage {...pageProps} /> : <LoginRedirect returnTo={location} requireLogin={requireLogin} />;
   else if (route.path === '/compute/hosting/applications') page = props.session ? <HostingApplicationsPage {...pageProps} /> : <LoginRedirect returnTo={location} requireLogin={requireLogin} />;
@@ -63,7 +63,7 @@ export function ComputeApp(props: ComputeAppProps) {
   else if (/^\/compute\/news\/[^/]+$/.test(route.path)) page = <NewsDetailPage {...pageProps} slug={routeParam(route.path)} />;
   else if (route.path === '/compute/rankings') page = <RankingsPage {...pageProps} />;
   else if (route.path === '/compute/me') page = <ProfilePage {...pageProps} capabilities={capabilities.data ?? unavailableComputeCapabilities} displayName={props.session?.account.displayName ?? ''} />;
-  else if (route.path === '/compute/assets') page = props.session ? <AssetsPage {...pageProps} /> : <LoginRedirect returnTo={location} requireLogin={requireLogin} />;
+  else if (route.path === '/compute/assets') page = resolvedCapabilities.assets ? props.session ? <AssetsPage {...pageProps} /> : <LoginRedirect returnTo={location} requireLogin={requireLogin} /> : <AssetsShowcasePage />;
   else if (route.path === '/compute/referrals') page = props.session ? <ReferralsPage {...pageProps} /> : <LoginRedirect returnTo={location} requireLogin={requireLogin} />;
   else if (route.path === '/compute/support') page = props.session ? <SupportPage onOpenCodTask={props.onOpenCodTask} /> : <LoginRedirect returnTo={location} requireLogin={requireLogin} />;
   else page = <ErrorState title="页面不存在" message="该算力市场页面不存在或尚未由服务端 capability 开放。" onRetry={() => navigate('/compute')} />;
@@ -74,7 +74,7 @@ export function ComputeApp(props: ComputeAppProps) {
 }
 
 function isRouteAvailable(path: string, capabilities: typeof unavailableComputeCapabilities): boolean {
-  if (path === '/compute' || path === '/compute/offers' || /^\/compute\/offers\/[^/]+$/.test(path)) return true;
+  if (path === '/compute' || path === '/compute/offers' || /^\/compute\/offers\/[^/]+$/.test(path) || path === '/compute/hosting' || path === '/compute/hosting/guide' || path === '/compute/assets') return true;
   if (path.startsWith('/compute/checkout/') || path.startsWith('/compute/orders')) return computePurchasingEnabled(capabilities);
   if (path.startsWith('/compute/hosting')) return capabilities.hosting;
   if (path.startsWith('/compute/devices')) return capabilities.devices;

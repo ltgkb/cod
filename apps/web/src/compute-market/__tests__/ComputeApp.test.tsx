@@ -91,8 +91,34 @@ describe('ComputeApp', () => {
     });
     render(<ComputeApp {...props} initialPath="/compute/orders" />);
     expect(await screen.findByRole('heading', { name: '能力尚未开放' })).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: '设备托管' }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('button', { name: '我的资产' }).length).toBeGreaterThan(0);
     expect(screen.queryByRole('button', { name: '我的订单' })).not.toBeInTheDocument();
     expect(fetcher.mock.calls.some(([url]) => String(url).includes('/api/compute/v2/orders'))).toBe(false);
+  });
+
+  it('keeps hosting and assets available as read-only product showcases', async () => {
+    const discoveryCapabilities: ComputeCapabilities = { ...capabilities, instantPurchase: false, reservationPurchase: false, hosting: false, devices: false, assets: false, referrals: false, news: false, services: { ...capabilities.services, onlineSupport: false } };
+    const fetcher = mockFetch((url) => {
+      if (url.endsWith('/api/compute/v2/capabilities')) return json(discoveryCapabilities);
+      if (url.endsWith('/api/compute/v2/home')) return json({ banner: null, quickActions: ['offers'], featuredOffers: [offer], news: [] });
+      return undefined;
+    });
+    render(<ComputeApp {...props} />);
+    const quickActions = await screen.findByRole('region', { name: '快捷入口' });
+    expect(within(quickActions).getByRole('button', { name: '托管设备' })).toBeInTheDocument();
+    expect(within(quickActions).getByRole('button', { name: '我的资产' })).toBeInTheDocument();
+
+    fireEvent.click(within(quickActions).getByRole('button', { name: '托管设备' }));
+    expect(await screen.findByRole('heading', { name: '设备托管', level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /申请入口待开放/ })).toBeDisabled();
+    expect(fetcher.mock.calls.some(([url]) => String(url).includes('/api/compute/v2/devices'))).toBe(false);
+
+    fireEvent.click(screen.getAllByRole('button', { name: '我的资产' })[0]);
+    expect(await screen.findByRole('heading', { name: '我的资产', level: 1 })).toBeInTheDocument();
+    expect(screen.getByText('待接入')).toBeInTheDocument();
+    expect(screen.getByText('真实资产账本正在接入')).toBeInTheDocument();
+    expect(fetcher.mock.calls.some(([url]) => String(url).includes('/api/compute/v2/assets'))).toBe(false);
   });
 
   it('keeps showcase details visible while disabling order creation', async () => {

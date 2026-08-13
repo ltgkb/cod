@@ -6,6 +6,11 @@ import { useComputeResource } from '../hooks/useComputeResource';
 import type { ComputePageProps } from './shared';
 
 const ledgerLabels = { purchase: '购买卡时', reward: '奖励卡时', rental_charge: '租赁扣减', rental_refund: '卡时退款', hosting_settlement: '托管结算', discount: '优惠', trade_lock: '交易冻结', trade_release: '交易解冻', trade_transfer: '交易转移' };
+
+export function AssetsShowcasePage() {
+  return <div className="compute-page-stack"><section className="compute-assets-hero"><div><span>COD 卡时资产 · 方案展示</span><strong>待接入</strong><small>统一账本接入后显示真实可用卡时</small></div><Wallet weight="duotone" /></section><section className="compute-asset-metrics"><div><Lock /><span>交易冻结</span><strong>--</strong></div><div><ArrowUpRight /><span>运行中租赁资源</span><strong>--</strong></div><div><ArrowDownLeft /><span>托管待结算</span><strong>--</strong></div></section><section className="compute-panel"><h2>卡时明细账</h2><EmptyState title="真实资产账本正在接入" description="购买、奖励、租赁扣减、退款和托管结算将在统一账本接入后分别展示；当前不使用样例余额或收益。" /></section><p className="compute-boundary-note">卡时是平台结算单位，不代表资源使用小时；资源权益按订单可用时长记录。</p></div>;
+}
+
 export function AssetsPage({ api }: ComputePageProps) {
   const resource = useComputeResource(async (signal) => { const [summary, ledger] = await Promise.all([api.assets(signal), api.ledger(signal)]); return { summary, ledger: ledger.items }; }, []);
   if (resource.state === 'error') return <ErrorState message={resource.error?.message} onRetry={resource.reload} />; if (!resource.data) return <div className="compute-skeleton detail-card" />; const { summary, ledger } = resource.data;

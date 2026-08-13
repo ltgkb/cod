@@ -1,6 +1,6 @@
 import type { ComputeRoute } from './types';
 
-export const computeTabPaths = ['/compute', '/compute/hosting', '/compute/news', '/compute/rankings', '/compute/me'] as const;
+export const computeTabPaths = ['/compute', '/compute/hosting', '/compute/assets', '/compute/news', '/compute/rankings', '/compute/me'] as const;
 
 export function normalizeComputePath(path: string): string {
   const url = new URL(path || '/compute', 'https://cod.local');
@@ -22,9 +22,10 @@ export function isDetailPath(path: string): boolean {
 
 export function activeTab(path: string): typeof computeTabPaths[number] {
   if (path.startsWith('/compute/hosting') || path.startsWith('/compute/devices')) return '/compute/hosting';
+  if (path.startsWith('/compute/assets')) return '/compute/assets';
   if (path.startsWith('/compute/news')) return '/compute/news';
   if (path.startsWith('/compute/rankings')) return '/compute/rankings';
-  if (path.startsWith('/compute/me') || path.startsWith('/compute/assets') || path.startsWith('/compute/referrals') || path.startsWith('/compute/coupons') || path.startsWith('/compute/addresses') || path.startsWith('/compute/verification') || path.startsWith('/compute/support')) return '/compute/me';
+  if (path.startsWith('/compute/me') || path.startsWith('/compute/referrals') || path.startsWith('/compute/coupons') || path.startsWith('/compute/addresses') || path.startsWith('/compute/verification') || path.startsWith('/compute/support')) return '/compute/me';
   return '/compute';
 }
 
