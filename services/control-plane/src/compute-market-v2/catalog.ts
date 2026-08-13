@@ -46,7 +46,7 @@ export class ComputeCatalogService {
         ...(purchasing ? ['orders' as const] : []),
         ...(this.capabilities.services.onlineSupport ? ['support' as const] : []),
       ],
-      featuredOffers: this.listOffers({ sort: 'popular' }).items.slice(0, 6),
+      featuredOffers: this.listOffers({ sort: 'popular' }).items.slice(0, 8),
       news: this.capabilities.news ? this.listNews().items.slice(0, 3) : [],
     };
   }
