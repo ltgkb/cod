@@ -365,6 +365,7 @@ async function launchDesktopPet(config: DesktopPetLaunchConfig): Promise<Desktop
   }
   await stopDesktopPet();
   if (discovery.installation.kind === 'integrated') {
+    const proxy = await startPetChatProxy({ controlPlaneUrl, ...config });
     builtInDesktopPet ??= new BuiltInDesktopPet({
       resourceAsarPath: discovery.installation.executablePath,
       onOpenCod: (prompt) => {
@@ -381,9 +382,16 @@ async function launchDesktopPet(config: DesktopPetLaunchConfig): Promise<Desktop
         window.webContents.send('cod:desktop-pet-open-chat', prompt ?? null);
       },
     });
-    const result = await builtInDesktopPet.start();
-    const status = { ...(await desktopPetDiscovery()).status, running: builtInDesktopPet.running };
-    return { status, ...result };
+    builtInDesktopPet.configureChat({ endpoint: proxy.url, secret: proxy.secret, model: config.modelId });
+    try {
+      const result = await builtInDesktopPet.start();
+      desktopPetProxy = proxy;
+      const status = { ...(await desktopPetDiscovery()).status, running: builtInDesktopPet.running };
+      return { status, ...result };
+    } catch (error) {
+      await proxy.close().catch(() => undefined);
+      throw error;
+    }
   }
   const proxy = await startPetChatProxy({ controlPlaneUrl, ...config });
   const installation = discovery.installation;

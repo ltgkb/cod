@@ -2114,7 +2114,7 @@ export function App() {
     try{
       const result=await launch({token:session.token,sourceId:selectedSource.id,modelId:selectedModelInfo.id});
       setDesktopPetStatus(result.status);
-      setNotice(result.focusedExisting?'已唤醒内置桌宠。':result.started?'内置桌宠已启动；点击“对话”会直接回到 COD 当前模型。':'桌面伙伴未能保持运行。');
+      setNotice(result.focusedExisting?'已唤醒内置桌宠。':result.started?'内置桌宠已启动；点击“对话”即可打开简单问答框。':'桌面伙伴未能保持运行。');
     }catch(error){setNotice(error instanceof Error?error.message:'桌面伙伴启动失败。');}
     finally{setDesktopPetBusy(false);}
   };
