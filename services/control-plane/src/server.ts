@@ -16,6 +16,7 @@ import { ProductRegistry } from './products.js';
 import { beginRequest, recordRequest, recordUsageReservationLeaseFailure, renderMetrics } from './metrics.js';
 import { computeOfferCatalog, validateComputeQuote, validateComputeRequest } from './compute-market.js';
 import { computeRequestFromNode, createComputeMarketV2Router } from './compute-market-v2/router.js';
+import { ComputeCatalogService, defaultComputeCapabilities } from './compute-market-v2/catalog.js';
 import { createComputeReviewCatalog } from './compute-market-v2/review-catalog.js';
 import { OfficialPaymentService } from './payments.js';
 import { defaultPinnedFetcher, maskRegistrationDestination, normalizeRegistrationEmail, normalizeRegistrationPhone, RegistrationVerification, registrationDeliveryFromConfig, validateRegistrationChallengeId, validateRegistrationCode, type PinnedFetcher, type RegistrationDelivery, type RegistrationEndpointValidator } from './registration-verification.js';
@@ -366,7 +367,10 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
   const gateway = options.gateway ?? new AiGateway(config);
   const knowledge = new KnowledgeAdapter(config);
   const products = new ProductRegistry(config);
-  const computeMarketV2 = createComputeMarketV2Router({ catalog: config.computeReviewMode ? createComputeReviewCatalog() : undefined });
+  const computeCatalog = config.computeReviewMode
+    ? createComputeReviewCatalog()
+    : new ComputeCatalogService({ ...defaultComputeCapabilities, enabled: config.computeMarketEnabled });
+  const computeMarketV2 = createComputeMarketV2Router({ catalog: computeCatalog });
   const officialPayments = new OfficialPaymentService(config);
   const registrationPinnedFetcher = options.registrationPinnedFetcher ?? defaultPinnedFetcher;
   const registrationDelivery = options.registrationDelivery ?? registrationDeliveryFromConfig(config.registrationVerification, registrationPinnedFetcher,options.registrationEndpointValidator);

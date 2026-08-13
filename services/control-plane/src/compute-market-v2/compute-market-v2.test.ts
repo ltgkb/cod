@@ -95,11 +95,21 @@ describe('compute market v2 domain', () => {
 });
 
 describe('compute market v2 router', () => {
-  it('serves public catalog and requires auth for private routes', async () => {
-    const router = createComputeMarketV2Router();
+  it('fails closed by default, serves an explicitly enabled catalog, and requires auth for enabled private routes', async () => {
+    const disabled = createComputeMarketV2Router();
+    await expect(disabled.route({ method: 'GET', pathname: '/api/compute/v2/offers' })).rejects.toMatchObject({ status: 404, code: 'compute_market_unavailable' });
+    const router = createComputeMarketV2Router({ catalog: new ComputeCatalogService({ ...defaultComputeCapabilities, enabled: true, instantPurchase: true }) });
     const publicResponse = await router.route({ method: 'GET', pathname: '/api/compute/v2/offers' });
     expect(publicResponse?.status).toBe(200);
     await expect(router.route({ method: 'GET', pathname: '/api/compute/v2/orders', principal: null })).rejects.toMatchObject({ status: 401, code: 'authentication_required' });
+  });
+
+  it('keeps every non-discovery route unavailable in read-only production mode', async () => {
+    const router = createComputeMarketV2Router({ catalog: new ComputeCatalogService({ ...defaultComputeCapabilities, enabled: true }) });
+    expect((await router.route({ method: 'GET', pathname: '/api/compute/v2/home' }))?.body).toMatchObject({ quickActions: ['offers'], featuredOffers: [] });
+    await expect(router.route({ method: 'GET', pathname: '/api/compute/v2/orders', principal: user })).rejects.toMatchObject({ status: 404, code: 'compute_orders_unavailable' });
+    await expect(router.route({ method: 'GET', pathname: '/api/compute/v2/assets/summary', principal: user })).rejects.toMatchObject({ status: 404, code: 'compute_assets_unavailable' });
+    await expect(router.route({ method: 'POST', pathname: '/api/compute/v2/hosting/applications', principal: user, body: hostingDraft(), headers: { 'idempotency-key': 'blocked-hosting' } })).rejects.toMatchObject({ status: 404, code: 'compute_hosting_unavailable' });
   });
 
   it('exposes admin capability only to operators', async () => {
@@ -112,12 +122,12 @@ describe('compute market v2 router', () => {
   it('rejects legacy day/month rental units at both catalog and query boundaries', async () => {
     const legacyOffer = { ...catalogOffer, skus: [{ ...catalogOffer.skus[0], period: 'day' as never }] };
     expect(() => new ComputeCatalogService(defaultComputeCapabilities, [legacyOffer])).toThrowError(/仅支持按小时/);
-    const router = createComputeMarketV2Router();
+    const router = createComputeMarketV2Router({ catalog: new ComputeCatalogService({ ...defaultComputeCapabilities, enabled: true }) });
     await expect(router.route({ method: 'GET', pathname: '/api/compute/v2/offers', searchParams: new URLSearchParams('period=month') })).rejects.toMatchObject({ status: 400, code: 'invalid_compute_period' });
   });
 
   it('requires admin inventory reasons, versions and idempotency while writing an audit event', async () => {
-    const router = createComputeMarketV2Router(); const body = { pool: { id: 'pool-1', skuId: 'sku-1', nodeLabel: 'node-a', facilityLabel: 'facility-a', availableUnits: 8, reservedUnits: 0, allocatedUnits: 0, maintenanceUnits: 0 }, expectedRevision: null, reason: '首次登记真实库存' };
+    const router = createComputeMarketV2Router({ catalog: new ComputeCatalogService({ ...defaultComputeCapabilities, enabled: true, admin: true }) }); const body = { pool: { id: 'pool-1', skuId: 'sku-1', nodeLabel: 'node-a', facilityLabel: 'facility-a', availableUnits: 8, reservedUnits: 0, allocatedUnits: 0, maintenanceUnits: 0 }, expectedRevision: null, reason: '首次登记真实库存' };
     const first = await router.route({ method: 'POST', pathname: '/api/admin/compute/v2/inventory', principal: admin, headers: { 'idempotency-key': 'inventory-key' }, body });
     const duplicate = await router.route({ method: 'POST', pathname: '/api/admin/compute/v2/inventory', principal: admin, headers: { 'idempotency-key': 'inventory-key' }, body });
     expect(first?.body).toMatchObject({ availableUnits: 8, revision: 1 }); expect(duplicate?.body).toEqual(first?.body);

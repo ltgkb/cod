@@ -82,6 +82,7 @@ export interface ControlPlaneConfig {
   feishuAppSecret: string | null;
   feishuBindings: Record<string, string>;
   demoMode: boolean;
+  computeMarketEnabled: boolean;
   computeReviewMode: boolean;
   modelSources: ModelSourceConfig[];
   wikiBaseUrl: string;
@@ -186,6 +187,7 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
   // without a provider key stay unavailable instead of silently appearing to
   // complete a real model request.
   const demoMode = environment.COD_DEMO_MODE === 'true';
+  const computeMarketEnabled = environment.COD_COMPUTE_MARKET_ENABLED === 'true';
   const computeReviewMode = !production && environment.COD_COMPUTE_REVIEW_MODE === 'true';
   const paymentWebhookSecret = environment.COD_PAYMENT_WEBHOOK_SECRET ?? null;
   const paymentPublicBaseUrl = environment.COD_PAYMENT_PUBLIC_BASE_URL?.replace(/\/$/, '') ?? null;
@@ -383,6 +385,7 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     feishuAppSecret: environment.COD_FEISHU_APP_SECRET ?? null,
     feishuBindings,
     demoMode,
+    computeMarketEnabled,
     computeReviewMode,
     modelSources,
     wikiBaseUrl: environment.KAI_WIKI_BASE_URL ?? 'https://wiki.kai.com',

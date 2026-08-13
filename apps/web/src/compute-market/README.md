@@ -18,7 +18,7 @@ Create one long-lived `createComputeMarketV2Router()` instance. In the main serv
 4. If the result is non-null, return its status/body through the shared JSON responder.
 5. Keep V1 `/api/compute/offers` and `/api/compute/requests` unchanged during migration.
 
-The included services use isolated in-memory repositories for review and tests. Production enablement must replace them with transactional Postgres/object-storage/metrics adapters, connect the shared COD card-hour ledger, and run the V1→V2 idempotent migration before `enabled` is exposed. Instant purchase, rankings, hosted settlements, card-hour trades, coupons, addresses, procurement, and human support remain capability-off until their real dependencies exist.
+The included services use isolated in-memory repositories for review and tests. Production may expose `enabled` only as an empty, read-only discovery shell: the server must return no sample records and must reject every route backed by an unconnected repository. Transactional Postgres/object-storage/metrics adapters, the shared COD card-hour ledger, and the V1→V2 idempotent migration are still required before any catalog record or stateful capability is published. Instant purchase, rankings, hosted settlements, card-hour trades, coupons, addresses, procurement, and human support remain capability-off until their real dependencies exist.
 
 ## Review gates
 

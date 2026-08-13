@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createComputeApi } from './api';
-import { unavailableComputeCapabilities } from './capabilities';
+import { computeAccountEnabled, computePurchasingEnabled, unavailableComputeCapabilities } from './capabilities';
 import { ComputeShell } from './components/ComputeShell';
 import { activeTab, normalizeComputePath, parseComputeRoute, routeParam } from './routes';
 import type { ComputeAppProps } from './types';
@@ -41,9 +41,12 @@ export function ComputeApp(props: ComputeAppProps) {
   const requireLogin = useCallback((returnTo: string) => onRequireLogin(normalizeComputePath(returnTo)), [onRequireLogin]);
   const pageProps = { api, navigate, requireLogin, signedIn: Boolean(props.session) };
   const title = pageTitle(route.path);
+  const resolvedCapabilities = capabilities.data ?? unavailableComputeCapabilities;
+  const routeAvailable = capabilities.state !== 'ready' || isRouteAvailable(route.path, resolvedCapabilities);
 
   let page: React.ReactNode;
-  if (route.path === '/compute') page = <HomePage {...pageProps} />;
+  if (!routeAvailable) page = <ErrorState title="能力尚未开放" message="该页面依赖的真实服务尚未接入，当前不会接受或保存相关操作。" onRetry={() => navigate('/compute')} />;
+  else if (route.path === '/compute') page = <HomePage {...pageProps} />;
   else if (route.path === '/compute/offers') page = <OffersPage {...pageProps} initialQuery={route.query} />;
   else if (/^\/compute\/offers\/[^/]+$/.test(route.path)) page = <OfferDetailPage {...pageProps} offerId={routeParam(route.path)} />;
   else if (route.path.startsWith('/compute/checkout/')) page = props.session ? <CheckoutPage {...pageProps} skuId={routeParam(route.path)} query={route.query} /> : <LoginRedirect returnTo={location} requireLogin={requireLogin} />;
@@ -67,7 +70,21 @@ export function ComputeApp(props: ComputeAppProps) {
 
   if (capabilities.state === 'error' && !(capabilities.data?.enabled)) return <div className="compute-app compute-fatal"><ErrorState title="算力市场暂不可用" message={capabilities.error?.message} onRetry={capabilities.reload} /><button type="button" className="compute-button secondary" onClick={props.onExit}>返回 COD</button></div>;
   if (capabilities.state === 'ready' && !capabilities.data?.enabled) return <div className="compute-app compute-fatal"><ErrorState title="算力市场尚未开放" message="真实库存、持久化与统一卡时依赖完成接入前，服务端 capability 会保持关闭。" /><button type="button" className="compute-button secondary" onClick={props.onExit}>返回 COD</button></div>;
-  return <ComputeShell path={route.path} title={title} capabilities={capabilities.data ?? unavailableComputeCapabilities} signedIn={Boolean(props.session)} navigate={navigate} back={back} onExit={props.onExit}>{page}</ComputeShell>;
+  return <ComputeShell path={route.path} title={title} capabilities={resolvedCapabilities} signedIn={Boolean(props.session)} navigate={navigate} back={back} onExit={props.onExit}>{page}</ComputeShell>;
+}
+
+function isRouteAvailable(path: string, capabilities: typeof unavailableComputeCapabilities): boolean {
+  if (path === '/compute' || path === '/compute/offers' || /^\/compute\/offers\/[^/]+$/.test(path)) return true;
+  if (path.startsWith('/compute/checkout/') || path.startsWith('/compute/orders')) return computePurchasingEnabled(capabilities);
+  if (path.startsWith('/compute/hosting')) return capabilities.hosting;
+  if (path.startsWith('/compute/devices')) return capabilities.devices;
+  if (path.startsWith('/compute/news')) return capabilities.news;
+  if (path.startsWith('/compute/rankings')) return capabilities.rankings;
+  if (path === '/compute/me') return computeAccountEnabled(capabilities);
+  if (path.startsWith('/compute/assets')) return capabilities.assets;
+  if (path.startsWith('/compute/referrals')) return capabilities.referrals;
+  if (path.startsWith('/compute/support')) return capabilities.services.onlineSupport || capabilities.services.humanSupport;
+  return false;
 }
 
 function LoginRedirect({ returnTo, requireLogin }: { returnTo: string; requireLogin: (path: string) => void }) {

@@ -81,4 +81,17 @@ describe('ComputeApp', () => {
     render(<ComputeApp {...props} session={session} initialPath="/compute/me" />);
     expect(await screen.findByText('统一 COD 账户')).toBeInTheDocument(); expect(screen.queryByText('优惠券')).not.toBeInTheDocument(); expect(screen.queryByText('地址管理')).not.toBeInTheDocument(); expect(document.body).not.toHaveTextContent('提现');
   });
+
+  it('opens discovery mode without exposing unconnected account or transaction routes', async () => {
+    const discoveryCapabilities: ComputeCapabilities = { ...capabilities, instantPurchase: false, reservationPurchase: false, hosting: false, devices: false, assets: false, referrals: false, news: false, services: { ...capabilities.services, onlineSupport: false } };
+    const fetcher = mockFetch((url) => {
+      if (url.endsWith('/api/compute/v2/capabilities')) return json(discoveryCapabilities);
+      if (url.endsWith('/api/compute/v2/home')) return json({ banner: null, quickActions: ['offers'], featuredOffers: [], news: [] });
+      return undefined;
+    });
+    render(<ComputeApp {...props} initialPath="/compute/orders" />);
+    expect(await screen.findByRole('heading', { name: '能力尚未开放' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '我的订单' })).not.toBeInTheDocument();
+    expect(fetcher.mock.calls.some(([url]) => String(url).includes('/api/compute/v2/orders'))).toBe(false);
+  });
 });

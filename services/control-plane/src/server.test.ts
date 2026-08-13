@@ -36,6 +36,8 @@ describe('control-plane production rules', () => {
     const config = loadConfig({ ...productionEnvironment, COD_COMPUTE_REVIEW_MODE: 'true' });
     expect(config.developmentTopupEnabled).toBe(false);
     expect(config.computeReviewMode).toBe(false);
+    expect(config.computeMarketEnabled).toBe(false);
+    expect(loadConfig({ ...productionEnvironment, COD_COMPUTE_MARKET_ENABLED: 'true' }).computeMarketEnabled).toBe(true);
     expect(config.registrationEnabled).toBe(false);
     expect(config.inviteCodeRequired).toBe(false);
     const internalBetaConfig=loadConfig({...productionEnvironment,COD_REGISTRATION_ENABLED:'true',COD_REGISTRATION_VERIFICATION_REQUIRED:'false'});
@@ -399,6 +401,12 @@ describe('control-plane production rules', () => {
     const capabilities = await fetch(`${base}/api/compute/v2/capabilities`);
     expect(capabilities.status).toBe(200);
     expect(await capabilities.json()).toMatchObject({ enabled: false, instantPurchase: false, hosting: false, admin: false });
+
+    const discovery = await start({ COD_COMPUTE_MARKET_ENABLED: 'true' });
+    const discoveryCapabilities = await (await fetch(`${discovery.base}/api/compute/v2/capabilities`)).json();
+    expect(discoveryCapabilities).toMatchObject({ enabled: true, instantPurchase: false, hosting: false, assets: false, admin: false });
+    const discoveryHome = await (await fetch(`${discovery.base}/api/compute/v2/home`)).json();
+    expect(discoveryHome).toMatchObject({ quickActions: ['offers'], featuredOffers: [] });
 
     const preflight = await fetch(`${base}/api/compute/v2/orders/order-id/quote-decision`, {
       method: 'OPTIONS',

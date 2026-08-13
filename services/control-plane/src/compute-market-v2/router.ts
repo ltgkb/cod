@@ -37,41 +37,54 @@ export function createComputeMarketV2Router(options: { catalog?: ComputeCatalogS
     if (!pathname.startsWith('/api/compute/v2') && !pathname.startsWith('/api/admin/compute/v2')) return null;
     const query = request.searchParams ?? new URLSearchParams();
     const idempotencyKey = (): string => requireIdempotencyKey(request.headers?.['idempotency-key']);
+    const operator = Boolean(request.principal && ['compute_operator', 'super_admin'].includes(request.principal.role));
+    const capabilities = catalog.getCapabilities(operator);
+    const purchasing = capabilities.instantPurchase || capabilities.reservationPurchase;
+    const requireCapability = (available: boolean, name: string): void => {
+      if (!available) throw new HttpError('该算力市场能力尚未开放', 404, `compute_${name}_unavailable`);
+    };
 
-    if (method === 'GET' && pathname === '/api/compute/v2/capabilities') return ok(catalog.getCapabilities(Boolean(request.principal && ['compute_operator', 'super_admin'].includes(request.principal.role))));
-    if (method === 'GET' && pathname === '/api/compute/v2/home') return ok(catalog.home(request.principal ? { availableCardHoursMilli: ledger.summary(request.principal).availableCardHoursMilli, activeOrderCount: orders.list(request.principal).items.filter((order) => !['completed', 'cancelled', 'refunded'].includes(order.status)).length, actionRequiredDeviceCount: devices.list(request.principal, 'action_required').items.length } : null));
+    if (method === 'GET' && pathname === '/api/compute/v2/capabilities') return ok(capabilities);
+    requireCapability(capabilities.enabled, 'market');
+    if (method === 'GET' && pathname === '/api/compute/v2/home') {
+      const accountSummaryAvailable = capabilities.assets || purchasing || capabilities.devices;
+      return ok(catalog.home(request.principal && accountSummaryAvailable ? { availableCardHoursMilli: ledger.summary(request.principal).availableCardHoursMilli, activeOrderCount: orders.list(request.principal).items.filter((order) => !['completed', 'cancelled', 'refunded'].includes(order.status)).length, actionRequiredDeviceCount: devices.list(request.principal, 'action_required').items.length } : null));
+    }
     if (method === 'GET' && pathname === '/api/compute/v2/offers') return ok(catalog.listOffers(offerFilters(query)));
     if (method === 'GET' && match(pathname, '/api/compute/v2/offers/:id')) return ok(catalog.offer(segment(pathname)));
-    if (method === 'GET' && pathname === '/api/compute/v2/news') return ok(catalog.listNews());
-    if (method === 'GET' && match(pathname, '/api/compute/v2/news/:slug')) return ok(catalog.news(segment(pathname)));
-    if (method === 'GET' && pathname === '/api/compute/v2/rankings') return ok({ enabled: false, metric: 'availability', periodLabel: '', updatedAt: new Date().toISOString(), anonymous: true, entries: [] });
+    if (method === 'GET' && pathname === '/api/compute/v2/news') { requireCapability(capabilities.news, 'news'); return ok(catalog.listNews()); }
+    if (method === 'GET' && match(pathname, '/api/compute/v2/news/:slug')) { requireCapability(capabilities.news, 'news'); return ok(catalog.news(segment(pathname))); }
+    if (method === 'GET' && pathname === '/api/compute/v2/rankings') { requireCapability(capabilities.rankings, 'rankings'); return ok({ enabled: true, metric: 'availability', periodLabel: '', updatedAt: new Date().toISOString(), anonymous: true, entries: [] }); }
 
-    if (method === 'POST' && pathname === '/api/compute/v2/reservations') return created(orders.createReservation(requirePrincipal(request.principal ?? null), request.body as { skuId: string; quantity: number; inventoryRevision: number }, idempotencyKey()));
-    if (method === 'POST' && pathname === '/api/compute/v2/orders') return created(orders.createOrder(requirePrincipal(request.principal ?? null), request.body as CreateComputeOrderInput, idempotencyKey()));
-    if (method === 'GET' && pathname === '/api/compute/v2/orders') return ok(orders.list(requirePrincipal(request.principal ?? null), query.get('status') as ComputeOrderStatus | undefined));
-    if (method === 'GET' && match(pathname, '/api/compute/v2/orders/:id')) return ok(orders.get(requirePrincipal(request.principal ?? null), segment(pathname)));
-    if (method === 'PATCH' && pathname.endsWith('/quote-decision')) return ok(orders.decideQuote(requirePrincipal(request.principal ?? null), parentSegment(pathname), decision(request.body), idempotencyKey()));
-    if (method === 'POST' && pathname.endsWith('/cancel') && pathname.startsWith('/api/compute/v2/orders/')) return ok(orders.cancel(requirePrincipal(request.principal ?? null), parentSegment(pathname), idempotencyKey()));
-    if (method === 'POST' && pathname.endsWith('/settle') && pathname.startsWith('/api/compute/v2/orders/')) return ok(orders.settle(requirePrincipal(request.principal ?? null), parentSegment(pathname), idempotencyKey()));
+    if (method === 'POST' && pathname === '/api/compute/v2/reservations') { requireCapability(capabilities.reservationPurchase, 'reservations'); return created(orders.createReservation(requirePrincipal(request.principal ?? null), request.body as { skuId: string; quantity: number; inventoryRevision: number }, idempotencyKey())); }
+    if (method === 'POST' && pathname === '/api/compute/v2/orders') { requireCapability(purchasing, 'orders'); return created(orders.createOrder(requirePrincipal(request.principal ?? null), request.body as CreateComputeOrderInput, idempotencyKey())); }
+    if (method === 'GET' && pathname === '/api/compute/v2/orders') { requireCapability(purchasing, 'orders'); return ok(orders.list(requirePrincipal(request.principal ?? null), query.get('status') as ComputeOrderStatus | undefined)); }
+    if (method === 'GET' && match(pathname, '/api/compute/v2/orders/:id')) { requireCapability(purchasing, 'orders'); return ok(orders.get(requirePrincipal(request.principal ?? null), segment(pathname))); }
+    if (method === 'PATCH' && pathname.endsWith('/quote-decision')) { requireCapability(purchasing, 'orders'); return ok(orders.decideQuote(requirePrincipal(request.principal ?? null), parentSegment(pathname), decision(request.body), idempotencyKey())); }
+    if (method === 'POST' && pathname.endsWith('/cancel') && pathname.startsWith('/api/compute/v2/orders/')) { requireCapability(purchasing, 'orders'); return ok(orders.cancel(requirePrincipal(request.principal ?? null), parentSegment(pathname), idempotencyKey())); }
+    if (method === 'POST' && pathname.endsWith('/settle') && pathname.startsWith('/api/compute/v2/orders/')) { requireCapability(purchasing, 'orders'); return ok(orders.settle(requirePrincipal(request.principal ?? null), parentSegment(pathname), idempotencyKey())); }
 
-    if (method === 'GET' && pathname === '/api/compute/v2/hosting/applications') return ok(hosting.list(requirePrincipal(request.principal ?? null)));
+    if (method === 'GET' && pathname === '/api/compute/v2/hosting/applications') { requireCapability(capabilities.hosting, 'hosting'); return ok(hosting.list(requirePrincipal(request.principal ?? null))); }
     if (method === 'POST' && pathname === '/api/compute/v2/hosting/applications') {
+      requireCapability(capabilities.hosting, 'hosting');
       const body = request.body as HostingApplicationDraft & { submit?: boolean }; return created(hosting.create(requirePrincipal(request.principal ?? null), body, Boolean(body.submit), idempotencyKey()));
     }
-    if (method === 'GET' && match(pathname, '/api/compute/v2/hosting/applications/:id')) return ok(hosting.get(requirePrincipal(request.principal ?? null), segment(pathname)));
+    if (method === 'GET' && match(pathname, '/api/compute/v2/hosting/applications/:id')) { requireCapability(capabilities.hosting, 'hosting'); return ok(hosting.get(requirePrincipal(request.principal ?? null), segment(pathname))); }
     if (method === 'PATCH' && match(pathname, '/api/compute/v2/hosting/applications/:id')) {
+      requireCapability(capabilities.hosting, 'hosting');
       const body = request.body as HostingApplicationDraft & { expectedRevision?: number; submit?: boolean };
       return ok(hosting.updateDraft(requirePrincipal(request.principal ?? null), segment(pathname), body, requireExpectedRevision(body.expectedRevision), Boolean(body.submit)));
     }
 
-    if (method === 'GET' && pathname === '/api/compute/v2/devices') return ok(devices.list(requirePrincipal(request.principal ?? null), query.get('status') as HostedDeviceStatus | undefined));
-    if (method === 'GET' && match(pathname, '/api/compute/v2/devices/:id')) return ok(devices.get(requirePrincipal(request.principal ?? null), segment(pathname)));
-    if (method === 'POST' && pathname.endsWith('/tickets') && pathname.startsWith('/api/compute/v2/devices/')) return created(devices.createTicket(requirePrincipal(request.principal ?? null), parentSegment(pathname), request.body as never, idempotencyKey()));
-    if (method === 'GET' && pathname === '/api/compute/v2/assets/summary') return ok(ledger.summary(requirePrincipal(request.principal ?? null)));
-    if (method === 'GET' && pathname === '/api/compute/v2/assets/ledger') return ok({ items: ledger.entries(requirePrincipal(request.principal ?? null)), nextCursor: null });
-    if (method === 'GET' && pathname === '/api/compute/v2/referrals') return ok({ inviteCode: `COD-${requirePrincipal(request.principal ?? null).userId.slice(-6).toUpperCase()}`, inviteUrl: 'https://cod.kai.com/invite', rule: '奖励在被邀请人满足真实条件后由服务端入账。', records: [] });
+    if (method === 'GET' && pathname === '/api/compute/v2/devices') { requireCapability(capabilities.devices, 'devices'); return ok(devices.list(requirePrincipal(request.principal ?? null), query.get('status') as HostedDeviceStatus | undefined)); }
+    if (method === 'GET' && match(pathname, '/api/compute/v2/devices/:id')) { requireCapability(capabilities.devices, 'devices'); return ok(devices.get(requirePrincipal(request.principal ?? null), segment(pathname))); }
+    if (method === 'POST' && pathname.endsWith('/tickets') && pathname.startsWith('/api/compute/v2/devices/')) { requireCapability(capabilities.devices, 'devices'); return created(devices.createTicket(requirePrincipal(request.principal ?? null), parentSegment(pathname), request.body as never, idempotencyKey())); }
+    if (method === 'GET' && pathname === '/api/compute/v2/assets/summary') { requireCapability(capabilities.assets, 'assets'); return ok(ledger.summary(requirePrincipal(request.principal ?? null))); }
+    if (method === 'GET' && pathname === '/api/compute/v2/assets/ledger') { requireCapability(capabilities.assets, 'assets'); return ok({ items: ledger.entries(requirePrincipal(request.principal ?? null)), nextCursor: null }); }
+    if (method === 'GET' && pathname === '/api/compute/v2/referrals') { requireCapability(capabilities.referrals, 'referrals'); return ok({ inviteCode: `COD-${requirePrincipal(request.principal ?? null).userId.slice(-6).toUpperCase()}`, inviteUrl: 'https://cod.kai.com/invite', rule: '奖励在被邀请人满足真实条件后由服务端入账。', records: [] }); }
 
     const admin = pathname.startsWith('/api/admin/compute/v2') ? requireAdmin(request.principal ?? null) : null;
+    if (admin) requireCapability(capabilities.admin, 'admin');
     if (admin && method === 'GET' && pathname === '/api/admin/compute/v2/dashboard') {
       const adminOrders = orders.allForAdmin(admin); const adminDevices = devices.allForAdmin(admin); const adminTickets = devices.allTicketsForAdmin(admin);
       return ok({ newOrders: adminOrders.length, pendingQuotes: adminOrders.filter((order) => order.status === 'pending_quote').length, pendingDeployments: adminOrders.filter((order) => order.status === 'provisioning').length, runningInstances: adminOrders.filter((order) => order.status === 'running').length, actionRequiredDevices: adminDevices.filter((device) => device.status === 'action_required').length, expiringReservations: adminOrders.filter((order) => order.status === 'reserved').length, openTickets: adminTickets.filter((ticket) => !['resolved', 'closed'].includes(ticket.status)).length });

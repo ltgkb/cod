@@ -37,9 +37,15 @@ export class ComputeCatalogService {
   }
 
   home(banner: ComputeHomePayload['banner'] = null): ComputeHomePayload {
+    const purchasing = this.capabilities.instantPurchase || this.capabilities.reservationPurchase;
     return {
       banner,
-      quickActions: ['offers', 'hosting', 'orders', 'support'],
+      quickActions: [
+        'offers',
+        ...(this.capabilities.hosting ? ['hosting' as const] : []),
+        ...(purchasing ? ['orders' as const] : []),
+        ...(this.capabilities.services.onlineSupport ? ['support' as const] : []),
+      ],
       featuredOffers: this.listOffers({ sort: 'popular' }).items.slice(0, 6),
       news: this.capabilities.news ? this.listNews().items.slice(0, 3) : [],
     };
