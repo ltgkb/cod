@@ -6,7 +6,7 @@ import { SpecGrid } from '../components/SpecGrid';
 import { useComputeResource } from '../hooks/useComputeResource';
 import type { ComputePageProps } from './shared';
 
-export function OfferDetailPage({ api, navigate, requireLogin, signedIn, offerId }: ComputePageProps & { offerId: string }) {
+export function OfferDetailPage({ api, navigate, requireLogin, signedIn, offerId, purchasingEnabled }: ComputePageProps & { offerId: string; purchasingEnabled: boolean }) {
   const resource = useComputeResource((signal) => api.offer(offerId, signal), [offerId]);
   const [imageId, setImageId] = useState(''); const [quantity, setQuantity] = useState(1); const [duration, setDuration] = useState(1); const [startsAt, setStartsAt] = useState('');
   const offer = resource.data; const sku = offer?.skus[0];
@@ -20,7 +20,7 @@ export function OfferDetailPage({ api, navigate, requireLogin, signedIn, offerId
       <section className="compute-purchase-row"><label>数量</label><div className="compute-stepper"><button type="button" aria-label="减少数量" onClick={() => setQuantity((value) => Math.max(sku.minimumUnits, value - 1))}>−</button><output>{quantity}</output><button type="button" aria-label="增加数量" onClick={() => setQuantity((value) => Math.min(sku.maximumUnits ?? 128, value + 1))}>＋</button></div></section>
       <section className="compute-purchase-row"><label htmlFor="compute-duration">租赁时长（小时）</label><input id="compute-duration" type="number" min="1" max="36500" step="1" value={duration} onChange={(event) => setDuration(Math.max(1, Math.floor(Number(event.target.value))))} /></section>
       <section><label htmlFor="compute-start">{quote ? '期望开始时间（选填）' : '开始时间'}</label><input id="compute-start" type="datetime-local" value={startsAt} onChange={(event) => setStartsAt(event.target.value)} /></section>
-      <div className="compute-purchase-total"><span>{quote ? '人工核验库存后报价' : '预计应付'}</span><strong>{quote ? '待报价' : `${formatCardHours((sku.priceCardHoursMilli ?? 0) * quantity * duration)} 卡时`}</strong></div>
-      <button type="button" className="compute-button primary sticky-cta" disabled={soldOut} onClick={checkout}>{soldOut ? '当前无库存' : quote ? '提交租赁需求' : offer.purchaseMode === 'reservation' ? '预占并确认' : '立即购买'}</button>
+      <div className="compute-purchase-total"><span>{!purchasingEnabled ? '方案展示，配置以交付前确认为准' : quote ? '人工核验库存后报价' : '预计应付'}</span><strong>{!purchasingEnabled ? '暂不接单' : quote ? '待报价' : `${formatCardHours((sku.priceCardHoursMilli ?? 0) * quantity * duration)} 卡时`}</strong></div>
+      <button type="button" className="compute-button primary sticky-cta" disabled={soldOut || !purchasingEnabled} onClick={checkout}>{!purchasingEnabled ? '方案展示 · 暂不接单' : soldOut ? '当前无库存' : quote ? '提交租赁需求' : offer.purchaseMode === 'reservation' ? '预占并确认' : '立即购买'}</button>
     </aside></div>;
 }

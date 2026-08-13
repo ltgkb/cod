@@ -48,7 +48,7 @@ export function ComputeApp(props: ComputeAppProps) {
   if (!routeAvailable) page = <ErrorState title="能力尚未开放" message="该页面依赖的真实服务尚未接入，当前不会接受或保存相关操作。" onRetry={() => navigate('/compute')} />;
   else if (route.path === '/compute') page = <HomePage {...pageProps} />;
   else if (route.path === '/compute/offers') page = <OffersPage {...pageProps} initialQuery={route.query} />;
-  else if (/^\/compute\/offers\/[^/]+$/.test(route.path)) page = <OfferDetailPage {...pageProps} offerId={routeParam(route.path)} />;
+  else if (/^\/compute\/offers\/[^/]+$/.test(route.path)) page = <OfferDetailPage {...pageProps} offerId={routeParam(route.path)} purchasingEnabled={computePurchasingEnabled(resolvedCapabilities)} />;
   else if (route.path.startsWith('/compute/checkout/')) page = props.session ? <CheckoutPage {...pageProps} skuId={routeParam(route.path)} query={route.query} /> : <LoginRedirect returnTo={location} requireLogin={requireLogin} />;
   else if (route.path === '/compute/orders') page = props.session ? <OrdersPage {...pageProps} /> : <LoginRedirect returnTo={location} requireLogin={requireLogin} />;
   else if (/^\/compute\/orders\/[^/]+$/.test(route.path)) page = props.session ? <OrderDetailPage {...pageProps} orderId={routeParam(route.path)} /> : <LoginRedirect returnTo={location} requireLogin={requireLogin} />;

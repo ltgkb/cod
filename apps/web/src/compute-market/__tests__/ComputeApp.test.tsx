@@ -7,7 +7,7 @@ import { ComputeApp } from '../ComputeApp';
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); window.history.replaceState({}, '', '/'); try { localStorage.clear(); } catch { /* optional */ } });
 
 const capabilities: ComputeCapabilities = {
-  enabled: true, instantPurchase: false, reservationPurchase: false, hosting: true, devices: true, assets: true,
+  enabled: true, instantPurchase: false, reservationPurchase: true, hosting: true, devices: true, assets: true,
   cardHourTrades: false, referrals: true, news: true, rankings: false, hostedSettlements: false, admin: false,
   services: { verification: false, procurement: false, coupons: false, addresses: false, onlineSupport: true, humanSupport: false },
 };
@@ -93,5 +93,20 @@ describe('ComputeApp', () => {
     expect(await screen.findByRole('heading', { name: '能力尚未开放' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '我的订单' })).not.toBeInTheDocument();
     expect(fetcher.mock.calls.some(([url]) => String(url).includes('/api/compute/v2/orders'))).toBe(false);
+  });
+
+  it('keeps showcase details visible while disabling order creation', async () => {
+    const discoveryCapabilities: ComputeCapabilities = { ...capabilities, instantPurchase: false, reservationPurchase: false, hosting: false, devices: false, assets: false, referrals: false, news: false, services: { ...capabilities.services, onlineSupport: false } };
+    const showcaseOffer: ComputeOfferV2 = { ...offer, tags: ['方案展示', ...offer.tags], skus: [{ ...offer.skus[0], priceCardHoursMilli: null, compareAtPriceCardHoursMilli: null }], availability: { level: 'quote', label: '方案展示' } };
+    mockFetch((url) => {
+      if (url.endsWith('/api/compute/v2/capabilities')) return json(discoveryCapabilities);
+      if (url.endsWith('/api/compute/v2/offers/offer-1')) return json(showcaseOffer);
+      return undefined;
+    });
+
+    render(<ComputeApp {...props} initialPath="/compute/offers/offer-1" />);
+
+    expect(await screen.findByRole('button', { name: '方案展示 · 暂不接单' })).toBeDisabled();
+    expect(screen.getByText('方案展示，配置以交付前确认为准')).toBeInTheDocument();
   });
 });

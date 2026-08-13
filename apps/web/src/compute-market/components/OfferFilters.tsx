@@ -3,7 +3,7 @@ import { Funnel, X } from '@phosphor-icons/react';
 import { useState } from 'react';
 
 const groups: Array<{ key: keyof Filters; label: string; options: Array<[string, string]> }> = [
-  { key: 'gpuSeries', label: 'GPU 系列', options: [['RTX', 'RTX'], ['H100', 'H100'], ['L40S', 'L40S']] },
+  { key: 'gpuSeries', label: 'GPU 系列', options: [['RTX', 'RTX'], ['H100', 'H100'], ['L40S', 'L40S'], ['B300', 'B300']] },
   { key: 'memoryGb', label: '显存档位', options: [['24', '24 GB+'], ['48', '48 GB+'], ['80', '80 GB+']] },
   { key: 'useCase', label: '用途', options: [['训练', '训练'], ['推理', '推理'], ['生成式AI', 'AIGC'], ['渲染', '渲染'], ['科研', '科研']] },
   { key: 'deliveryMode', label: '交付形态', options: [['container', '容器'], ['virtual_machine', '虚拟机'], ['bare_metal', '裸金属']] },

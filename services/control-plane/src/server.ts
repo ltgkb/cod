@@ -18,6 +18,7 @@ import { computeOfferCatalog, validateComputeQuote, validateComputeRequest } fro
 import { computeRequestFromNode, createComputeMarketV2Router } from './compute-market-v2/router.js';
 import { ComputeCatalogService, defaultComputeCapabilities } from './compute-market-v2/catalog.js';
 import { createComputeReviewCatalog } from './compute-market-v2/review-catalog.js';
+import { createComputeShowcaseCatalog } from './compute-market-v2/showcase-catalog.js';
 import { OfficialPaymentService } from './payments.js';
 import { defaultPinnedFetcher, maskRegistrationDestination, normalizeRegistrationEmail, normalizeRegistrationPhone, RegistrationVerification, registrationDeliveryFromConfig, validateRegistrationChallengeId, validateRegistrationCode, type PinnedFetcher, type RegistrationDelivery, type RegistrationEndpointValidator } from './registration-verification.js';
 
@@ -369,7 +370,9 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
   const products = new ProductRegistry(config);
   const computeCatalog = config.computeReviewMode
     ? createComputeReviewCatalog()
-    : new ComputeCatalogService({ ...defaultComputeCapabilities, enabled: config.computeMarketEnabled });
+    : config.computeMarketEnabled
+      ? createComputeShowcaseCatalog()
+      : new ComputeCatalogService({ ...defaultComputeCapabilities, enabled: false });
   const computeMarketV2 = createComputeMarketV2Router({ catalog: computeCatalog });
   const officialPayments = new OfficialPaymentService(config);
   const registrationPinnedFetcher = options.registrationPinnedFetcher ?? defaultPinnedFetcher;

@@ -405,8 +405,15 @@ describe('control-plane production rules', () => {
     const discovery = await start({ COD_COMPUTE_MARKET_ENABLED: 'true' });
     const discoveryCapabilities = await (await fetch(`${discovery.base}/api/compute/v2/capabilities`)).json();
     expect(discoveryCapabilities).toMatchObject({ enabled: true, instantPurchase: false, hosting: false, assets: false, admin: false });
-    const discoveryHome = await (await fetch(`${discovery.base}/api/compute/v2/home`)).json();
-    expect(discoveryHome).toMatchObject({ quickActions: ['offers'], featuredOffers: [] });
+    const discoveryHome = await (await fetch(`${discovery.base}/api/compute/v2/home`)).json() as { quickActions: string[]; featuredOffers: Array<{ title: string; providerName: string; skus: Array<{ period: string; priceCardHoursMilli: number | null }> }> };
+    expect(discoveryHome.quickActions).toEqual(['offers']);
+    expect(discoveryHome.featuredOffers.map((offer) => offer.title)).toEqual([
+      'B300 / 288 GB',
+      'H100 / 80 GB',
+      'L40S / 48 GB',
+      'RTX 5090 / 32 GB',
+    ]);
+    expect(discoveryHome.featuredOffers.every((offer) => offer.providerName.includes('非真实库存') && offer.skus[0]?.period === 'hour' && offer.skus[0]?.priceCardHoursMilli === null)).toBe(true);
 
     const preflight = await fetch(`${base}/api/compute/v2/orders/order-id/quote-decision`, {
       method: 'OPTIONS',
