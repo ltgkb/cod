@@ -1,0 +1,26 @@
+import { CheckCircle, MapPin } from '@phosphor-icons/react';
+import { useState } from 'react';
+import { formatCardHours, periodLabel } from '../api';
+import { ErrorState } from '../components/ErrorState';
+import { SpecGrid } from '../components/SpecGrid';
+import { useComputeResource } from '../hooks/useComputeResource';
+import type { ComputePageProps } from './shared';
+
+export function OfferDetailPage({ api, navigate, requireLogin, signedIn, offerId }: ComputePageProps & { offerId: string }) {
+  const resource = useComputeResource((signal) => api.offer(offerId, signal), [offerId]);
+  const [imageId, setImageId] = useState(''); const [quantity, setQuantity] = useState(1); const [duration, setDuration] = useState(1); const [startsAt, setStartsAt] = useState('');
+  const offer = resource.data; const sku = offer?.skus[0];
+  if (resource.state === 'error') return <ErrorState message={resource.error?.message} onRetry={resource.reload} />;
+  if (!offer || !sku) return <div className="compute-skeleton detail-card" />;
+  const image = sku.imageOptions.find((item) => item.id === imageId) ?? sku.imageOptions[0]; const quote = offer.purchaseMode === 'quote' || offer.availability.level === 'quote'; const soldOut = offer.availability.level === 'sold_out';
+  const checkout = () => { const params = new URLSearchParams({ offerId: offer.id, imageId: image.id, quantity: String(quantity), duration: String(duration), startsAt }); const path = `/compute/checkout/${sku.id}?${params}`; if (signedIn) navigate(path); else requireLogin(path); };
+  return <div className="compute-detail-layout"><div className="compute-detail-primary"><section className="compute-summary-card"><div className="compute-detail-media"><img src={offer.media[0]?.url} alt={offer.media[0]?.alt} /></div><div><span className={`compute-stock ${offer.availability.level}`}>{offer.availability.label}</span><h2>{offer.title}</h2><p><MapPin /> {offer.regionLabel} · {offer.providerName}</p></div></section><section className="compute-panel"><h2>硬件配置</h2><SpecGrid offer={offer} detailed /></section></div>
+    <aside className="compute-purchase-card"><section><h2>选择镜像</h2><div className="compute-radio-list">{sku.imageOptions.map((item) => <label key={item.id}><input type="radio" name="image" checked={image.id === item.id} onChange={() => setImageId(item.id)} /><span><strong>{item.framework} {item.frameworkVersion}</strong><small>Python {item.pythonVersion} · CUDA {item.cudaVersion}</small></span><CheckCircle weight={image.id === item.id ? 'fill' : 'regular'} /></label>)}</div></section>
+      <section><h2>租赁单位</h2><div className="compute-segmented fixed"><button type="button" className="active" disabled>{periodLabel(sku.period)}<small>{formatCardHours(sku.priceCardHoursMilli)} 卡时/小时</small></button></div></section>
+      <section className="compute-purchase-row"><label>数量</label><div className="compute-stepper"><button type="button" aria-label="减少数量" onClick={() => setQuantity((value) => Math.max(sku.minimumUnits, value - 1))}>−</button><output>{quantity}</output><button type="button" aria-label="增加数量" onClick={() => setQuantity((value) => Math.min(sku.maximumUnits ?? 128, value + 1))}>＋</button></div></section>
+      <section className="compute-purchase-row"><label htmlFor="compute-duration">租赁时长（小时）</label><input id="compute-duration" type="number" min="1" max="36500" step="1" value={duration} onChange={(event) => setDuration(Math.max(1, Math.floor(Number(event.target.value))))} /></section>
+      <section><label htmlFor="compute-start">{quote ? '期望开始时间（选填）' : '开始时间'}</label><input id="compute-start" type="datetime-local" value={startsAt} onChange={(event) => setStartsAt(event.target.value)} /></section>
+      <div className="compute-purchase-total"><span>{quote ? '人工核验库存后报价' : '预计应付'}</span><strong>{quote ? '待报价' : `${formatCardHours((sku.priceCardHoursMilli ?? 0) * quantity * duration)} 卡时`}</strong></div>
+      <button type="button" className="compute-button primary sticky-cta" disabled={soldOut} onClick={checkout}>{soldOut ? '当前无库存' : quote ? '提交租赁需求' : offer.purchaseMode === 'reservation' ? '预占并确认' : '立即购买'}</button>
+    </aside></div>;
+}

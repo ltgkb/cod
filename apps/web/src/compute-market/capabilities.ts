@@ -1,0 +1,17 @@
+import type { ComputeCapabilities } from '@cod/contracts/compute-market-v2';
+
+export const unavailableComputeCapabilities: ComputeCapabilities = {
+  enabled: false, instantPurchase: false, reservationPurchase: false, hosting: false, devices: false,
+  assets: false, cardHourTrades: false, referrals: false, news: false, rankings: false, hostedSettlements: false, admin: false,
+  services: { verification: false, procurement: false, coupons: false, addresses: false, onlineSupport: false, humanSupport: false },
+};
+
+export function visibleBottomTabs(capabilities: ComputeCapabilities) {
+  return [
+    { path: '/compute', label: '首页', visible: true },
+    { path: '/compute/hosting', label: '设备托管', visible: capabilities.hosting },
+    { path: '/compute/news', label: '资讯', visible: capabilities.news },
+    { path: '/compute/rankings', label: '排行榜', visible: capabilities.rankings },
+    { path: '/compute/me', label: '我的', visible: true },
+  ].filter((item) => item.visible);
+}

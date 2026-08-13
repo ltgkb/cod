@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "updatedAt": "2026-08-13T00:00:00.000Z",
+  "assets": [
+    {
+      "path": "/compute/gpu-accelerator.webp",
+      "kind": "product-image-base",
+      "source": "OpenAI image generation tool",
+      "author": "COD product team with OpenAI image generation",
+      "license": "Project-owned AI-generated asset; no third-party logo or screenshot",
+      "createdAt": "2026-08-13T00:00:00.000Z",
+      "usageNote": "Generic unbranded preview only. Operations must replace it with SKU-accurate, authorized product media before a real offer is published."
+    }
+  ]
+}
