@@ -1501,6 +1501,40 @@ describe('COD workspace', () => {
     expect(window.location.pathname).toBe('/');
   });
 
+  it('keeps an authenticated compute deep link open after restoring the workspace session', async () => {
+    window.history.replaceState({}, '', '/compute');
+    window.localStorage.setItem('cod.session.token', 'compute-session');
+    window.localStorage.setItem('cod.device.id', 'web-device');
+    const account = { userId: 'user', displayName: 'member', balanceCents: 0, currency: 'CNY', plan: 'developer', role: 'member', billingExempt: false };
+    const computeCapabilities = {
+      enabled: true, instantPurchase: false, reservationPurchase: false, hosting: false, devices: false,
+      assets: false, cardHourTrades: false, referrals: false, news: false, rankings: false, hostedSettlements: false, admin: false,
+      services: { verification: false, procurement: false, coupons: false, addresses: false, onlineSupport: false, humanSupport: false },
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/api/capabilities')) return json(capabilities);
+      if (url.endsWith('/api/model-catalog') || url.endsWith('/api/model-sources')) return json([]);
+      if (url.endsWith('/api/account')) return json(account);
+      if (url.endsWith('/api/compute/v2/capabilities')) return json(computeCapabilities);
+      if (url.endsWith('/api/compute/v2/home')) return json({ banner: null, quickActions: ['offers'], featuredOffers: [], news: [] });
+      if (url.endsWith('/api/devices/web-device/heartbeat') && init?.method === 'POST') return json({ id: 'web-device', name: 'COD Web', platform: 'web', status: 'online', lastSeenAt: new Date().toISOString() });
+      if (url.endsWith('/api/devices')) return json([{ id: 'web-device', name: 'COD Web', platform: 'web', status: 'online', lastSeenAt: new Date().toISOString() }]);
+      if (url.endsWith('/api/tasks') || url.endsWith('/api/products') || url.endsWith('/api/ledger') || url.endsWith('/api/compute/requests')) return json([]);
+      if (url.endsWith('/api/credit-packs')) return json(creditPacks);
+      if (url.endsWith('/api/referrals')) return json({ inviteCode: 'COMPUTE', referredUsers: 0, commissionRateBps: 0, pendingCommissionCents: 0, settledCommissionCents: 0 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: '算力市场', level: 1 })).toBeInTheDocument();
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/api/account'))).toBe(true));
+    expect(screen.getByRole('heading', { name: '算力市场', level: 1 })).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/compute');
+  });
+
   it('lets only administrators inspect, filter, copy, paginate, update, and return from compute requests', async () => {
     window.localStorage.setItem('cod.device.id', 'web-device');
     const copyText = vi.fn(async () => undefined);

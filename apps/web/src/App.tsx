@@ -1360,7 +1360,7 @@ export function App() {
       if (catalogResult.status === 'fulfilled') setModelCatalog(catalogResult.value); else setModelCatalogError('模型目录暂不可用，请稍后重试。');
       const nextSession = sessionResult.status === 'fulfilled' ? sessionResult.value : null;
       if (!nextSession) { setAuthState('signed-out'); return; }
-      try { await loadWorkspace(nextSession,authGeneration); if (mounted&&authGenerationRef.current===authGeneration) { sessionTokenRef.current=nextSession.token; setSession(nextSession); setAuthState('signed-in'); setInitialAuthMode('login'); setOverlay(null); } }
+      try { await loadWorkspace(nextSession,authGeneration); if (mounted&&authGenerationRef.current===authGeneration) { sessionTokenRef.current=nextSession.token; setSession(nextSession); setAuthState('signed-in'); setInitialAuthMode('login'); setOverlay((current) => current === 'compute' ? current : null); } }
       catch (error) {
         if (!mounted || authGenerationRef.current!==authGeneration) return;
         if (isDefinitiveAuthenticationFailure(error)) {
