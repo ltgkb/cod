@@ -4,6 +4,7 @@
 > 适用端：Web、macOS、Windows、Linux、Android、iOS  
 > 产品基准：奇点算力移动端的信息架构、页面层级、商品密度与核心交易路径  
 > 品牌与系统边界：使用 COD 品牌、账户、卡时、权限与控制面；不复制奇点算力商标、Logo、原文案或未获授权素材  
+> 统一结算：[CARD_HOUR_SETTLEMENT_SPEC.md](./CARD_HOUR_SETTLEMENT_SPEC.md) 是卡时价格、购买、扣减与退款的唯一口径
 > 旧实现：[COMPUTE_MARKET_LIFECYCLE.md](./COMPUTE_MARKET_LIFECYCLE.md) 仅作为 V1 兼容与迁移依据
 
 ## 0. 一句话定义
@@ -34,7 +35,7 @@
 - 青色仍可作为算力模块的业务强调色，但必须来自 COD Token，不硬编码第三方色值。
 - GPU 商品图片使用自有拍摄、厂商授权媒体包或明确可商用素材，并保留来源清单。
 - 第三方宣传文案、性能承诺、价格、库存、评分和排行数据不得照抄；只展示 COD 后端真实返回的数据。
-- “立即购买”“运行中”“可提现”等强承诺，只能在对应后端能力真实可用时展示。
+- “立即购买”“运行中”等强承诺只能在对应后端能力真实可用时展示；“可提现”“兑回人民币”在任何情况下都不得出现。
 
 ### 1.3 不接受的“相似实现”
 
@@ -69,7 +70,7 @@
 ### 2.2 本轮不隐含承诺
 
 - COD 不因 UI 上线自动成为设备保管方、托管服务商或融资提供方。
-- 未接入真实库存锁定、支付、交付和退款前，不得开放即时购买。
+- 未接入真实库存锁定、卡时结算、交付和退款前，不得开放即时购买。
 - 未签署书面合同、完成设备验收前，不得把托管申请显示为正式资产。
 - 排行榜不得使用无法核验的收益数据；没有真实数据时整个入口由 capability 隐藏。
 
@@ -82,7 +83,7 @@
 | 游客 | 浏览公开商品、资讯、公开排行；进入登录 | 查看价格协议、库存明细、订单、设备和资产 |
 | 普通用户 | 下单/询价、管理本人订单、资产、地址、优惠券和邀请 | 查看他人信息、修改库存或推进交付状态 |
 | 设备方 | 提交托管/入驻、管理本人设备、查看结算与工单 | 自行把设备设为审核通过或运行中 |
-| 运营管理员 | 商品、库存、订单、托管申请、设备状态、报价、工单和内容运营 | 代替用户接受报价、伪造支付、删除审计记录 |
+| 运营管理员 | 商品、库存、订单、托管申请、设备状态、报价、工单和内容运营 | 代替用户接受报价、伪造卡时结算、删除审计记录 |
 | 超级管理员 | 管理 capability、运营角色和系统配置 | 绕过审计或租户边界 |
 
 任何含联系方式、合同、结算、地址的信息都必须按租户和所属用户隔离。管理员列表只展示脱敏摘要，进入详情时记录审计事件。
@@ -126,6 +127,8 @@
 | `/compute/rankings` | 排行榜 | 否 | 排行榜 |
 | `/compute/me` | 我的 | 是 | 我的 |
 | `/compute/assets` | 我的资产 | 是 | 我的资产卡 |
+| `/compute/assets/trades` | 卡时交易与转让记录 | 是 | 我的资产 |
+| `/compute/assets/trades/:tradeId` | 卡时交易详情 | 是 | 交易记录 |
 | `/compute/referrals` | 邀请好友 | 是 | 邀请卡 |
 | `/compute/coupons` | 优惠券 | 是 | 服务网格 |
 | `/compute/addresses` | 地址管理 | 是 | 服务网格 |
@@ -139,11 +142,11 @@
 | `/admin/compute/dashboard` | 成交、库存、部署、设备异常和待办总览 |
 | `/admin/compute/catalog` | 商品、SKU、镜像、价格、标签、素材与上下架 |
 | `/admin/compute/inventory` | 库存池、预占、节点、机房和维护状态 |
-| `/admin/compute/orders` | 订单、询价、支付、退款、部署与交付 |
+| `/admin/compute/orders` | 订单、询价、卡时结算、退款、部署与交付 |
 | `/admin/compute/hosting` | 托管/入驻申请、现场核验、报价和合同状态 |
 | `/admin/compute/devices` | 托管设备、运行监控摘要、异常和退场 |
 | `/admin/compute/tickets` | 售后与运维工单 |
-| `/admin/compute/settlements` | 收益结算与发票；未接入时 capability 隐藏 |
+| `/admin/compute/settlements` | 卡时收益结算与交易审计；未接入时 capability 隐藏 |
 | `/admin/compute/content` | Banner、资讯、排行规则和服务入口 |
 | `/admin/compute/audit` | 高风险操作审计，只读 |
 
@@ -222,7 +225,7 @@
 │ 16:7 GPU 主图               热租 │
 ├────────────────────────────────┤
 │ RTX 5090 / 32 GB               │
-│ ¥64.60/日              原价 ¥68 │
+│ 64.60卡时/日         原价68卡时 │
 │ [生成式AI] [高性能计算]          │
 │ CPU 驱动版本       RAM 内存       │
 │ SYS 系统盘         CUDA 版本      │
@@ -258,12 +261,12 @@
 5. 选择周期：时/天/月，仅显示 SKU 支持项。
 6. 选择数量：减号、数量、加号；受库存、最小量和最大量约束。
 7. 开始时间/时长：即时商品必填，询价商品可填期望时间。
-8. 费用明细：资源价、存储/公网附加项、优惠、合计和需要的 COD 卡时。
+8. 费用明细：资源价、存储/公网附加项、优惠和应付 COD 卡时；所有项目均以卡时计价。
 9. 底部主按钮。
 
 主按钮语义由 `purchaseMode` 决定：
 
-- `instant`：`立即购买`，前提是库存预占、支付和交付均已接通。
+- `instant`：`立即购买`，前提是库存预占、卡时结算和交付均已接通。
 - `reservation`：`预占并确认`，进入 15 分钟库存预占和结算页。
 - `quote`：`提交租赁需求`，明确提示“人工核验库存后报价”。
 - 当商品状态或库存为 `sold_out`：禁用并显示 `当前无库存`。
@@ -272,16 +275,18 @@
 
 - 顶部展示商品/镜像/区域/数量/周期/开始时间摘要。
 - 联系信息默认来自统一账户，可按订单修改但不反写账户。
-- 结算优先级：优惠券 → COD 卡时 → 钱包/已接入支付渠道。
-- 用户必须看见人民币总额、实际抵扣卡时、剩余应付和退款规则。
-- 创建订单、支付、接受报价都使用独立 idempotency key。
-- 提交前服务端重新计算价格；客户端金额仅作预览。
+- 结算顺序：计算商品卡时小计 → 扣除卡时优惠 → 原子扣减 COD 卡时；系统内订单没有人民币钱包补差额。
+- 用户必须看见卡时小计、优惠、最终应扣卡时、当前卡时余额和退款规则。
+- 原人民币标价迁移为卡时价时数字不变；`1.002` 只用于购买卡时，不能再次乘到订单上。
+- 卡时不足时引导到独立“购买卡时”流程，购卡成功后返回原确认页重新校验，不能自动替用户提交。
+- 创建订单、卡时结算、购买卡时和接受报价各自使用独立 idempotency key。
+- 提交前服务端重新计算卡时价格；客户端数值仅作预览。
 
 ### 6.6 我的订单与订单详情
 
 订单列表分为 `全部 / 待确认 / 交付中 / 使用中 / 已完成`。每项展示订单号后 8 位、GPU、数量、周期、金额、状态和更新时间。
 
-详情包含：状态时间线、配置快照、价格快照、交付凭据摘要、联系人、合同/条款版本、工单入口与允许的操作。SSH 密钥、口令等秘密不在普通 JSON 响应或页面日志中返回；凭据通过短期一次性领取流程提供。
+详情包含：状态时间线、配置快照、卡时价格快照、交付凭据摘要、联系人、合同/条款版本、工单入口与允许的操作。SSH 密钥、口令等秘密不在普通 JSON 响应或页面日志中返回；凭据通过短期一次性领取流程提供。
 
 ### 6.7 设备托管首页
 
@@ -348,11 +353,15 @@
 
 “资产”必须拆清，不能用一个余额混合：
 
-- 钱包余额（CNY）。
-- COD 可用卡时（额度单位）。
-- 托管结算：待结算、可结算、已结算；仅在真实结算系统接入时出现。
+- COD 可用卡时。
+- 交易冻结与待入账卡时。
+- 托管结算卡时：待结算、可结算、已结算；仅在真实结算系统接入时出现，结算后进入可用卡时。
 - 运行中的租赁资源数量。
-- 明细账：充值、卡时包、租赁扣费、退款、托管结算、优惠。
+- 明细账：购买卡时、奖励卡时、租赁扣减、卡时退款、托管结算和优惠。
+
+人民币支付只在独立“购买卡时”页面和财务记录中出现，不作为资产页上的系统内结算余额，也不能直接支付租赁或托管服务。
+
+卡时交易入口展示可交易余额、接收账户、转让数量、到期时间和不可撤销提示。需要交付确认的交易展示 `待接受 / 已冻结 / 已完成 / 已取消 / 已过期`；完成前卡时处于冻结状态。卡时不能兑回或提现人民币，任何资产、收益和交易页面都不得展示“预计可提现金额”。
 
 申请、询价、被拒绝的托管记录不计入资产。
 
@@ -369,7 +378,7 @@
 - Dashboard：今日新订单、待报价、待部署、运行实例、异常设备、即将到期预占和待处理工单；每个数字必须可下钻。
 - 商品：草稿/已上架/已暂停/售罄，管理 SKU、镜像、价格周期、素材、标签和公开库存文案；发布前展示预览与字段校验。
 - 库存：按 SKU/节点/机房查看可用、预占、已分配、维护；人工调整必须填写原因并保留前后值。
-- 订单：按状态、用户、GPU、区域、时间筛选；详情展示不可变价格快照、支付/报价事件、交付状态和工单。
+- 订单：按状态、用户、GPU、区域、时间筛选；详情展示不可变卡时价格快照、结算/报价事件、交付状态和工单。
 - 托管：展示主体、联系方式、设备清单、场地参数、附件状态和责任边界；每次推进写明下一步和责任方。
 - 设备：按四个用户状态加维护/离线筛选；只展示真实监控摘要，允许创建维护事件和待用户处理事项。
 - 内容：管理 Banner、资讯和服务入口；没有已发布内容时用户端隐藏对应区块。
@@ -501,19 +510,20 @@ services/control-plane/src/compute-market-v2/
 
 ## 9. 领域模型
 
-### 9.1 必须区分的两个“卡时”
+### 9.1 必须区分的三类卡时数据
 
 - `resourceCardHoursMilli`：真实 GPU 使用量，`GPU 卡数 × 小时 × 1000`。
-- `creditCardHoursMilli`：COD 账户额度。换算固定为 `1 COD 卡时 = ¥1.002`。
+- `price/chargedCardHoursMilli`：商品单价与订单应扣卡时。
+- `available/lockedCardHoursMilli`：账户可用与交易冻结卡时。
 
-两者名称、字段和账本不能混用。例如 H100 的真实资源单价可以是 ¥18.80/卡时，这不代表一份 COD 额度卡时能购买一份 H100 资源卡时。
+三者名称、字段和账本不能混用。例如 GPU 租赁原标价为 `¥18.80 / 日`，迁移后商品价是 `18.80 卡时 / 日`；它与真实用了多少 GPU 卡时不是同一数据。
 
-金额计算使用整数：
+统一规则：
 
-- 人民币存 `amountCnyMilli`（千分之一元）。
-- `1 COD 卡时 = 1002 amountCnyMilli`。
-- 抵扣所需 `creditCardHoursMilli = ceil(amountCnyMilli × 1000 / 1002)`。
-- 最终展示人民币保留两位；服务端决定舍入，客户端不得自行修改订单金额。
+- 原人民币商品价迁移成卡时价时，千分位整数数值不变；`64_600 priceCnyMilli` 迁移为 `64_600 priceCardHoursMilli`。
+- `1 卡时 = ¥1.002` 只属于人民币购买卡时的单向入口；系统内订单不做乘除换算。
+- 卡时不能兑换或提现人民币，但可在平台内交易、转让和结算，交易必须使用可用/冻结双账户和守恒账本。
+- 服务端决定卡时小计、优惠和扣减；客户端不得自行修改订单卡时数。
 
 ### 9.2 核心实体
 
@@ -522,7 +532,7 @@ type ComputePurchaseMode = 'instant' | 'reservation' | 'quote';
 type ComputeOfferStatus = 'draft' | 'published' | 'paused' | 'sold_out' | 'archived';
 type ComputeOrderStatus =
   | 'draft' | 'reserved' | 'pending_quote' | 'quoted'
-  | 'pending_payment' | 'paid' | 'provisioning' | 'running'
+  | 'pending_settlement' | 'settled' | 'provisioning' | 'running'
   | 'action_required' | 'completed' | 'cancelled'
   | 'refund_pending' | 'refunded';
 type HostingApplicationStatus =
@@ -558,15 +568,16 @@ interface ComputeSkuV2 {
   period: 'hour' | 'day' | 'month';
   minimumUnits: number;
   maximumUnits: number | null;
-  priceCnyMilli: number | null;
-  compareAtPriceCnyMilli: number | null;
+  priceCardHoursMilli: number | null;
+  compareAtPriceCardHoursMilli: number | null;
   imageOptions: ComputeImageOption[];
   inventoryRevision: number;
 }
 
 interface ComputeQuoteV2 {
-  amountCnyMilli: number;
-  creditCardHoursMilli: number;
+  subtotalCardHoursMilli: number;
+  discountCardHoursMilli: number;
+  chargedCardHoursMilli: number;
   validUntil: string;
   termsVersion: string;
   terms: string;
@@ -580,10 +591,9 @@ interface ComputeOrderV2 {
   quantity: number;
   durationUnits: number;
   resourceCardHoursMilli: number;
-  subtotalCnyMilli: number;
-  discountCnyMilli: number;
-  totalCnyMilli: number;
-  creditCardHoursMilli: number;
+  subtotalCardHoursMilli: number;
+  discountCardHoursMilli: number;
+  chargedCardHoursMilli: number;
   status: ComputeOrderStatus;
   reservationExpiresAt: string | null;
   quote: ComputeQuoteV2 | null;
@@ -619,11 +629,13 @@ interface ComputeOrderV2 {
 | GET | `/api/compute/v2/devices` | 本人设备与状态汇总 |
 | GET | `/api/compute/v2/devices/:id` | 本人设备详情 |
 | POST | `/api/compute/v2/devices/:id/tickets` | 创建本人设备工单 |
-| GET | `/api/compute/v2/assets/summary` | 钱包、卡时和已开放结算摘要 |
+| GET | `/api/compute/v2/assets/summary` | 可用/冻结卡时、托管卡时结算和运行资源摘要 |
 | GET | `/api/compute/v2/assets/ledger` | 游标分页明细 |
 | GET | `/api/compute/v2/referrals` | 邀请码、规则和记录 |
 | GET | `/api/compute/v2/news` | 已发布资讯 |
 | GET | `/api/compute/v2/rankings` | capability 开启时返回匿名排行 |
+
+卡时属于 COD 全平台资产，交易复用共享接口 `GET/POST /api/card-hours/trades`、`GET /api/card-hours/trades/:id` 和 `POST /api/card-hours/trades/:id/cancel`。该接口只接受卡时整数，不接受人民币金额；创建时冻结、完成时原子转移、取消/超时原额解冻。算力模块不得另建一套私有余额或交易账本。
 
 ### 10.2 管理 API
 
@@ -648,7 +660,7 @@ interface ApiError {
 }
 ```
 
-前端根据稳定 `code` 映射中文文案，不显示原始数据库、支付方或供应商错误。
+前端根据稳定 `code` 映射中文文案，不显示原始数据库、卡时账本、外部购卡支付方或供应商错误。
 
 ---
 
@@ -657,17 +669,17 @@ interface ApiError {
 ### 11.1 租赁订单
 
 ```text
-即时：draft -> reserved -> pending_payment -> paid -> provisioning -> running -> completed
-询价：draft -> pending_quote -> quoted --用户接受--> pending_payment -> paid -> provisioning
+即时：draft -> reserved -> pending_settlement -> settled -> provisioning -> running -> completed
+询价：draft -> pending_quote -> quoted --用户接受--> pending_settlement -> settled -> provisioning
                                       \--用户拒绝----------------------------> cancelled
-异常：paid/provisioning/running -> action_required -> 原状态或 cancelled/refund_pending
-退款：paid/provisioning -> refund_pending -> refunded
+异常：settled/provisioning/running -> action_required -> 原状态或 cancelled/refund_pending
+退款：settled/provisioning -> refund_pending -> refunded
 ```
 
 - 库存预占有明确过期时间，过期释放由服务端任务处理。
 - 管理员不能代用户接受报价。
 - `running` 必须有真实交付事件；不能只靠管理员手点。
-- 支付成功、退款成功以服务端签名回调和幂等处理为准。
+- 卡时结算与卡时退款以服务端账本事务为准；购买卡时的外部支付回调属于独立购卡流程，不能直接推进算力订单。
 
 ### 11.2 托管申请与设备
 
@@ -708,7 +720,7 @@ reviewing/site_survey/quoted -> rejected 或 cancelled
 - 联系方式在管理员列表脱敏；复制完整联系方式属于审计事件。
 - 产权证明、合同和身份证明使用私有对象存储、短期签名 URL、类型/大小校验与恶意文件扫描。
 - 商品富文本、资讯和运营配置服务端清洗，禁止任意 HTML/脚本。
-- 即时购买、支付、退款、优惠券、邀请奖励均需服务端幂等。
+- 即时购买、卡时结算、卡时交易、退款、优惠券和邀请奖励均需服务端幂等。
 - 精确库存、机房地址、设备序列号、登录凭据不进入公开响应、分析事件和客户端日志。
 - 排行榜默认匿名且允许用户退出。
 - 第三方托管必须展示合同主体、设备保管、保险、SLA、赔付、结算和退场边界。
@@ -741,7 +753,8 @@ reviewing/site_survey/quoted -> rejected 或 cancelled
 - `hosting` 请求迁移为托管申请。
 - `supply` 请求迁移为算力入驻申请，不直接生成设备。
 - `installment` 保留为历史咨询；未有合规能力时不出现在 V2 导航。
-- V1 `approved/deploying/running/completed` 可映射到 V2 事件时间线；无法证明的字段标为 `source:legacy`，不得伪造验收/支付事件。
+- V1 `approved/deploying/running/completed` 可映射到 V2 事件时间线；无法证明的字段标为 `source:legacy`，不得伪造验收/结算事件。
+- V1 人民币商品价按相同数字迁移为卡时商品价，不乘或除 `1.002`；历史余额和流水按统一结算规范单独对账。
 - 迁移脚本必须可重复执行、输出数量校验和冲突报告，不删除 V1 原始数据。
 
 切换顺序：
@@ -818,7 +831,7 @@ COD 工作区与算力模块只通过这个边界通信。算力模块不得读�
 | --- | --- | --- |
 | M0 基础 | contracts、迁移骨架、capability、空路由壳 | 类型检查、跨租户测试、无生产入口 |
 | M1 商品 | 首页、筛选、商品卡、商品详情、管理商品/库存 | 参考结构对齐；真实 API；五端浏览通过 |
-| M2 交易 | 预占/询价、订单、报价确认、资产扣减、管理订单 | 幂等、并发库存、金额换算、权限与回滚通过 |
+| M2 交易 | 预占/询价、订单、报价确认、卡时扣减/转让、管理订单 | 幂等、并发库存、卡时守恒、购卡换算、权限与回滚通过 |
 | M3 托管 | 四步申请、申请详情、设备四状态、管理托管/设备 | 申请与设备分离；附件安全；完整状态机通过 |
 | M4 个人中心 | 我的、资产、邀请、服务入口、资讯/排行 capability | 无空壳入口；隐私与匿名规则通过 |
 | M5 切换 | V1 数据迁移、灰度、五端回归、旧弹窗只读/下线 | 数量对账、可回滚、CI 与手测矩阵通过 |
@@ -831,7 +844,7 @@ M1 可以先供内部浏览，但不得以“算力市场已完成”对外发�
 
 ### 17.1 自动化最低要求
 
-- 领域校验、金额/卡时换算、状态机和幂等单元测试。
+- 领域校验、商品价一比一迁移、购卡换算、卡时交易守恒、状态机和幂等单元测试。
 - 用户归属、管理员权限、跨租户、报价过期、库存竞争和重复回调 API 测试。
 - 商品列表/详情/筛选/确认订单/托管表单/设备状态组件测试。
 - V1 → V2 迁移测试；重复运行结果一致。
@@ -863,8 +876,10 @@ M1 可以先供内部浏览，但不得以“算力市场已完成”对外发�
 - [ ] 普通用户无法读取/修改他人订单、申请、设备和资产。
 - [ ] 管理员不能代用户接受报价。
 - [ ] 设备只有验收后才进入“我的设备/资产”。
-- [ ] `resourceCardHoursMilli` 与 `creditCardHoursMilli` 未混用。
-- [ ] 1 COD 卡时 = ¥1.002 的换算只有一个共享实现。
+- [ ] `resourceCardHoursMilli`、`chargedCardHoursMilli` 与账户余额字段未混用。
+- [ ] 原 `¥64.60` 商品迁移后展示并扣减 `64.60 卡时`，未再次乘 `1.002`。
+- [ ] `1 卡时 = ¥1.002` 只在人民币单向购买卡时时使用，且只有一个共享实现。
+- [ ] 卡时不能兑回/提现人民币；平台内交易的冻结、完成、取消、超时均守恒且可审计。
 - [ ] 旧 V1 数据可查看，迁移可重复、可审计、可回滚。
 - [ ] Android/iOS 返回、键盘、刷新和冷启动通过。
 - [ ] 商品素材有来源与授权记录。
@@ -879,7 +894,7 @@ M1 可以先供内部浏览，但不得以“算力市场已完成”对外发�
 1. 用户可以完成浏览 → 详情 → 下单/询价 → 确认 → 查看订单的闭环。
 2. 设备方可以完成申请 → 审核 → 部署 → 查看运行/异常 → 发起工单或退场的闭环。
 3. 管理员能处理每个用户可见状态，且每次高风险变更可审计。
-4. 钱包、COD 卡时、资源用量、人民币金额和托管结算口径互不混淆。
+4. COD 卡时、卡时交易、资源用量、购卡人民币和托管结算口径互不混淆；系统内没有人民币支付回退或卡时提现路径。
 5. 所有可见数据都是真实后端数据；未接入能力被隐藏或诚实降级。
 6. 五端完成自动化与手动验收，旧算力弹窗可安全下线。
 
@@ -889,5 +904,6 @@ M1 可以先供内部浏览，但不得以“算力市场已完成”对外发�
 
 - 用户提供的三张奇点算力界面参考：热门算力卡列表、商品详情、“我的/资产/设备”页。
 - 奇点算力公开 App Store 页面说明其核心范围包括 GPU 算力租赁、设备托管和云端运维：<https://apps.apple.com/cn/app/id6758072405>
+- COD 卡时统一价格、单向购买与平台内交易规范：[CARD_HOUR_SETTLEMENT_SPEC.md](./CARD_HOUR_SETTLEMENT_SPEC.md)
 - COD 当前 V1 业务与责任边界：[COMPUTE_MARKET_LIFECYCLE.md](./COMPUTE_MARKET_LIFECYCLE.md)
 - 当前实现入口：`apps/web/src/App.tsx` 的 `ComputeMarket`，仅作为迁移来源，不作为 V2 组件基础。

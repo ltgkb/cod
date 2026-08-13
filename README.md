@@ -45,7 +45,7 @@ npm run package:win
 - The packaged desktop receives its control-plane URL through `COD_CONTROL_PLANE_URL` and defaults to the current pilot server.
 - Desktop can discover an independently installed, loopback-only Dashi Taskboard companion as a transitional bridge. Setup and the data/security boundary are documented in `docs/DASHI_COMPANION_BRIDGE.md`; the license-safe native migration remains specified in `docs/DASHI_TASKBOARD_INTEGRATION.md`.
 - Desktop can verify and launch COD 桌面伙伴 0.7.0 on macOS, Windows, and Linux. Real chat uses an ephemeral loopback proxy so the companion never receives the COD login token. Installation paths, package hashes, and signing blockers are documented in `docs/DESKTOP_PET_INTEGRATION.md`.
-- The compute exchange covers rental, supply listing, third-party hosting, and equipment installment requests. Admins can review applicant details and issue an expiring quote; only the owning user can accept it before deployment. The lifecycle and responsibility boundary are documented in `docs/COMPUTE_MARKET_LIFECYCLE.md`.
+- The current compute exchange covers rental, supply listing, third-party hosting, and equipment installment requests. Admins can review applicant details and issue an expiring quote; only the owning user can accept it before deployment. The V2 product/merge contract is documented in `docs/COMPUTE_MARKET_V2_DESIGN_SPEC.md`, the card-hour settlement and internal-trading rules in `docs/CARD_HOUR_SETTLEMENT_SPEC.md`, and the V1 lifecycle boundary in `docs/COMPUTE_MARKET_LIFECYCLE.md`.
 
 ## Production configuration
 
