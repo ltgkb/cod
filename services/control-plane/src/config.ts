@@ -82,6 +82,7 @@ export interface ControlPlaneConfig {
   feishuAppSecret: string | null;
   feishuBindings: Record<string, string>;
   demoMode: boolean;
+  computeReviewMode: boolean;
   modelSources: ModelSourceConfig[];
   wikiBaseUrl: string;
   wikiSearchEndpoint: string | null;
@@ -381,6 +382,7 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     feishuAppSecret: environment.COD_FEISHU_APP_SECRET ?? null,
     feishuBindings,
     demoMode,
+    computeReviewMode,
     modelSources,
     wikiBaseUrl: environment.KAI_WIKI_BASE_URL ?? 'https://wiki.kai.com',
     wikiSearchEndpoint: environment.KAI_WIKI_SEARCH_ENDPOINT ?? null,

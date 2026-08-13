@@ -33,8 +33,9 @@ describe('control-plane production rules', () => {
       COD_PILOT_ACCESS_CODE_HASH: 'a'.repeat(64),
       COD_DEVELOPMENT_TOPUP_ENABLED: 'true',
     };
-    const config = loadConfig(productionEnvironment);
+    const config = loadConfig({ ...productionEnvironment, COD_COMPUTE_REVIEW_MODE: 'true' });
     expect(config.developmentTopupEnabled).toBe(false);
+    expect(config.computeReviewMode).toBe(false);
     expect(config.registrationEnabled).toBe(false);
     expect(config.inviteCodeRequired).toBe(false);
     const internalBetaConfig=loadConfig({...productionEnvironment,COD_REGISTRATION_ENABLED:'true',COD_REGISTRATION_VERIFICATION_REQUIRED:'false'});
@@ -393,7 +394,7 @@ describe('control-plane production rules', () => {
     expect(allowedOrigin.headers.get('access-control-allow-origin')).toBe('https://cod.example');
   });
 
-  it('mounts compute market V2 publicly and advertises PATCH for its state transitions', async () => {
+  it('mounts compute market V2, keeps production-safe defaults, and isolates review fixtures behind an explicit flag', async () => {
     const { base } = await start({ COD_ALLOWED_ORIGINS: 'https://cod.example' });
     const capabilities = await fetch(`${base}/api/compute/v2/capabilities`);
     expect(capabilities.status).toBe(200);
@@ -405,6 +406,12 @@ describe('control-plane production rules', () => {
     });
     expect(preflight.status).toBe(204);
     expect(preflight.headers.get('access-control-allow-methods')).toContain('PATCH');
+
+    const review = await start({ COD_COMPUTE_REVIEW_MODE: 'true' });
+    const reviewCapabilities = await (await fetch(`${review.base}/api/compute/v2/capabilities`)).json();
+    expect(reviewCapabilities).toMatchObject({ enabled: true, instantPurchase: false, reservationPurchase: false, hosting: true });
+    const reviewHome = await (await fetch(`${review.base}/api/compute/v2/home`)).json() as { featuredOffers: Array<{ title: string; providerName: string; skus: Array<{ period: string }> }> };
+    expect(reviewHome.featuredOffers[0]).toMatchObject({ title: expect.stringContaining('审核样例'), providerName: expect.stringContaining('非真实库存'), skus: [{ period: 'hour' }] });
   });
 
   it('rejects malformed UUID path parameters before they reach the database',async()=>{
