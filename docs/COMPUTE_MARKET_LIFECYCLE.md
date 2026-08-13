@@ -1,5 +1,7 @@
 # COD 算力市场：业务闭环与责任边界
 
+> 本文记录现有 V1“申请 + 人工报价”实现。新的奇点算力对标版采用独立全屏架构，开发与合并请以 [COMPUTE_MARKET_V2_DESIGN_SPEC.md](./COMPUTE_MARKET_V2_DESIGN_SPEC.md) 为准；V1 只作为兼容和数据迁移来源。
+
 ## 用户侧模块
 
 算力市场在 Web、Desktop、Android 与 iOS 共用同一套界面和控制面 API，包含四条业务线：
