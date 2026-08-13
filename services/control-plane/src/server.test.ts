@@ -393,6 +393,20 @@ describe('control-plane production rules', () => {
     expect(allowedOrigin.headers.get('access-control-allow-origin')).toBe('https://cod.example');
   });
 
+  it('mounts compute market V2 publicly and advertises PATCH for its state transitions', async () => {
+    const { base } = await start({ COD_ALLOWED_ORIGINS: 'https://cod.example' });
+    const capabilities = await fetch(`${base}/api/compute/v2/capabilities`);
+    expect(capabilities.status).toBe(200);
+    expect(await capabilities.json()).toMatchObject({ enabled: false, instantPurchase: false, hosting: false, admin: false });
+
+    const preflight = await fetch(`${base}/api/compute/v2/orders/order-id/quote-decision`, {
+      method: 'OPTIONS',
+      headers: { origin: 'https://cod.example', 'access-control-request-method': 'PATCH' },
+    });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get('access-control-allow-methods')).toContain('PATCH');
+  });
+
   it('rejects malformed UUID path parameters before they reach the database',async()=>{
     const {base}=await start();const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com',password:'Password123'})});const {token}=await login.json() as {token:string};const headers={authorization:`Bearer ${token}`,'content-type':'application/json'};const malformed='------------------------------------';
     const payment=await fetch(`${base}/api/payment-orders/${malformed}`,{headers});expect(payment.status).toBe(400);expect(await payment.json()).toMatchObject({error:'invalid_payment_order_id'});

@@ -47,6 +47,7 @@ afterEach(async () => {
   delete window.codDesktop;
   delete (window as Window & { turnstile?: unknown }).turnstile;
   configureCodRuntime({});
+  window.history.replaceState({}, '', '/');
   Object.defineProperty(window, 'localStorage', { configurable: true, value: createMemoryStorage() });
   await logoutCod();
   vi.useRealTimers();
@@ -1476,12 +1477,16 @@ describe('COD workspace', () => {
     expect(within(dialog).getByRole('button', { name: '登录后使用模型' })).toBeInTheDocument();
   });
 
-  it('shows the H100 card-hour market and keeps financing as a compliant application flow', async () => {
+  it('replaces the legacy compute dialog with the full-screen V2 market', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith('/api/capabilities')) return json(capabilities);
       if (url.endsWith('/api/model-catalog')) return json([]);
-      if (url.endsWith('/api/compute/offers')) return json([{ id: 'cod-h100-pcie-card-hour', title: 'H100 80GB 单卡算力', gpuModel: 'NVIDIA H100 PCIe 80GB', gpuMemoryGb: 80, gpuCount: 1, region: '国内合规机房', provider: 'COD 机房直供', priceCents: 1880, priceUnit: 'card-hour', minimumUnits: 10, delivery: '人工确认后开通', network: '按需报价', availability: 'ready', verified: true, tags: ['按卡时'] }]);
+      if (url.endsWith('/api/compute/v2/capabilities')) return json({
+        enabled: false, instantPurchase: false, reservationPurchase: false, hosting: false, devices: false,
+        assets: false, cardHourTrades: false, referrals: false, news: false, rankings: false, hostedSettlements: false, admin: false,
+        services: { verification: false, procurement: false, coupons: false, addresses: false, onlineSupport: false, humanSupport: false },
+      });
       throw new Error(`Unexpected request: ${url}`);
     });
     vi.stubGlobal('fetch', fetchMock);

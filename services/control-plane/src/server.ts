@@ -363,6 +363,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
   const gateway = options.gateway ?? new AiGateway(config);
   const knowledge = new KnowledgeAdapter(config);
   const products = new ProductRegistry(config);
+  const computeMarketV2 = createComputeMarketV2Router();
   const officialPayments = new OfficialPaymentService(config);
   const registrationPinnedFetcher = options.registrationPinnedFetcher ?? defaultPinnedFetcher;
   const registrationDelivery = options.registrationDelivery ?? registrationDeliveryFromConfig(config.registrationVerification, registrationPinnedFetcher,options.registrationEndpointValidator);
@@ -627,6 +628,17 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       }
       const bearer=bearerToken(request)??'';
       const session=verifySessionToken(bearer,config.sessionSecret);
+      if (url.pathname.startsWith('/api/compute/v2') || url.pathname.startsWith('/api/admin/compute/v2')) {
+        const computePrincipal: ComputePrincipal | null = session ? {
+          userId: session.sub,
+          tenantId: session.tenantId,
+          email: session.email,
+          role: session.role === 'admin' ? 'super_admin' : 'member',
+        } : null;
+        const body = request.method === 'POST' || request.method === 'PATCH' ? await readJson(request) : undefined;
+        const result = await computeMarketV2.route(await computeRequestFromNode(request, computePrincipal, body));
+        if (result) return sendJson(response, result.status, result.body);
+      }
       const agentSession=session?null:verifyAgentSessionToken(bearer,config.sessionSecret);
       if(!session&&!agentSession)return sendJson(response,401,{error:'unauthorized'});
       if(agentSession){

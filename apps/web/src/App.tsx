@@ -3,7 +3,6 @@ import type { FormEvent, ReactNode } from 'react';
 import QRCode from 'qrcode';
 import { ArrowClockwise } from '@phosphor-icons/react/ArrowClockwise';
 import { ArrowSquareOut } from '@phosphor-icons/react/ArrowSquareOut';
-import { Buildings } from '@phosphor-icons/react/Buildings';
 import { CaretDown } from '@phosphor-icons/react/CaretDown';
 import { ChatCircleDots } from '@phosphor-icons/react/ChatCircleDots';
 import { Check } from '@phosphor-icons/react/Check';
@@ -17,8 +16,6 @@ import { DotsThree } from '@phosphor-icons/react/DotsThree';
 import { File } from '@phosphor-icons/react/File';
 import { Folder } from '@phosphor-icons/react/Folder';
 import { GitDiff } from '@phosphor-icons/react/GitDiff';
-import { Handshake } from '@phosphor-icons/react/Handshake';
-import { HardDrives } from '@phosphor-icons/react/HardDrives';
 import { Key } from '@phosphor-icons/react/Key';
 import { Kanban } from '@phosphor-icons/react/Kanban';
 import { Lightning } from '@phosphor-icons/react/Lightning';
@@ -87,9 +84,6 @@ import {
   type CapabilityReport,
   ApiError,
   type CodSession,
-  type ComputeOffer,
-  type ComputeRequest,
-  type ComputeRequestInput,
   type CreditPackState,
   type LedgerEntry,
   type PaymentCheckout,
@@ -1090,10 +1084,8 @@ export function App() {
   const [compareEnabled, setCompareEnabled] = useState(false);
   const [compareModelKeys, setCompareModelKeys] = useState<string[]>([]);
   const [products, setProducts] = useState<ProductManifest[]>([]);
-  const [computeOffers, setComputeOffers] = useState<ComputeOffer[]>([]);
-  const [computeRequests, setComputeRequests] = useState<ComputeRequest[]>([]);
-  const [computeDraft, setComputeDraft] = useState<ComputeDraft>(initialComputeDraft);
-  const [resumeComputeAfterLogin, setResumeComputeAfterLogin] = useState(false);
+  const [computePath, setComputePath] = useState(() => window.location.pathname.startsWith('/compute') ? `${window.location.pathname}${window.location.search}` : '/compute');
+  const [computeLoginReturnTo, setComputeLoginReturnTo] = useState<string | null>(null);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [targetDeviceId, setTargetDeviceId] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
@@ -1217,16 +1209,27 @@ export function App() {
 
   const closeTopmostUi = useCallback(() => {
     if (overlay !== null) {
+      if (overlay === 'compute') {
+        window.history.replaceState({}, '', workspaceUrl.current);
+        setComputePath('/compute');
+        setComputeLoginReturnTo(null);
+        setOverlay(null);
+        return;
+      }
       if (overlay === 'login') {
         authGenerationRef.current += 1;
         setPendingSend(null);
-        setResumeComputeAfterLogin(false);
+        if (computeLoginReturnTo) {
+          setComputeLoginReturnTo(null);
+          setOverlay('compute');
+          return;
+        }
       }
       setOverlay(null);
       return;
     }
     if (sidebarOpen) setSidebarOpen(false);
-  }, [overlay, sidebarOpen]);
+  }, [computeLoginReturnTo, overlay, sidebarOpen]);
 
   useEffect(() => observeCodTopmostUiClose(closeTopmostUi), [closeTopmostUi]);
 
@@ -2120,6 +2123,36 @@ export function App() {
     active:computeRequests.filter((item)=>item.status==='deploying'||item.status==='running').length,
     attention:computeRequests.filter((item)=>item.status==='action_required').length,
   };
+
+  const openComputeMarket = () => {
+    setComputePath('/compute');
+    setOverlay('compute');
+  };
+  const exitComputeMarket = () => {
+    window.history.replaceState({}, '', workspaceUrl.current);
+    setComputePath('/compute');
+    setComputeLoginReturnTo(null);
+    setOverlay(null);
+  };
+
+  if (overlay === 'compute') return <ComputeApp
+    session={session}
+    initialPath={computePath}
+    apiBaseUrl={getControlPlaneUrl()}
+    platform={getCodRuntime().hostPlatform ? 'mobile' : hasDesktopBridge() ? 'desktop' : 'web'}
+    onRequireLogin={(returnTo) => {
+      setComputePath(returnTo);
+      setComputeLoginReturnTo(returnTo);
+      setOverlay('login');
+    }}
+    onExit={exitComputeMarket}
+    onOpenCodTask={({ title, prompt: taskPrompt }) => {
+      window.history.replaceState({}, '', workspaceUrl.current);
+      setNewTaskTitle(title);
+      setPrompt(taskPrompt);
+      setOverlay(session ? 'new-task' : 'login');
+    }}
+  />;
 
   return <div className={`app-shell${inspectorOpen ? '' : ' inspector-hidden'}`}>
     <aside className="rail"><Brand /><div className="rail-actions"><button className={`icon-button mobile-rail-primary ${mode === 'code' ? 'active' : ''}`} title="任务" aria-label="任务" onClick={() => { if(hasDesktopBridge())selectWorkspaceMode('code');setSidebarOpen(true); }}><ListChecks weight="fill" /></button><button className={`icon-button mobile-rail-primary ${mode === 'chat' ? 'active' : ''}`} title="普通对话" aria-label="普通对话" onClick={() => selectWorkspaceMode('chat')}><ChatCircleDots /></button>{taskboardUrl && <button className={overlay === 'taskboard' ? 'icon-button mobile-rail-secondary active' : 'icon-button mobile-rail-secondary'} title="任务看板" aria-label="任务看板" onClick={() => setOverlay('taskboard')}><Kanban weight="fill" /></button>}<button className="icon-button compute-entry mobile-rail-secondary" title="算力市场" aria-label="算力市场" onClick={() => setOverlay('compute')}><Storefront weight="fill" /></button><button className="icon-button mobile-rail-primary" title="模型库" aria-label="模型库" onClick={() => setOverlay('models')}><Stack /></button>{showDownloadEntry && <button type="button" className="icon-button mobile-rail-secondary" title="下载客户端" aria-label="下载客户端" onClick={handleOpenDownloadPage}><DownloadSimple /></button>}<button className="icon-button mobile-rail-secondary" title="命令面板" aria-label="命令面板" onClick={() => setOverlay('commands')}><Command /></button>{products.map((product) => <button className="icon-button mobile-rail-secondary" title={product.name} aria-label={product.name} key={product.id} onClick={() => void handleProductLaunch(product)}><ArrowSquareOut /></button>)}</div><div className="rail-footer"><ThemeToggle colorMode={colorMode} onChange={setColorMode} className="mobile-rail-secondary" /><button className="icon-button mobile-rail-more" title="更多功能" aria-label="更多功能" onClick={() => setOverlay('mobile-menu')}><DotsThree weight="bold" /></button><button className="icon-button mobile-rail-primary" title={session ? '账户' : '登录'} aria-label={session ? '账户' : '登录'} onClick={() => setOverlay(session ? 'account' : 'login')}><UserCircle /></button></div></aside>
