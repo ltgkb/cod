@@ -2053,6 +2053,15 @@ export function App() {
       setComputeLoginReturnTo(returnTo);
       setOverlay('login');
     }}
+    onOpenAccount={() => {
+      setComputeLoginReturnTo(null);
+      setOverlay(session ? 'account' : 'login');
+    }}
+    onOpenSupport={() => {
+      exitComputeMarket();
+      selectWorkspaceMode('chat');
+      setPrompt('请协助处理我的算力市场订单、托管申请或设备问题。');
+    }}
     onExit={exitComputeMarket}
   />;
 
