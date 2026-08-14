@@ -31,6 +31,11 @@ import {
 import "./compute-demo.css";
 
 type ComputeTab = "home" | "hosting" | "news" | "ranking" | "mine";
+type MineResourceView = "orders" | "devices" | "hosting" | "assets" | "verification" | "support" | "help" | "purchase" | "ledger";
+type MineOrderStatus = "all" | "pending" | "running" | "delivery" | "completed";
+
+const mineResourceViews = new Set<MineResourceView>(["orders", "devices", "hosting", "assets", "verification", "support", "help", "purchase", "ledger"]);
+const mineOrderStatuses = new Set<MineOrderStatus>(["all", "pending", "running", "delivery", "completed"]);
 
 export interface ComputeMarketAppProps {
   session: CodSession | null;
@@ -56,10 +61,14 @@ const navItems: Array<{
 function readComputeRoute(path: string) {
   const url = new URL(path, window.location.origin);
   const tab = url.searchParams.get("tab") as ComputeTab | null;
+  const view = url.searchParams.get("view");
+  const orderStatus = url.searchParams.get("status") as MineOrderStatus | null;
   return {
     tab: navItems.some((item) => item.id === tab) ? (tab as ComputeTab) : "home",
     productId: url.searchParams.get("offer"),
-    operations: url.searchParams.get("view") === "operations",
+    operations: view === "operations",
+    mineView: mineResourceViews.has(view as MineResourceView) ? (view as MineResourceView) : null,
+    orderStatus: mineOrderStatuses.has(orderStatus as MineOrderStatus) ? (orderStatus as MineOrderStatus) : "all",
   };
 }
 
@@ -109,10 +118,12 @@ function SectionTitle({
   title,
   description,
   action,
+  onAction,
 }: {
   title: string;
   description?: string;
   action?: string;
+  onAction?: () => void;
 }) {
   return (
     <header className="compute-v2-section-title">
@@ -120,8 +131,8 @@ function SectionTitle({
         <h2>{title}</h2>
         {description && <p>{description}</p>}
       </div>
-      {action && (
-        <button type="button">
+      {action && onAction && (
+        <button type="button" onClick={onAction}>
           {action} <CaretRight />
         </button>
       )}
@@ -231,7 +242,7 @@ function HomePage({
       </section>
 
       <section className="compute-v2-catalog" id="compute-products">
-        <SectionTitle title="热门算力卡" description="参考公开云平台行情换算的市场卡时价" action="全部资源" />
+        <SectionTitle title="热门算力卡" description="参考公开云平台行情换算的市场卡时价" action="全部资源" onAction={() => setFilter("全部")} />
         <div className="compute-v2-filters" aria-label="筛选算力卡">
           <SlidersHorizontal />
           {filters.map((item) => <button type="button" className={filter === item ? "active" : ""} onClick={() => setFilter(item)} key={item}>{item}</button>)}
@@ -274,8 +285,66 @@ function RankingPage() {
   return <div className="compute-v2-page-stack"><section className="compute-v2-page-banner ranking"><div><span>资源排行榜</span><h1>按稳定性与交付表现发现优质资源</h1><p>综合资源可用率、交付速度与服务质量，帮助用户快速比较资源池。</p></div><Ranking /></section><section className="compute-v2-ranking"><SectionTitle title="本周资源榜" description="综合可用率、交付速度与服务评分" /><div className="compute-v2-ranking-head"><span>排名 / 资源池</span><span>可用率</span><span>综合分</span></div>{computeDemoRanking.map((item) => <article key={item.rank}><b>{item.rank}</b><div><strong>{item.name}</strong><small>{item.model}</small></div><span>{item.availability}</span><em>{item.score}</em></article>)}</section></div>;
 }
 
-function MinePage({ session, balanceCardHours, onRequireLogin, onOpenOperations }: { session: CodSession | null; balanceCardHours: string | null; onRequireLogin: () => void; onOpenOperations: () => void }) {
-  return <div className="compute-v2-page-stack"><section className="compute-v2-profile"><div className="compute-v2-avatar"><UserCircle weight="fill" /></div><div><small>{session ? "已连接 COD 账户" : "访客账户"}</small><h1>{session?.account.displayName ?? "COD 算力市场"}</h1><p>{session ? "账户、卡时与算力订单统一管理" : "登录后查看新用户权益、余额与个人订单"}</p></div>{!session && <button type="button" onClick={onRequireLogin}>注册或登录</button>}</section>{session && <section className="compute-v2-wallet"><header><span><Wallet /> 可用卡时</span></header><strong>{balanceCardHours} <small>卡时</small></strong><p>账户余额与注册权益已同步</p><div><button type="button">购买卡时</button><button type="button">卡时明细</button></div></section>}<section className="compute-v2-operations-entry"><div><span><ChartBar /></span><div><small>公开数据</small><h2>经营看板</h2><p>集中查看区域供给、利用率、订单管线与近期交付。</p></div></div><button type="button" onClick={onOpenOperations}>打开经营看板 <CaretRight /></button></section><section className="compute-v2-orders"><SectionTitle title="我的订单" action="全部订单" /><div><button type="button"><Clock /><strong>待确认</strong><span>2</span></button><button type="button"><Lightning /><strong>运行中</strong><span>3</span></button><button type="button"><Package /><strong>待交付</strong><span>1</span></button><button type="button"><Check /><strong>已完成</strong><span>16</span></button></div></section><section className="compute-v2-services"><SectionTitle title="常用服务" />{[{icon:HardDrives,label:"我的设备",detail:"12 台设备"},{icon:Buildings,label:"托管申请",detail:"查看接入进度"},{icon:Wallet,label:"资产账户",detail:"卡时与流水"},{icon:ShieldCheck,label:"实名认证",detail:"已完成"},{icon:Headset,label:"专属客服",detail:"工作日 09:00-18:00"},{icon:Wrench,label:"帮助中心",detail:"使用指南与问题"}].map((item) => { const Icon=item.icon; return <button type="button" key={item.label}><Icon /><span><strong>{item.label}</strong><small>{item.detail}</small></span><CaretRight /></button>; })}</section></div>;
+const mineOrderCounts: Record<Exclude<MineOrderStatus, "all">, number> = { pending: 2, running: 3, delivery: 1, completed: 16 };
+const mineOrderLabels: Record<MineOrderStatus, string> = { all: "全部订单", pending: "待确认订单", running: "运行中订单", delivery: "待交付订单", completed: "已完成订单" };
+const mineOrders = [
+  { id: "COD-0814-031", status: "running" as const, resource: "H200 SXM 2 卡", meta: "成都 A 区, 剩余 31 小时", amount: "2,496.0 卡时", label: "运行中" },
+  { id: "COD-0814-028", status: "running" as const, resource: "L40S 8 卡", meta: "贵阳 B 区, 剩余 18 小时", amount: "1,478.4 卡时", label: "运行中" },
+  { id: "COD-0813-097", status: "running" as const, resource: "RTX 5090 4 卡", meta: "杭州 C 区, 剩余 42 小时", amount: "1,344.0 卡时", label: "运行中" },
+  { id: "COD-0814-036", status: "pending" as const, resource: "B300 SXM 4 卡", meta: "华北资源池, 等待配置确认", amount: "4,224.0 卡时", label: "待确认" },
+  { id: "COD-0814-034", status: "pending" as const, resource: "H100 SXM 8 卡", meta: "华东资源池, 等待镜像确认", amount: "3,840.0 卡时", label: "待确认" },
+  { id: "COD-0813-088", status: "delivery" as const, resource: "A800 PCIe 16 卡", meta: "西南资源池, 环境部署中", amount: "4,608.0 卡时", label: "待交付" },
+  { id: "COD-0812-072", status: "completed" as const, resource: "RTX 4090 8 卡", meta: "华南 D 区, 已运行 36 小时", amount: "1,382.4 卡时", label: "已完成" },
+  { id: "COD-0811-061", status: "completed" as const, resource: "H100 SXM 2 卡", meta: "成都 A 区, 已运行 24 小时", amount: "960.0 卡时", label: "已完成" },
+];
+
+interface MineResourceRow {
+  title: string;
+  meta: string;
+  value: string;
+  tone?: "active" | "warning" | "neutral";
+}
+
+function mineResourceContent(view: Exclude<MineResourceView, "orders">, balanceCardHours: string | null) {
+  const assetMetrics: Array<[string, string]> = balanceCardHours
+    ? [["可用卡时", balanceCardHours], ["交易冻结", "320.0"], ["本月消耗", "4,862.4"]]
+    : [["可用卡时", "注册后领取"], ["账户状态", "未登录"], ["资产明细", "登录后查看"]];
+  const assetRows: MineResourceRow[] = balanceCardHours
+    ? [{ title: "账户余额已同步", meta: "余额与注册权益已同步至当前账户", value: `${balanceCardHours} 卡时`, tone: "active" }, { title: "H200 订单冻结", meta: "COD-0814-031, 运行中", value: "-2,496.0 卡时", tone: "warning" }, { title: "运行结算退回", meta: "COD-0812-072, 提前 2 小时结束", value: "+76.8 卡时", tone: "active" }]
+    : [{ title: "新用户注册权益", meta: "完成注册并登录后自动到账", value: "待领取", tone: "neutral" }];
+  const ledgerMetrics: Array<[string, string]> = balanceCardHours
+    ? [["可用卡时", balanceCardHours], ["本月获得", "1,286.5"], ["本月消耗", "4,862.4"]]
+    : [["可用卡时", "注册后领取"], ["流水范围", "近 30 日"], ["账户状态", "未登录"]];
+  const ledgerRows: MineResourceRow[] = balanceCardHours
+    ? [{ title: "账户权益到账", meta: "2026-08-14 09:18", value: "+1,286.5", tone: "active" }, { title: "H200 订单冻结", meta: "2026-08-14 10:42", value: "-2,496.0", tone: "warning" }, { title: "RTX 4090 运行扣减", meta: "2026-08-13 18:26", value: "-1,382.4", tone: "warning" }, { title: "提前结束退回", meta: "2026-08-13 18:29", value: "+76.8", tone: "active" }]
+    : [{ title: "暂无账户明细", meta: "注册并登录后显示卡时发放、冻结和扣减记录", value: "未登录", tone: "neutral" }];
+  const resources: Record<Exclude<MineResourceView, "orders">, { icon: typeof House; title: string; description: string; badge: string; metrics: Array<[string, string]>; rows: MineResourceRow[] }> = {
+    devices: { icon: HardDrives, title: "我的设备", description: "查看已接入资源池的设备和当前运行状态。", badge: "12 台设备", metrics: [["运行中", "8 台"], ["待验收", "1 台"], ["平均在线率", "99.6%"]], rows: [{ title: "CD-GPU-021", meta: "H200 SXM 8 卡, 成都 A 区", value: "运行中", tone: "active" }, { title: "GY-GPU-016", meta: "L40S 16 卡, 贵阳 B 区", value: "运行中", tone: "active" }, { title: "HZ-GPU-009", meta: "H100 SXM 8 卡, 杭州 C 区", value: "维护中", tone: "warning" }, { title: "WL-GPU-007", meta: "RTX 4090 8 卡, 乌兰察布", value: "待验收", tone: "neutral" }] },
+    hosting: { icon: Buildings, title: "托管申请", description: "集中跟进资料核验、设备验收和资源池接入。", badge: "4 条申请", metrics: [["运行中", "2 条"], ["待处理", "1 条"], ["本月收益", "6,840 卡时"]], rows: [{ title: "H200 整机托管", meta: "8 卡整机, 成都智算中心", value: "已接入", tone: "active" }, { title: "L40S 集群托管", meta: "16 卡集群, 贵阳数据中心", value: "运行中", tone: "active" }, { title: "H100 服务器托管", meta: "8 卡整机, 杭州资源区", value: "待验收", tone: "warning" }, { title: "RTX 4090 工作站", meta: "8 卡节点, 乌兰察布", value: "资料核验", tone: "neutral" }] },
+    assets: { icon: Wallet, title: "资产账户", description: "查看卡时余额、冻结金额和近期资产变化。", badge: balanceCardHours ? "账户已同步" : "注册后可用", metrics: assetMetrics, rows: assetRows },
+    verification: { icon: ShieldCheck, title: "实名认证", description: "查看账户认证、企业信息和安全状态。", badge: "认证完成", metrics: [["身份认证", "已完成"], ["企业认证", "已完成"], ["账户安全", "正常"]], rows: [{ title: "个人身份认证", meta: "身份信息已通过核验", value: "已完成", tone: "active" }, { title: "企业主体认证", meta: "成都贤酷吉步科技有限公司", value: "已完成", tone: "active" }, { title: "联系人认证", meta: "业务联系人和手机号已核验", value: "已完成", tone: "active" }, { title: "交易安全检查", meta: "最近检查 2026-08-14", value: "正常", tone: "active" }] },
+    support: { icon: Headset, title: "专属客服", description: "跟进资源配置、部署和售后问题。", badge: "服务时间 09:00-18:00", metrics: [["当前工单", "2 单"], ["平均响应", "8 分钟"], ["服务评价", "4.9"]], rows: [{ title: "H200 镜像环境确认", meta: "工单 CS-0814-019, 技术支持", value: "处理中", tone: "active" }, { title: "托管设备网络核验", meta: "工单 CS-0813-041, 交付支持", value: "待回复", tone: "warning" }, { title: "卡时结算说明", meta: "工单 CS-0812-028, 账户支持", value: "已解决", tone: "neutral" }] },
+    help: { icon: Wrench, title: "帮助中心", description: "查看算力购买、运行、托管和结算指引。", badge: "6 个主题", metrics: [["新手指南", "12 篇"], ["运行与镜像", "18 篇"], ["托管与结算", "15 篇"]], rows: [{ title: "如何选择合适的 GPU", meta: "按模型规模、显存和任务时长进行比较", value: "选型指南" }, { title: "卡时如何计算", meta: "了解资源价格、数量和运行时长的关系", value: "计费说明" }, { title: "镜像和环境怎么选", meta: "PyTorch、vLLM 和 ComfyUI 环境说明", value: "运行指南" }, { title: "设备托管流程", meta: "从资料提交到验收接入的完整流程", value: "托管指南" }] },
+    purchase: { icon: Wallet, title: "购买卡时", description: "选择卡时包后用于算力租赁和运行结算。", badge: "即时到账", metrics: [["当前余额", balanceCardHours ?? "注册后领取"], ["有效期", "长期有效"], ["到账方式", "账户余额"]], rows: [{ title: "轻量卡时包", meta: "适合开发测试和短时推理", value: "50 卡时" }, { title: "标准卡时包", meta: "适合模型微调和批量推理", value: "200 卡时" }, { title: "团队卡时包", meta: "适合多卡训练和团队任务", value: "500 卡时" }] },
+    ledger: { icon: Wallet, title: "卡时明细", description: "查看卡时发放、冻结、扣减和退回记录。", badge: "近 30 日", metrics: ledgerMetrics, rows: ledgerRows },
+  };
+  return resources[view];
+}
+
+function MineResourceDetail({ view, orderStatus, balanceCardHours, onBack }: { view: MineResourceView; orderStatus: MineOrderStatus; balanceCardHours: string | null; onBack: () => void }) {
+  if (view === "orders") {
+    const rows = orderStatus === "all" ? mineOrders : mineOrders.filter((order) => order.status === orderStatus);
+    const total = orderStatus === "all" ? Object.values(mineOrderCounts).reduce((sum, count) => sum + count, 0) : mineOrderCounts[orderStatus];
+    return <div className="compute-v2-resource-detail"><header className="compute-v2-detail-head"><button type="button" onClick={onBack}><ArrowLeft /> 返回我的资源</button><div><small>订单中心</small><h1>{mineOrderLabels[orderStatus]}</h1></div><span>共 {total} 单</span></header><section className="compute-v2-resource-hero"><i><Package weight="fill" /></i><div><small>算力订单</small><h2>从确认到交付，全程可追踪</h2><p>当前列表展示近期订单，状态和资源信息保持同步。</p></div><div className="compute-v2-resource-metrics"><span><small>待确认</small><strong>2</strong></span><span><small>运行中</small><strong>3</strong></span><span><small>待交付</small><strong>1</strong></span></div></section><section className="compute-v2-resource-panel"><header><div><h2>{mineOrderLabels[orderStatus]}</h2><p>显示近期记录，共 {total} 单</p></div><span>{rows.length} 条记录</span></header><div className="compute-v2-resource-list">{rows.map((order) => <article key={order.id}><div><small>{order.id}</small><strong>{order.resource}</strong><p>{order.meta}</p></div><b>{order.amount}</b><span className={`tone-${order.status === "running" ? "active" : order.status === "pending" || order.status === "delivery" ? "warning" : "neutral"}`}>{order.label}</span></article>)}</div></section></div>;
+  }
+  const content = mineResourceContent(view, balanceCardHours);
+  const Icon = content.icon;
+  return <div className="compute-v2-resource-detail"><header className="compute-v2-detail-head"><button type="button" onClick={onBack}><ArrowLeft /> 返回我的资源</button><div><small>我的资源</small><h1>{content.title}</h1></div><span>{content.badge}</span></header><section className="compute-v2-resource-hero"><i><Icon weight="fill" /></i><div><small>COD 算力服务</small><h2>{content.title}</h2><p>{content.description}</p></div><div className="compute-v2-resource-metrics">{content.metrics.map(([label, value]) => <span key={label}><small>{label}</small><strong>{value}</strong></span>)}</div></section><section className="compute-v2-resource-panel"><header><div><h2>详细信息</h2><p>{content.description}</p></div><span>{content.rows.length} 条记录</span></header><div className="compute-v2-resource-list">{content.rows.map((row) => <article key={row.title}><div><strong>{row.title}</strong><p>{row.meta}</p></div><b>{row.value}</b>{row.tone && <span className={`tone-${row.tone}`}>{row.tone === "active" ? "正常" : row.tone === "warning" ? "待处理" : "已记录"}</span>}</article>)}</div></section></div>;
+}
+
+function MinePage({ session, balanceCardHours, onRequireLogin, onOpenOperations, onOpenResource }: { session: CodSession | null; balanceCardHours: string | null; onRequireLogin: () => void; onOpenOperations: () => void; onOpenResource: (view: MineResourceView, status?: MineOrderStatus) => void }) {
+  const services: Array<{ icon: typeof House; label: string; detail: string; view: MineResourceView }> = [{icon:HardDrives,label:"我的设备",detail:"12 台设备",view:"devices"},{icon:Buildings,label:"托管申请",detail:"查看接入进度",view:"hosting"},{icon:Wallet,label:"资产账户",detail:"卡时与流水",view:"assets"},{icon:ShieldCheck,label:"实名认证",detail:"已完成",view:"verification"},{icon:Headset,label:"专属客服",detail:"工作日 09:00-18:00",view:"support"},{icon:Wrench,label:"帮助中心",detail:"使用指南与问题",view:"help"}];
+  return <div className="compute-v2-page-stack"><section className="compute-v2-profile"><div className="compute-v2-avatar"><UserCircle weight="fill" /></div><div><small>{session ? "已连接 COD 账户" : "访客账户"}</small><h1>{session?.account.displayName ?? "COD 算力市场"}</h1><p>{session ? "账户、卡时与算力订单统一管理" : "登录后查看新用户权益、余额与个人订单"}</p></div>{!session && <button type="button" onClick={onRequireLogin}>注册或登录</button>}</section>{session && <section className="compute-v2-wallet"><header><span><Wallet /> 可用卡时</span></header><strong>{balanceCardHours} <small>卡时</small></strong><p>账户余额与注册权益已同步</p><div><button type="button" onClick={() => onOpenResource("purchase")}>购买卡时</button><button type="button" onClick={() => onOpenResource("ledger")}>卡时明细</button></div></section>}<section className="compute-v2-operations-entry"><div><span><ChartBar /></span><div><small>公开数据</small><h2>经营看板</h2><p>集中查看区域供给、利用率、订单管线与近期交付。</p></div></div><button type="button" onClick={onOpenOperations}>打开经营看板 <CaretRight /></button></section><section className="compute-v2-orders"><SectionTitle title="我的订单" action="全部订单" onAction={() => onOpenResource("orders", "all")} /><div><button type="button" onClick={() => onOpenResource("orders", "pending")}><Clock /><strong>待确认</strong><span>2</span></button><button type="button" onClick={() => onOpenResource("orders", "running")}><Lightning /><strong>运行中</strong><span>3</span></button><button type="button" onClick={() => onOpenResource("orders", "delivery")}><Package /><strong>待交付</strong><span>1</span></button><button type="button" onClick={() => onOpenResource("orders", "completed")}><Check /><strong>已完成</strong><span>16</span></button></div></section><section className="compute-v2-services"><SectionTitle title="常用服务" />{services.map((item) => { const Icon=item.icon; return <button type="button" onClick={() => onOpenResource(item.view)} key={item.label}><Icon /><span><strong>{item.label}</strong><small>{item.detail}</small></span><CaretRight /></button>; })}</section></div>;
 }
 
 function OperationsValue({ value }: { value: string }) {
@@ -349,6 +418,8 @@ export function ComputeMarketApp({ session, balanceCardHours, initialPath, platf
   const [tab, setTab] = useState<ComputeTab>(initialRoute.tab);
   const [productId, setProductId] = useState<string | null>(initialRoute.productId);
   const [operations, setOperations] = useState(initialRoute.operations);
+  const [mineView, setMineView] = useState<MineResourceView | null>(initialRoute.mineView);
+  const [orderStatus, setOrderStatus] = useState<MineOrderStatus>(initialRoute.orderStatus);
   const products = useMemo(() => offers.length ? offers.map(toDemoProduct) : computeDemoProducts, [offers]);
   const selectedProduct = products.find((product) => product.id === productId) ?? null;
 
@@ -358,6 +429,8 @@ export function ComputeMarketApp({ session, balanceCardHours, initialPath, platf
       setTab(route.tab);
       setProductId(route.productId);
       setOperations(route.operations);
+      setMineView(route.mineView);
+      setOrderStatus(route.orderStatus);
       scrollComputeToTop();
     };
     window.addEventListener("popstate", handlePopState);
@@ -372,6 +445,8 @@ export function ComputeMarketApp({ session, balanceCardHours, initialPath, platf
     setTab(nextTab);
     setProductId(nextProductId);
     setOperations(false);
+    setMineView(null);
+    setOrderStatus("all");
     scrollComputeToTop();
   };
 
@@ -383,6 +458,22 @@ export function ComputeMarketApp({ session, balanceCardHours, initialPath, platf
     setTab("mine");
     setProductId(null);
     setOperations(true);
+    setMineView(null);
+    setOrderStatus("all");
+    scrollComputeToTop();
+  };
+
+  const openMineResource = (view: MineResourceView, status: MineOrderStatus = "all") => {
+    const url = new URL("/compute", window.location.origin);
+    url.searchParams.set("tab", "mine");
+    url.searchParams.set("view", view);
+    if (view === "orders" && status !== "all") url.searchParams.set("status", status);
+    window.history.pushState({}, "", `${url.pathname}${url.search}`);
+    setTab("mine");
+    setProductId(null);
+    setOperations(false);
+    setMineView(view);
+    setOrderStatus(status);
     scrollComputeToTop();
   };
 
@@ -390,15 +481,15 @@ export function ComputeMarketApp({ session, balanceCardHours, initialPath, platf
     <div className="compute-market-app" data-platform={platform}>
       <aside className="compute-v2-sidebar">
         <button className="compute-v2-brand" type="button" onClick={() => navigate("home")}><i><Lightning weight="fill" /></i><span><strong>COD</strong><small>算力市场</small></span></button>
-        <nav aria-label="算力市场主导航">{navItems.map((item) => { const Icon=item.icon; return <button type="button" className={tab === item.id && !productId && !operations ? "active" : ""} onClick={() => navigate(item.id)} key={item.id}><Icon weight={tab === item.id && !operations ? "fill" : "regular"} /><span>{item.label}</span></button>; })}</nav>
+        <nav aria-label="算力市场主导航">{navItems.map((item) => { const Icon=item.icon; return <button type="button" className={tab === item.id && !productId && !operations && !mineView ? "active" : ""} onClick={() => navigate(item.id)} key={item.id}><Icon weight={tab === item.id && !operations ? "fill" : "regular"} /><span>{item.label}</span></button>; })}</nav>
         <button className={`compute-v2-operations-nav${operations ? " active" : ""}`} type="button" onClick={openOperations}><ChartBar weight={operations ? "fill" : "regular"} /><span><strong>经营看板</strong><small>公开经营数据</small></span></button>
         {session && <section><small>可用卡时</small><strong>{balanceCardHours}</strong></section>}
         <button className="compute-v2-exit" type="button" onClick={onExit}><ArrowLeft /> 返回 COD 工作区</button>
       </aside>
       <div className="compute-v2-shell">
         <header className="compute-v2-topbar"><button className="compute-v2-mobile-brand" type="button" onClick={() => navigate("home")}><Lightning weight="fill" /><strong>COD 算力</strong></button><div><button type="button" aria-label="通知"><Bell /></button>{session ? <button type="button" className="compute-v2-user"><UserCircle weight="fill" /> {session.account.displayName}</button> : <button type="button" className="compute-v2-login" onClick={() => onRequireLogin(window.location.href)}>注册或登录</button>}</div></header>
-        <main className="compute-v2-main">{operations ? <OperationsDashboard onBack={() => navigate("home")} /> : selectedProduct ? <ProductDetail product={selectedProduct} session={session} onBack={() => navigate("home")} onRequireLogin={() => onRequireLogin(window.location.href)} /> : tab === "home" ? <HomePage session={session} balanceCardHours={balanceCardHours} products={products} onOpenProduct={(id) => navigate("home", id)} onNavigate={(nextTab) => navigate(nextTab)} onOpenOperations={openOperations} /> : tab === "hosting" ? <HostingPage /> : tab === "news" ? <NewsPage /> : tab === "ranking" ? <RankingPage /> : <MinePage session={session} balanceCardHours={balanceCardHours} onRequireLogin={() => onRequireLogin(window.location.href)} onOpenOperations={openOperations} />}</main>
-        {!selectedProduct && !operations && <nav className="compute-v2-bottom-nav" aria-label="算力市场底部导航">{navItems.map((item) => { const Icon=item.icon; return <button type="button" className={tab === item.id ? "active" : ""} onClick={() => navigate(item.id)} key={item.id}><Icon weight={tab === item.id ? "fill" : "regular"} /><span>{item.label}</span></button>; })}</nav>}
+        <main className="compute-v2-main">{operations ? <OperationsDashboard onBack={() => navigate("home")} /> : mineView ? <MineResourceDetail view={mineView} orderStatus={orderStatus} balanceCardHours={balanceCardHours} onBack={() => navigate("mine")} /> : selectedProduct ? <ProductDetail product={selectedProduct} session={session} onBack={() => navigate("home")} onRequireLogin={() => onRequireLogin(window.location.href)} /> : tab === "home" ? <HomePage session={session} balanceCardHours={balanceCardHours} products={products} onOpenProduct={(id) => navigate("home", id)} onNavigate={(nextTab) => navigate(nextTab)} onOpenOperations={openOperations} /> : tab === "hosting" ? <HostingPage /> : tab === "news" ? <NewsPage /> : tab === "ranking" ? <RankingPage /> : <MinePage session={session} balanceCardHours={balanceCardHours} onRequireLogin={() => onRequireLogin(window.location.href)} onOpenOperations={openOperations} onOpenResource={openMineResource} />}</main>
+        {!selectedProduct && !operations && !mineView && <nav className="compute-v2-bottom-nav" aria-label="算力市场底部导航">{navItems.map((item) => { const Icon=item.icon; return <button type="button" className={tab === item.id ? "active" : ""} onClick={() => navigate(item.id)} key={item.id}><Icon weight={tab === item.id ? "fill" : "regular"} /><span>{item.label}</span></button>; })}</nav>}
       </div>
     </div>
   );
