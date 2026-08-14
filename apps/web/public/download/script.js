@@ -103,7 +103,7 @@ function selectPlatform(platform, options = {}) {
 
   releasePanel.setAttribute("aria-labelledby", tab.id);
   releasePlatform.textContent = entry.label;
-  releaseTitle.textContent = `COD for ${entry.label}`;
+  releaseTitle.textContent = `COD 我的卡产 for ${entry.label}`;
   releaseState.textContent = manifestUnavailable ? "发布状态暂不可用" : entry.statusLabel;
   releaseState.classList.toggle("is-available", entry.status === "available");
   releaseVersion.textContent = entry.version || "待公布";

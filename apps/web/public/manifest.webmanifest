@@ -1,6 +1,6 @@
 {
-  "name": "COD Agent Workspace",
-  "short_name": "COD",
+  "name": "COD 我的卡产",
+  "short_name": "COD 我的卡产",
   "description": "Control code tasks and ask COD from any device.",
   "start_url": "./app/",
   "scope": "./app/",

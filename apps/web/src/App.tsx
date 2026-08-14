@@ -192,7 +192,7 @@ function devicePlatform(): DeviceRecord['platform'] {
 }
 
 function Brand() {
-  return <div className="brand" aria-label="COD"><div className="brand-mark"><span>C</span></div><div><strong>COD</strong><small>agent workspace</small></div></div>;
+  return <div className="brand" aria-label="COD 我的卡产"><div className="brand-mark"><span>C</span></div><div><strong>COD 我的卡产</strong><small>agent workspace</small></div></div>;
 }
 function ThemeToggle({ colorMode, onChange, className = '' }: { colorMode: ColorMode; onChange: (mode: ColorMode) => void; className?: string }) {
   const nextMode = colorMode === 'dark' ? 'light' : 'dark';
