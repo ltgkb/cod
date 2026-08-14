@@ -1,0 +1,7 @@
+<svg width="960" height="420" viewBox="0 0 960 420" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs><linearGradient id="bg" x1="92" y1="18" x2="826" y2="416" gradientUnits="userSpaceOnUse"><stop stop-color="#E5F7F4"/><stop offset="1" stop-color="#BBDCD7"/></linearGradient><linearGradient id="card" x1="262" y1="112" x2="714" y2="334" gradientUnits="userSpaceOnUse"><stop stop-color="#263B3B"/><stop offset="1" stop-color="#0D181A"/></linearGradient></defs>
+  <rect width="960" height="420" rx="28" fill="url(#bg)"/><circle cx="816" cy="64" r="152" fill="#177777" fill-opacity=".08"/><circle cx="132" cy="372" r="116" fill="#fff" fill-opacity=".4"/>
+  <path d="M216 292L296 105H736L680 322H266L216 292Z" fill="url(#card)"/><path d="M296 105L344 82H772L736 105H296Z" fill="#56706E"/><path d="M736 105L772 82L715 298L680 322L736 105Z" fill="#081012"/>
+  <circle cx="408" cy="214" r="74" fill="#0A1113" stroke="#4D6967" stroke-width="10"/><circle cx="408" cy="214" r="47" stroke="#8DB7B2" stroke-width="8" stroke-dasharray="11 8"/><circle cx="581" cy="214" r="74" fill="#0A1113" stroke="#4D6967" stroke-width="10"/><circle cx="581" cy="214" r="47" stroke="#8DB7B2" stroke-width="8" stroke-dasharray="11 8"/>
+  <path d="M274 290H663" stroke="#177777" stroke-width="8"/><text x="70" y="82" fill="#177777" font-family="Arial" font-size="25" font-weight="700">COD COMPUTE</text><text x="70" y="113" fill="#4E6767" font-family="Arial" font-size="16">H200 · AI ACCELERATOR</text>
+</svg>

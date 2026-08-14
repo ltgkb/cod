@@ -1,0 +1,6 @@
+<svg width="960" height="420" viewBox="0 0 960 420" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs><linearGradient id="bg" x1="65" y1="20" x2="864" y2="412" gradientUnits="userSpaceOnUse"><stop stop-color="#E9F2F8"/><stop offset="1" stop-color="#C7DCE7"/></linearGradient><linearGradient id="card" x1="240" y1="90" x2="716" y2="336" gradientUnits="userSpaceOnUse"><stop stop-color="#2C3843"/><stop offset="1" stop-color="#10171C"/></linearGradient></defs>
+  <rect width="960" height="420" rx="28" fill="url(#bg)"/><path d="M0 321L960 126V420H0V321Z" fill="#2F728B" fill-opacity=".08"/><rect x="236" y="99" width="492" height="231" rx="18" fill="url(#card)" transform="rotate(-4 236 99)"/>
+  <circle cx="393" cy="211" r="74" fill="#0C1216" stroke="#536773" stroke-width="10"/><circle cx="393" cy="211" r="45" stroke="#75A4B6" stroke-width="8" stroke-dasharray="10 7"/><circle cx="568" cy="199" r="74" fill="#0C1216" stroke="#536773" stroke-width="10"/><circle cx="568" cy="199" r="45" stroke="#75A4B6" stroke-width="8" stroke-dasharray="10 7"/>
+  <path d="M281 300L674 272" stroke="#4D9BB4" stroke-width="8"/><text x="70" y="82" fill="#286D85" font-family="Arial" font-size="25" font-weight="700">COD COMPUTE</text><text x="70" y="113" fill="#5A7180" font-family="Arial" font-size="16">H100 · TRAINING INSTANCE</text>
+</svg>

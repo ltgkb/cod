@@ -1501,6 +1501,24 @@ describe('COD workspace', () => {
     expect(window.location.pathname).toBe('/');
   });
 
+  it('opens the labeled management demo without replacing the production compute market', () => {
+    window.history.replaceState({}, '', '/compute?demo=1&tab=ranking');
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/capabilities')) return json(capabilities);
+      if (url.endsWith('/api/model-catalog')) return json([]);
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<App />);
+
+    expect(screen.getByRole('heading', { name: '按稳定性与交付表现发现优质资源' })).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: '我的资源' })).toHaveLength(2);
+    expect(screen.getAllByText('演示数据').length).toBeGreaterThan(0);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/api/compute/v2/'))).toBe(false);
+  });
+
   it('keeps an authenticated compute deep link open after restoring the workspace session', async () => {
     window.history.replaceState({}, '', '/compute');
     window.localStorage.setItem('cod.session.token', 'compute-session');

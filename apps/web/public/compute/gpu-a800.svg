@@ -1,0 +1,6 @@
+<svg width="960" height="420" viewBox="0 0 960 420" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs><linearGradient id="bg" x1="94" y1="12" x2="842" y2="418" gradientUnits="userSpaceOnUse"><stop stop-color="#EFF1F2"/><stop offset="1" stop-color="#CCD2D4"/></linearGradient><linearGradient id="card" x1="250" y1="96" x2="720" y2="328" gradientUnits="userSpaceOnUse"><stop stop-color="#41494D"/><stop offset="1" stop-color="#15191B"/></linearGradient></defs>
+  <rect width="960" height="420" rx="28" fill="url(#bg)"/><rect x="706" y="-72" width="255" height="255" rx="38" transform="rotate(22 706 -72)" fill="#172033" fill-opacity=".06"/><path d="M234 106H724L686 321H252L205 286L234 106Z" fill="url(#card)"/>
+  <path d="M252 121H700L668 300H266L224 274L252 121Z" stroke="#667477" stroke-width="4"/><circle cx="407" cy="211" r="69" fill="#111618" stroke="#606A6D" stroke-width="9"/><circle cx="407" cy="211" r="43" stroke="#919B9D" stroke-width="7" stroke-dasharray="9 7"/><circle cx="566" cy="211" r="69" fill="#111618" stroke="#606A6D" stroke-width="9"/><circle cx="566" cy="211" r="43" stroke="#919B9D" stroke-width="7" stroke-dasharray="9 7"/>
+  <text x="70" y="82" fill="#3D4A4E" font-family="Arial" font-size="25" font-weight="700">COD COMPUTE</text><text x="70" y="113" fill="#69777A" font-family="Arial" font-size="16">A800 · INFERENCE INSTANCE</text>
+</svg>

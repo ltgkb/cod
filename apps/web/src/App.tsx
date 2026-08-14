@@ -96,6 +96,7 @@ import {
   type VerifiedRegistrationInput,
 } from './api';
 import { ComputeApp } from './compute-market/ComputeApp';
+import { ComputeDemoApp } from './compute-market/ComputeDemoApp';
 import { desktopGitDiffError, hasDesktopBridge, loadProject, loadProjectDiff, loadProjectFiles, readProjectFile, selectProjectRoot } from './desktop';
 import { chatFailureMessage } from './chat-errors';
 import { filterModelCatalog, groupModelCatalog, uniqueCallableModels } from './model-catalog';
@@ -2029,6 +2030,18 @@ export function App() {
     setComputeLoginReturnTo(null);
     setOverlay(null);
   };
+
+  if (overlay === 'compute' && new URL(computePath, window.location.origin).searchParams.get('demo') === '1') return <ComputeDemoApp
+    session={session}
+    initialPath={computePath}
+    platform={getCodRuntime().hostPlatform ? 'mobile' : hasDesktopBridge() ? 'desktop' : 'web'}
+    onRequireLogin={(returnTo) => {
+      setComputePath(returnTo);
+      setComputeLoginReturnTo(returnTo);
+      setOverlay('login');
+    }}
+    onExit={exitComputeMarket}
+  />;
 
   if (overlay === 'compute') return <ComputeApp
     session={session}
