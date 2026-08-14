@@ -38,6 +38,15 @@ describe('wallet database contract', () => {
     await expect(database.recordUsage(principal, { idempotencyKey: 'usage-2', taskId: 'task', sourceId: 'ai-kai', paymentDirection: '钱包 → ai.kai.com', model: 'coder-pro', inputTokens: 1, outputTokens: 1, costCents: 9000 })).rejects.toMatchObject({ status: 402 });
   });
 
+  it('records admin test usage without consuming wallet or credits', async () => {
+    const database = new MemoryDatabase(); const admin: Principal = { ...principal, userId: 'admin', email: 'admin@kai.com', role: 'admin' };
+    await database.reserveUsage(admin, 'admin-reservation', 900_000);
+    const entry = await database.settleUsage(admin, 'admin-reservation', { idempotencyKey: 'admin-usage', taskId: 'chat', sourceId: 'ai-kai', paymentDirection: '钱包 → ai.kai.com', model: 'coder-pro', inputTokens: 100, outputTokens: 200, costCents: 900_000 });
+    expect(entry).toMatchObject({ amountCents: 0, walletAmountCents: 0, creditAmountCents: 0, paymentDirection: '管理员测试免计费' });
+    expect(await database.getCreditSummary(admin)).toMatchObject({ availableCents: 1000 });
+    expect(await database.getAccount(admin)).toMatchObject({ role: 'admin', billingExempt: true });
+  });
+
   it('falls back to permanent wallet funds at the original model price and records source attribution', async () => {
     const database = new MemoryDatabase();
     await database.topup(principal, { idempotencyKey: 'wallet-funds', amountCents: 500, channel: 'pilot' });

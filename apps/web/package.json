@@ -16,9 +16,12 @@
     "@cod/contracts": "*",
     "@phosphor-icons/react": "^2.1.10",
     "@vitejs/plugin-react": "^5.0.4",
-    "vite": "^7.1.7",
     "react": "^19.1.1",
-    "react-dom": "^19.1.1"
+    "react-dom": "^19.1.1",
+    "react-markdown": "^10.1.0",
+    "qrcode": "^1.5.4",
+    "remark-gfm": "^4.0.1",
+    "vite": "^7.1.7"
   },
   "devDependencies": {
     "@eslint/js": "^9.36.0",
@@ -26,6 +29,7 @@
     "@testing-library/react": "^16.3.0",
     "@types/react": "^19.1.16",
     "@types/react-dom": "^19.1.9",
+    "@types/qrcode": "^1.5.5",
     "eslint": "^9.36.0",
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.20",

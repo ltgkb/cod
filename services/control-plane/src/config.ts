@@ -10,6 +10,24 @@ export interface ModelSourceConfig {
   apiKey: string | null;
 }
 
+export interface WechatPayConfig {
+  mchId: string;
+  appId: string;
+  merchantSerialNo: string;
+  merchantPrivateKeyPath: string;
+  apiV3Key: string;
+  platformPublicKeyPath: string;
+  platformSerialNo: string;
+}
+
+export interface AlipayConfig {
+  appId: string;
+  sellerId: string;
+  merchantPrivateKeyPath: string;
+  alipayPublicKeyPath: string;
+  gatewayUrl: string;
+}
+
 export interface ControlPlaneConfig {
   port: number;
   sessionSecret: string;
@@ -23,6 +41,9 @@ export interface ControlPlaneConfig {
   pilotAccessCodeHash: string | null;
   developmentTopupEnabled: boolean;
   paymentWebhookSecret: string | null;
+  paymentPublicBaseUrl: string | null;
+  wechatPay: WechatPayConfig | null;
+  alipay: AlipayConfig | null;
   feishuVerificationToken: string | null;
   feishuEncryptKey: string | null;
   feishuAppId: string | null;
@@ -92,6 +113,30 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
   const developmentLoginEnabled = environment.COD_DEVELOPMENT_LOGIN_ENABLED === 'true' || !production;
   const demoMode = environment.COD_DEMO_MODE === 'true' || !production;
   const paymentWebhookSecret = environment.COD_PAYMENT_WEBHOOK_SECRET ?? null;
+  const paymentPublicBaseUrl = environment.COD_PAYMENT_PUBLIC_BASE_URL?.replace(/\/$/, '') ?? null;
+  const configuredGroup = <T extends Record<string, string | undefined>>(name: string, values: T): { [K in keyof T]: string } | null => {
+    const present = Object.values(values).filter(Boolean).length;
+    if (present === 0) return null;
+    if (present !== Object.keys(values).length) throw new Error(`${name} configuration is incomplete`);
+    return values as { [K in keyof T]: string };
+  };
+  const wechat = configuredGroup('WeChat Pay', {
+    mchId: environment.COD_WECHAT_PAY_MCH_ID,
+    appId: environment.COD_WECHAT_PAY_APP_ID,
+    merchantSerialNo: environment.COD_WECHAT_PAY_SERIAL_NO,
+    merchantPrivateKeyPath: environment.COD_WECHAT_PAY_PRIVATE_KEY_PATH,
+    apiV3Key: environment.COD_WECHAT_PAY_API_V3_KEY,
+    platformPublicKeyPath: environment.COD_WECHAT_PAY_PLATFORM_PUBLIC_KEY_PATH,
+    platformSerialNo: environment.COD_WECHAT_PAY_PLATFORM_SERIAL_NO,
+  });
+  const alipayValues = configuredGroup('Alipay', {
+    appId: environment.COD_ALIPAY_APP_ID,
+    sellerId: environment.COD_ALIPAY_SELLER_ID,
+    merchantPrivateKeyPath: environment.COD_ALIPAY_PRIVATE_KEY_PATH,
+    alipayPublicKeyPath: environment.COD_ALIPAY_PUBLIC_KEY_PATH,
+  });
+  const wechatPay: WechatPayConfig | null = wechat;
+  const alipay: AlipayConfig | null = alipayValues ? { ...alipayValues, gatewayUrl: environment.COD_ALIPAY_GATEWAY_URL ?? 'https://openapi.alipay.com/gateway.do' } : null;
 
   if (pilotAccessCodeHash && !/^[a-f0-9]{64}$/i.test(pilotAccessCodeHash)) {
     throw new Error('COD_PILOT_ACCESS_CODE_HASH must be a SHA-256 hex digest');
@@ -107,6 +152,15 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
       throw new Error('COD_PAYMENT_WEBHOOK_SECRET must contain at least 32 bytes');
     }
   }
+  if ((wechatPay || alipay) && !paymentPublicBaseUrl) throw new Error('Official payments require COD_PAYMENT_PUBLIC_BASE_URL');
+  if (paymentPublicBaseUrl && !/^https:\/\//.test(paymentPublicBaseUrl)) throw new Error('COD_PAYMENT_PUBLIC_BASE_URL must use HTTPS');
+  if (wechatPay && Buffer.byteLength(wechatPay.apiV3Key, 'utf8') !== 32) throw new Error('COD_WECHAT_PAY_API_V3_KEY must contain exactly 32 bytes');
+  for (const [label, path] of [
+    ['WeChat merchant private key', wechatPay?.merchantPrivateKeyPath],
+    ['WeChat platform public key', wechatPay?.platformPublicKeyPath],
+    ['Alipay merchant private key', alipay?.merchantPrivateKeyPath],
+    ['Alipay public key', alipay?.alipayPublicKeyPath],
+  ] as const) if (path && !existsSync(path)) throw new Error(`${label} file does not exist: ${path}`);
   let feishuBindings: Record<string, string> = {};
   if (environment.COD_FEISHU_BINDINGS_JSON) {
     try {
@@ -128,6 +182,9 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     pilotAccessCodeHash,
     developmentTopupEnabled: !production && environment.COD_DEVELOPMENT_TOPUP_ENABLED === 'true',
     paymentWebhookSecret,
+    paymentPublicBaseUrl,
+    wechatPay,
+    alipay,
     feishuVerificationToken: environment.COD_FEISHU_VERIFICATION_TOKEN ?? null,
     feishuEncryptKey: environment.COD_FEISHU_ENCRYPT_KEY ?? null,
     feishuAppId: environment.COD_FEISHU_APP_ID ?? null,
@@ -143,3 +200,4 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     hongkongSsoSecret: environment.KAI_HONGKONG_SSO_SECRET ?? null,
   };
 }
+import { existsSync } from 'node:fs';

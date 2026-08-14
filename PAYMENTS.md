@@ -2,10 +2,11 @@
 
 COD treats money movement and wallet credit as two separate systems. A browser redirect never changes balance. Only a verified provider callback that matches a pending COD payment order can create a ledger credit.
 
-## Recommended first provider
+## Official merchant channels
 
-- Hong Kong or another Stripe-supported business: start with Stripe-hosted Checkout in one-time payment mode. Enable Alipay, WeChat Pay, and cards only where the account and settlement currency are eligible.
-- Mainland China business: use official WeChat Pay and Alipay merchant accounts, or a licensed payment service provider. Do not use personal collection QR codes.
+- WeChat Pay uses the official API v3 Native flow. COD signs the Native order request, returns the official `code_url` as an in-browser QR code, verifies the WeChat platform signature, and decrypts the AES-GCM notification resource.
+- Alipay uses the official `alipay.trade.page.pay` computer website flow. COD signs the gateway request with RSA2 and verifies the asynchronous notification with the Alipay public key.
+- Personal collection QR codes are never accepted.
 
 The provider adapter must translate its signed callback into COD's internal payment event. Provider credentials and webhook secrets belong only in `/etc/cod/control-plane.env`.
 
@@ -13,12 +14,14 @@ The provider adapter must translate its signed callback into COD's internal paym
 
 1. The authenticated client creates `POST /api/payment-orders` with an `idempotency-key`, amount in integer CNY cents, and channel.
 2. The server stores a `pending` order before asking a provider to create Checkout or a QR code.
-3. The provider adapter associates the COD order ID with the provider payment object using metadata or the provider merchant-order field.
-4. The provider calls `POST /api/webhooks/payments`. The adapter signs the exact raw JSON body as `HMAC-SHA256(secret, timestamp + "." + body)` and supplies `x-cod-timestamp` and `x-cod-signature`.
-5. COD verifies the five-minute timestamp window and signature, locks the order, checks amount/currency/channel/provider identifiers, writes one immutable ledger entry, and credits the wallet in the same database transaction.
+3. COD sends the order ID as WeChat `out_trade_no` or Alipay `out_trade_no`.
+4. WeChat calls `POST /api/webhooks/payments/wechat`; Alipay calls `POST /api/webhooks/payments/alipay`. Each route verifies the provider's official signature format before reading payment status.
+5. COD locks the order, checks app/merchant identity, amount, currency, channel and provider identifiers, writes one immutable ledger entry, and credits the wallet in the same database transaction.
 6. The client polls `GET /api/payment-orders/{id}` and refreshes the ledger when the order becomes `paid`.
 
-Example normalized paid event:
+The legacy `POST /api/webhooks/payments` normalized HMAC endpoint remains available only when `COD_PAYMENT_WEBHOOK_SECRET` is explicitly configured for a separately trusted adapter.
+
+Example normalized paid event for that compatibility endpoint:
 
 ```json
 {
@@ -46,14 +49,12 @@ Example normalized paid event:
 ## Before enabling real money
 
 - Confirm the legal entity, settlement country, bank currency, supported business category, fees, refund rules, invoices, and reserve/hold policy with the provider.
-- Implement the provider-specific Checkout/QR adapter, webhook signature verification, refund events, expiration, and reconciliation job.
+- Configure merchant certificates and keys, then implement refund events, expiration cleanup, and a daily reconciliation job before general availability.
 - Run provider sandbox cases for success, cancellation, delayed success, duplicate and out-of-order callbacks, amount mismatch, refund, timeout, and webhook replay.
 - Disable `COD_DEVELOPMENT_TOPUP_ENABLED` in production.
 - Add finance/admin views for order lookup, ledger lookup, reconciliation exceptions, and manual review. Manual review must not mutate balances directly.
 
-Official starting points:
+Official references:
 
-- Stripe Checkout Sessions: https://docs.stripe.com/payments/checkout-sessions
-- Stripe webhooks: https://docs.stripe.com/webhooks
-- Stripe payment-method support: https://docs.stripe.com/payments/payment-methods/payment-method-support
-
+- WeChat Pay API v3 Native order: https://pay.wechatpay.cn/doc/v3/merchant/4012791877
+- Alipay computer website payment product: https://open.alipay.com/module/webApp

@@ -239,4 +239,25 @@ describe('COD workspace', () => {
     expect(screen.getByText('Web 端不会执行或伪造终端结果。请使用 COD Desktop。')).toBeInTheDocument();
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/auth/login', expect.anything()));
   });
+
+  it('refreshes wallet and credit balances when another signed-in client changes them', async () => {
+    let accountReads = 0; let creditReads = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/api/capabilities')) return json(capabilities);
+      if (url.endsWith('/api/model-catalog')) return json([]);
+      if (url.endsWith('/api/account')) { accountReads += 1; return json({ userId: 'user', displayName: 'developer', balanceCents: accountReads === 1 ? 688 : 0, currency: 'CNY', plan: 'developer' }); }
+      if (url.endsWith('/api/model-sources')) return json([{ id: 'demo', label: 'Demo', status: 'demo', callable: true, paymentDirection: 'demo', note: '', models: [{ id: 'coder-pro', label: 'Coder Pro', contextWindow: 0, inputPricePerMillionCents: 0, outputPricePerMillionCents: 0 }] }]);
+      if (url.endsWith('/api/credit-packs')) { creditReads += 1; return json({ packs: [], summary: { availableCents: creditReads === 1 ? 0 : 201, grants: [] } }); }
+      if (url.endsWith('/api/devices') && init?.method === 'POST') return json({ id: 'web-device', name: 'COD Web', platform: 'web', status: 'online', lastSeenAt: new Date().toISOString() }, 201);
+      if (url.endsWith('/api/devices/web-device/heartbeat')) return json({ id: 'web-device', name: 'COD Web', platform: 'web', status: 'online', lastSeenAt: new Date().toISOString() });
+      if (url.endsWith('/api/devices') || url.endsWith('/api/tasks') || url.endsWith('/api/products') || url.endsWith('/api/ledger')) return json([]);
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock); window.localStorage.setItem('cod.session.token', 'test-token');
+    render(<App />);
+    expect(await screen.findByText('¥ 6.88')).toBeInTheDocument();
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(await screen.findByText('¥ 2.01')).toBeInTheDocument();
+  });
 });

@@ -214,6 +214,7 @@ ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS referred_by_tenant_id text;
 ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS referred_by_user_id text;
 ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS referral_code_used text;
 ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS referral_commission_rate_bps integer NOT NULL DEFAULT 0 CHECK (referral_commission_rate_bps >= 0 AND referral_commission_rate_bps <= 10000);
+ALTER TABLE cod_users ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'member' CHECK (role IN ('member','admin'));
 CREATE UNIQUE INDEX IF NOT EXISTS cod_users_email_global_unique ON cod_users (lower(email));
 CREATE UNIQUE INDEX IF NOT EXISTS cod_users_invite_code_unique ON cod_users (upper(invite_code)) WHERE invite_code IS NOT NULL;
 CREATE TABLE IF NOT EXISTS cod_ledger (
@@ -297,9 +298,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS cod_payment_orders_provider_event_idx ON cod_p
 `;
 
 const accountFromRow = (row: Record<string, unknown>): AccountSummary => ({
-  userId: String(row.user_id), displayName: String(row.display_name), balanceCents: Number(row.balance_cents), currency: 'CNY', plan: row.plan === 'team' ? 'team' : 'developer',
+  userId: String(row.user_id), displayName: String(row.display_name), balanceCents: Number(row.balance_cents), currency: 'CNY', plan: row.plan === 'team' ? 'team' : 'developer', role: row.role === 'admin' ? 'admin' : 'member', billingExempt: row.role === 'admin',
 });
-const principalFromUserRow = (row: Record<string, unknown>): Principal => ({ userId: String(row.user_id), tenantId: String(row.tenant_id), email: String(row.email), role: 'member' });
+const principalFromUserRow = (row: Record<string, unknown>): Principal => ({ userId: String(row.user_id), tenantId: String(row.tenant_id), email: String(row.email), role: row.role === 'admin' ? 'admin' : 'member' });
 const identityFromRow = (row: Record<string, unknown>): IdentityRecord => ({
   principal: principalFromUserRow(row),
   passwordHash: row.password_hash ? String(row.password_hash) : null,
@@ -477,14 +478,16 @@ export class PostgresDatabase implements CodDatabase {
     return this.transaction(async (client) => {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`${p.tenantId}:${p.userId}:${event.idempotencyKey}`]);
       const existing=await client.query('SELECT * FROM cod_ledger WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3',[p.tenantId,p.userId,event.idempotencyKey]); if(existing.rows[0]) return ledgerFromRow(existing.rows[0]);
-      const allocation=await this.allocateFunds(client,p,event.costCents);
+      const billedEvent=p.role==='admin'?{...event,costCents:0,paymentDirection:'管理员测试免计费'}:event;
+      const allocation=await this.allocateFunds(client,p,billedEvent.costCents);
       const creditCents=allocation.grantAllocations.reduce((total,item)=>total+item.amountCents,0);
-      return this.insertUsageLedger(client,p,event,allocation.walletCents,creditCents);
+      return this.insertUsageLedger(client,p,billedEvent,allocation.walletCents,creditCents);
     });
   }
   async reserveUsage(p: Principal,reservationId:string,amountCents:number) {
     if(!Number.isInteger(amountCents)||amountCents<0) throw new HttpError('Reservation amount is invalid',400,'invalid_reservation');
-    await this.transaction(async(client)=>{const existing=await client.query('SELECT status FROM cod_usage_reservations WHERE id=$1 AND tenant_id=$2 AND user_id=$3',[reservationId,p.tenantId,p.userId]);if(existing.rows[0])return;const allocation=await this.allocateFunds(client,p,amountCents);await client.query(`INSERT INTO cod_usage_reservations (id,tenant_id,user_id,amount_cents,wallet_cents,grant_allocations,status) VALUES ($1,$2,$3,$4,$5,$6,'reserved')`,[reservationId,p.tenantId,p.userId,amountCents,allocation.walletCents,JSON.stringify(allocation.grantAllocations)]);});
+    const reservableAmount=p.role==='admin'?0:amountCents;
+    await this.transaction(async(client)=>{const existing=await client.query('SELECT status FROM cod_usage_reservations WHERE id=$1 AND tenant_id=$2 AND user_id=$3',[reservationId,p.tenantId,p.userId]);if(existing.rows[0])return;const allocation=await this.allocateFunds(client,p,reservableAmount);await client.query(`INSERT INTO cod_usage_reservations (id,tenant_id,user_id,amount_cents,wallet_cents,grant_allocations,status) VALUES ($1,$2,$3,$4,$5,$6,'reserved')`,[reservationId,p.tenantId,p.userId,reservableAmount,allocation.walletCents,JSON.stringify(allocation.grantAllocations)]);});
   }
   async settleUsage(p:Principal,reservationId:string,event:UsageEvent) {
     if(!Number.isInteger(event.costCents)||event.costCents<0)throw new HttpError('Usage cost is invalid',400,'invalid_usage');
@@ -500,12 +503,13 @@ export class PostgresDatabase implements CodDatabase {
         if(task.rows[0].status==='cancelled')throw new HttpError('Task was cancelled before settlement',409,'task_cancelled');
         if(task.rows[0].status!=='running'&&task.rows[0].status!=='waiting')throw new HttpError('Task is not running',409,'task_not_running');
       }
-      const reservedGrants=parseGrantAllocations(reservation.rows[0].grant_allocations);const reservedWallet=Number(reservation.rows[0].wallet_cents);let remaining=event.costCents;let creditConsumed=0;
+      const billedEvent=p.role==='admin'?{...event,costCents:0,paymentDirection:'管理员测试免计费'}:event;
+      const reservedGrants=parseGrantAllocations(reservation.rows[0].grant_allocations);const reservedWallet=Number(reservation.rows[0].wallet_cents);let remaining=billedEvent.costCents;let creditConsumed=0;
       for(const allocation of reservedGrants){const consumed=Math.min(allocation.amountCents,remaining);creditConsumed+=consumed;remaining-=consumed;const refund=allocation.amountCents-consumed;if(refund>0)await this.restoreGrants(client,[{grantId:allocation.grantId,amountCents:refund}]);}
       const walletConsumed=Math.min(reservedWallet,remaining);remaining-=walletConsumed;const walletRefund=reservedWallet-walletConsumed;if(walletRefund>0)await client.query('UPDATE cod_users SET balance_cents=balance_cents+$3,updated_at=now() WHERE tenant_id=$1 AND user_id=$2',[p.tenantId,p.userId,walletRefund]);
       let totalWalletConsumed=walletConsumed;
       if(remaining>0){const extra=await this.allocateFunds(client,p,remaining);totalWalletConsumed+=extra.walletCents;creditConsumed+=extra.grantAllocations.reduce((total,item)=>total+item.amountCents,0);}
-      const inserted=await this.insertUsageLedger(client,p,event,totalWalletConsumed,creditConsumed);await client.query(`UPDATE cod_usage_reservations SET status='settled',updated_at=now() WHERE id=$1`,[reservationId]);return inserted;
+      const inserted=await this.insertUsageLedger(client,p,billedEvent,totalWalletConsumed,creditConsumed);await client.query(`UPDATE cod_usage_reservations SET status='settled',updated_at=now() WHERE id=$1`,[reservationId]);return inserted;
     });
   }
   async releaseUsage(p:Principal,reservationId:string) { await this.transaction(async(client)=>{const reservation=await client.query(`SELECT * FROM cod_usage_reservations WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE`,[reservationId,p.tenantId,p.userId]);if(!reservation.rows[0]||reservation.rows[0].status!=='reserved')return;await this.releaseReservation(client,p,reservation.rows[0],reservationId);}); }

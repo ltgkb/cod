@@ -33,7 +33,7 @@ export interface CapabilityReport {
   authentication: { mode: 'password'; registrationEnabled: boolean; inviteCodeOptional: boolean; inviteCodeRequired: boolean; accessCodeRequired: false };
   ai: { mode: 'live' | 'demo' | 'unavailable'; streaming: boolean; streamingMode: 'buffered-sse' };
   knowledge: { mode: 'live' | 'demo' };
-  payments: { topupEnabled: boolean; orderApi: boolean; mode: 'pilot-credit' | 'verified-webhook' | 'unavailable' };
+  payments: { topupEnabled: boolean; orderApi: boolean; channels?: Array<'wechat' | 'alipay'>; mode: 'pilot-credit' | 'verified-webhook' | 'official-merchant' | 'unavailable' };
   synchronization: { transport: 'polling'; taskStatusVersioning: boolean; taskCancellation?: boolean };
   remote: { feishu: 'live' | 'unavailable'; wecom: 'adapter' | 'unavailable' };
 }
@@ -107,6 +107,9 @@ export interface PaymentOrder {
   createdAt: string;
   updatedAt: string;
 }
+
+export interface PaymentCheckout { kind: 'qr' | 'redirect'; url: string; expiresAt: string }
+export interface PaymentOrderResult { order: PaymentOrder; checkout: PaymentCheckout }
 
 export interface ComputeOffer {
   id: string; title: string; gpuModel: string; gpuMemoryGb: number; gpuCount: number; region: string; provider: string;
@@ -253,7 +256,7 @@ export async function topup(token: string, amountCents: number): Promise<Account
   return result.account;
 }
 
-export async function createPaymentOrder(token: string, amountCents: number, channel: PaymentOrder['channel']): Promise<PaymentOrder> {
+export async function createPaymentOrder(token: string, amountCents: number, channel: PaymentOrder['channel']): Promise<PaymentOrderResult> {
   return request('/api/payment-orders', token, {
     method: 'POST',
     headers: { 'idempotency-key': createClientId() },

@@ -27,6 +27,8 @@ export interface AccountSummary {
   balanceCents: number;
   currency: 'CNY';
   plan: 'developer' | 'team';
+  role?: 'member' | 'admin';
+  billingExempt?: boolean;
 }
 
 export interface UsageEvent {
