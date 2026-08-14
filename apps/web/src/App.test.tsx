@@ -1671,9 +1671,12 @@ describe('COD workspace', () => {
     expect(adminSearches.some((search) => search.method === 'GET' && search.filters.cursor === 'page-2')).toBe(true);
 
     fireEvent.click(within(adminDialog).getByRole('button', { name: /海岸模型/ }));
-    await within(adminDialog).findByRole('article', { name: '海岸模型的算力申请详情' });
-    fireEvent.change(within(adminDialog).getByLabelText('算力申请状态'), { target: { value: 'closed' } });
-    fireEvent.click(within(adminDialog).getByRole('button', { name: '更新为已关闭' }));
+    const rentalDetail = await within(adminDialog).findByRole('article', { name: '海岸模型的算力申请详情' });
+    const rentalStatus = within(rentalDetail).getByLabelText('算力申请状态');
+    await waitFor(() => expect(rentalStatus).toHaveValue('contacting'));
+    fireEvent.change(rentalStatus, { target: { value: 'closed' } });
+    const closeRentalButton = await within(rentalDetail).findByRole('button', { name: '更新为已关闭' });
+    fireEvent.click(closeRentalButton);
     await waitFor(() => expect(rentalPatchRequested).toBe(true));
     fireEvent.click(within(adminDialog).getByRole('button', { name: /星港算力/ }));
     await within(adminDialog).findByRole('article', { name: '星港算力的算力申请详情' });
