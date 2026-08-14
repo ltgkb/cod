@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createComputeShowcaseCatalog, computeShowcaseOffers } from './showcase-catalog.js';
 
 describe('compute showcase catalog', () => {
-  it('covers every visible GPU series with read-only hourly offers', () => {
+  it('covers every visible GPU series with public hourly prices', () => {
     const catalog = createComputeShowcaseCatalog();
 
     expect(catalog.getCapabilities()).toMatchObject({
@@ -18,12 +18,12 @@ describe('compute showcase catalog', () => {
     for (const series of ['RTX', 'L40S', 'B300']) expect(catalog.listOffers({ gpuSeries: series }).items).toHaveLength(1);
     for (const offer of catalog.listOffers({}).items) {
       expect(offer).toMatchObject({
-        purchaseMode: 'quote',
-        providerName: expect.stringContaining('非真实库存'),
-        availability: { level: 'quote', label: '方案展示' },
+        purchaseMode: 'instant',
+        providerName: 'COD 认证算力节点',
+        availability: { level: 'ready', label: '价格公开' },
       });
-      expect(offer.tags).toContain('方案展示');
-      expect(offer.skus[0]).toMatchObject({ period: 'hour', compareAtPriceCardHoursMilli: null });
+      expect(offer.tags).not.toContain('方案展示');
+      expect(offer.skus[0]).toMatchObject({ period: 'hour', compareAtPriceCardHoursMilli: null, priceCardHoursMilli: expect.any(Number) });
     }
 
     const h100 = catalog.listOffers({ gpuSeries: 'H100', sort: 'price_asc' }).items;
@@ -41,6 +41,11 @@ describe('compute showcase catalog', () => {
       { cards: 4, cores: 124, ramGb: 480, systemDiskGb: 100, dataDiskGb: 3_200, network: '10G', price: 80_000 },
       { cards: 8, cores: 252, ramGb: 1_440, systemDiskGb: 100, dataDiskGb: 6_500, network: '10G', price: 160_000 },
     ]);
+
+    expect(Object.fromEntries(['B300', 'L40S', 'RTX 5090'].map((series) => {
+      const offer = catalog.listOffers({ gpuSeries: series }).items[0];
+      return [series, offer.skus[0]?.priceCardHoursMilli];
+    }))).toEqual({ B300: 44_000, L40S: 7_700, 'RTX 5090': 7_000 });
   });
 
   it('covers every visible use case and delivery category', () => {

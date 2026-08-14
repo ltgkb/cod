@@ -44,7 +44,6 @@ import {
   createClientId,
   createPaymentOrder,
   getCapabilities,
-  getControlPlaneUrl,
   getAdminComputeRequest,
   getCreditPacks,
   getPaymentOrder,
@@ -95,8 +94,7 @@ import {
   type LegacyMigrationInput,
   type VerifiedRegistrationInput,
 } from './api';
-import { ComputeApp } from './compute-market/ComputeApp';
-import { ComputeDemoApp } from './compute-market/ComputeDemoApp';
+import { ComputeMarketApp } from './compute-market/ComputeDemoApp';
 import { desktopGitDiffError, hasDesktopBridge, loadProject, loadProjectDiff, loadProjectFiles, readProjectFile, selectProjectRoot } from './desktop';
 import { chatFailureMessage } from './chat-errors';
 import { filterModelCatalog, groupModelCatalog, uniqueCallableModels } from './model-catalog';
@@ -119,6 +117,13 @@ const emptyProject: ProjectSnapshot = { root: '', files: [], diff: '', selectedF
 const taskboardDiscoveryIntervalMs = 15_000;
 type Overlay = 'login' | 'new-task' | 'account' | 'commands' | 'models' | 'compute' | 'compute-admin' | 'taskboard' | 'desktop-pet' | 'mobile-menu' | null;
 type AuthState = 'loading' | 'signed-out' | 'signed-in';
+
+function normalizeComputePath(path: string): string {
+  const url = new URL(path, window.location.origin);
+  if (!url.pathname.startsWith('/compute')) return '/compute';
+  url.searchParams.delete('demo');
+  return `${url.pathname}${url.search}`;
+}
 type ColorMode = 'light' | 'dark';
 type ProjectDiffStatus = 'idle' | 'loading' | 'ready' | 'error';
 interface ComparisonResult { sourceId: string; sourceLabel: string; model: string; modelId?: string; content: string; inputTokens?: number; outputTokens?: number; durationMs: number; error?: string }
@@ -987,7 +992,7 @@ export function App() {
   const [compareModelKeys, setCompareModelKeys] = useState<string[]>([]);
   const [products, setProducts] = useState<ProductManifest[]>([]);
   const [computeRequests, setComputeRequests] = useState<ComputeRequest[]>([]);
-  const [computePath, setComputePath] = useState(() => window.location.pathname.startsWith('/compute') ? `${window.location.pathname}${window.location.search}` : '/compute');
+  const [computePath, setComputePath] = useState(() => normalizeComputePath(`${window.location.pathname}${window.location.search}`));
   const [computeLoginReturnTo, setComputeLoginReturnTo] = useState<string | null>(null);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [targetDeviceId, setTargetDeviceId] = useState('');
@@ -1135,6 +1140,13 @@ export function App() {
   }, [computeLoginReturnTo, overlay, sidebarOpen]);
 
   useEffect(() => observeCodTopmostUiClose(closeTopmostUi), [closeTopmostUi]);
+
+  useEffect(() => {
+    if (overlay !== 'compute') return;
+    const currentPath = `${window.location.pathname}${window.location.search}`;
+    if (currentPath === computePath) return;
+    window.history.replaceState(window.history.state, '', computePath);
+  }, [computePath, overlay]);
 
   useEffect(() => observeCodSessionInvalidated((expectedToken) => {
     if (sessionTokenRef.current !== expectedToken) return;
@@ -2031,8 +2043,9 @@ export function App() {
     setOverlay(null);
   };
 
-  if (overlay === 'compute' && new URL(computePath, window.location.origin).searchParams.get('demo') === '1') return <ComputeDemoApp
+  if (overlay === 'compute') return <ComputeMarketApp
     session={session}
+    balanceCardHours={session ? session.account.billingExempt ? '不限卡时' : formatCardHours(creditPacks.summary.availableCardHoursMilli, creditPacks.summary.availableCents) : null}
     initialPath={computePath}
     platform={getCodRuntime().hostPlatform ? 'mobile' : hasDesktopBridge() ? 'desktop' : 'web'}
     onRequireLogin={(returnTo) => {
@@ -2041,25 +2054,6 @@ export function App() {
       setOverlay('login');
     }}
     onExit={exitComputeMarket}
-  />;
-
-  if (overlay === 'compute') return <ComputeApp
-    session={session}
-    initialPath={computePath}
-    apiBaseUrl={getControlPlaneUrl()}
-    platform={getCodRuntime().hostPlatform ? 'mobile' : hasDesktopBridge() ? 'desktop' : 'web'}
-    onRequireLogin={(returnTo) => {
-      setComputePath(returnTo);
-      setComputeLoginReturnTo(returnTo);
-      setOverlay('login');
-    }}
-    onExit={exitComputeMarket}
-    onOpenCodTask={({ title, prompt: taskPrompt }) => {
-      window.history.replaceState({}, '', workspaceUrl.current);
-      setNewTaskTitle(title);
-      setPrompt(taskPrompt);
-      setOverlay(session ? 'new-task' : 'login');
-    }}
   />;
 
   return <div className={`app-shell${inspectorOpen ? '' : ' inspector-hidden'}`}>

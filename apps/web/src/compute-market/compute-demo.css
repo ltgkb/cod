@@ -1,4 +1,4 @@
-.compute-demo-app {
+.compute-market-app {
   --compute-accent: #177777;
   --compute-accent-hover: #0f6666;
   --compute-accent-soft: #e9f8f7;
@@ -25,9 +25,9 @@
   font-family: "Work Sans", "Noto Sans SC", system-ui, sans-serif;
 }
 
-.compute-demo-app *, .compute-demo-app *::before, .compute-demo-app *::after { box-sizing: border-box; }
-.compute-demo-app button { color: inherit; font: inherit; cursor: pointer; }
-.compute-demo-app button:focus-visible { outline: 2px solid var(--compute-accent); outline-offset: 2px; }
+.compute-market-app *, .compute-market-app *::before, .compute-market-app *::after { box-sizing: border-box; }
+.compute-market-app button { color: inherit; font: inherit; cursor: pointer; }
+.compute-market-app button:focus-visible { outline: 2px solid var(--compute-accent); outline-offset: 2px; }
 
 .compute-v2-sidebar {
   display: flex;
@@ -74,11 +74,11 @@
 .compute-v2-hero { position: relative; display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(300px, .88fr); min-height: 260px; overflow: hidden; color: #fff; background: linear-gradient(124deg, #103f40 0%, #177777 62%, #53a99f 100%); border-radius: 16px; box-shadow: var(--compute-shadow); }
 .compute-v2-hero > div { position: relative; z-index: 2; align-self: center; padding: 38px 0 38px 42px; }
 .compute-v2-hero > div > span { font: 10px "DM Mono", monospace; letter-spacing: .14em; opacity: .68; }
-.compute-v2-hero h1 { max-width: 560px; margin: 13px 0 10px; font-family: "DM Sans", "Noto Sans SC", sans-serif; font-size: clamp(26px, 3vw, 40px); line-height: 1.16; letter-spacing: -.045em; }
+.compute-v2-hero h1 { max-width: 500px; margin: 13px 0 10px; font-family: "DM Sans", "Noto Sans SC", sans-serif; font-size: clamp(26px, 3vw, 40px); line-height: 1.16; letter-spacing: -.045em; }
 .compute-v2-hero p { margin: 0; color: rgb(255 255 255 / 68%); font-size: 13px; line-height: 1.65; }
 .compute-v2-region-list { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 25px; }
 .compute-v2-region-list span { padding: 5px 10px; background: rgb(255 255 255 / 10%); border: 1px solid rgb(255 255 255 / 12%); border-radius: 999px; font-size: 10px; }
-.compute-v2-hero > img { align-self: end; width: 125%; max-width: none; margin: 0 -16% -4% -9%; filter: drop-shadow(0 18px 25px rgb(3 24 23 / 28%)); transform: rotate(-1deg); }
+.compute-v2-hero > img { align-self: end; width: 112%; max-width: none; margin: 0 -12% -4% 0; filter: drop-shadow(0 18px 25px rgb(3 24 23 / 28%)); transform: rotate(-1deg); }
 
 .compute-v2-notices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
 .compute-v2-notices article { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; min-width: 0; padding: 15px 16px; background: var(--compute-surface); border: 1px solid var(--compute-border); border-radius: 12px; box-shadow: var(--compute-shadow); }
@@ -279,7 +279,7 @@
 .compute-v2-deals-panel td:last-child .status-running { color: var(--compute-accent); }
 
 @media (max-width: 900px) {
-  .compute-demo-app { grid-template-columns: 190px minmax(0, 1fr); }
+  .compute-market-app { grid-template-columns: 190px minmax(0, 1fr); }
   .compute-v2-main { padding-right: 18px; padding-left: 18px; }
   .compute-v2-product-list { grid-template-columns: 1fr; }
   .compute-v2-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -288,7 +288,7 @@
 }
 
 @media (max-width: 640px) {
-  .compute-demo-app { display: block; overflow: visible; background: var(--compute-canvas); }
+  .compute-market-app { display: block; overflow: visible; background: var(--compute-canvas); }
   .compute-v2-sidebar { display: none; }
   .compute-v2-shell { min-height: 100dvh; overflow: visible; }
   .compute-v2-topbar { justify-content: space-between; min-height: 56px; padding: 0 14px; }
@@ -360,7 +360,7 @@
   .compute-v2-operations th, .compute-v2-operations td { padding: 0 12px; }
 }
 
-html[data-color-mode="dark"] .compute-demo-app {
+html[data-color-mode="dark"] .compute-market-app {
   --compute-canvas: #0f1718;
   --compute-surface: #162122;
   --compute-subtle: #192728;

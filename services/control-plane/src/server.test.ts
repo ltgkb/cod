@@ -416,7 +416,7 @@ describe('control-plane production rules', () => {
       'L40S / 48 GB',
       'RTX 5090 / 32 GB',
     ]);
-    expect(discoveryHome.featuredOffers.every((offer) => offer.providerName.includes('非真实库存') && offer.skus[0]?.period === 'hour')).toBe(true);
+    expect(discoveryHome.featuredOffers.every((offer) => offer.providerName === 'COD 认证算力节点' && offer.skus[0]?.period === 'hour' && Number(offer.skus[0]?.priceCardHoursMilli) > 0)).toBe(true);
 
     const preflight = await fetch(`${base}/api/compute/v2/orders/order-id/quote-decision`, {
       method: 'OPTIONS',

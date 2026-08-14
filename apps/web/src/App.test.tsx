@@ -1477,7 +1477,7 @@ describe('COD workspace', () => {
     expect(within(dialog).getByRole('button', { name: '登录后使用模型' })).toBeInTheDocument();
   });
 
-  it('replaces the legacy compute dialog with the full-screen V2 market', async () => {
+  it('opens the complete public compute market by default', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith('/api/capabilities')) return json(capabilities);
@@ -1493,15 +1493,16 @@ describe('COD workspace', () => {
     render(<App />);
     await screen.findByRole('heading', { name: '新对话' });
     fireEvent.click(screen.getByTitle('算力市场'));
-    expect(await screen.findByText('算力市场尚未开放')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '让每一次训练，都用上合适的算力' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '经营看板查看公开数据' })).toBeInTheDocument();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(window.location.pathname).toBe('/compute');
-    fireEvent.click(screen.getByRole('button', { name: '返回 COD' }));
+    fireEvent.click(screen.getByRole('button', { name: '返回 COD 工作区' }));
     expect(await screen.findByRole('heading', { name: '新对话' })).toBeInTheDocument();
     expect(window.location.pathname).toBe('/');
   });
 
-  it('opens the labeled management demo without replacing the production compute market', () => {
+  it('opens the public management view and normalizes the legacy demo URL', async () => {
     window.history.replaceState({}, '', '/compute?demo=1&tab=ranking');
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -1515,8 +1516,9 @@ describe('COD workspace', () => {
 
     expect(screen.getByRole('heading', { name: '按稳定性与交付表现发现优质资源' })).toBeInTheDocument();
     expect(screen.getAllByRole('button', { name: '我的资源' })).toHaveLength(2);
-    expect(screen.getAllByText('演示数据').length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: '经营看板公开经营数据' })).toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/api/compute/v2/'))).toBe(false);
+    await waitFor(() => expect(window.location.search).toBe('?tab=ranking'));
   });
 
   it('keeps an authenticated compute deep link open after restoring the workspace session', async () => {
@@ -1547,9 +1549,9 @@ describe('COD workspace', () => {
 
     render(<App />);
 
-    expect(await screen.findByRole('heading', { name: '算力市场', level: 1 })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '让每一次训练，都用上合适的算力', level: 1 })).toBeInTheDocument();
     await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/api/account'))).toBe(true));
-    expect(screen.getByRole('heading', { name: '算力市场', level: 1 })).toBeInTheDocument();
+    expect(screen.getAllByText('9.980').length).toBeGreaterThan(0);
     expect(window.location.pathname).toBe('/compute');
   });
 
