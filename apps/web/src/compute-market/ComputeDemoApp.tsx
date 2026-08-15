@@ -43,6 +43,7 @@ export interface ComputeMarketAppProps {
   balanceCardHours: string | null;
   initialPath: string;
   platform: "web" | "desktop" | "mobile";
+  variant?: "showcase" | "launch";
   offers?: ComputeOffer[];
   onRequireLogin(returnTo: string): void;
   onOpenAccount?(): void;
@@ -253,6 +254,7 @@ function ProductCard({
 }
 
 function HomePage({
+  variant,
   session,
   balanceCardHours,
   products,
@@ -262,6 +264,7 @@ function HomePage({
   onOpenResource,
   onRequireLogin,
 }: {
+  variant: "showcase" | "launch";
   session: CodSession | null;
   balanceCardHours: string | null;
   products: ComputeDemoProduct[];
@@ -278,7 +281,12 @@ function HomePage({
     if (filter === "消费级") return product.gpuModel.includes("4090") || product.gpuModel.includes("5090");
     return product.gpuModel.includes(filter);
   });
-  const quickEntries = [
+  const quickEntries = variant === "showcase" ? [
+    { label: "找算力", detail: "按模型筛选", icon: Cpu, action: () => document.getElementById("compute-products")?.scrollIntoView({ behavior: "smooth" }) },
+    { label: "托管方案", detail: "了解接入方式", icon: Buildings, action: () => onNavigate("hosting") },
+    { label: "技术资讯", detail: "查看选型建议", icon: Newspaper, action: () => onNavigate("news") },
+    { label: "资源排行", detail: "比较资源池", icon: Ranking, action: () => onNavigate("ranking") },
+  ] : [
     { label: "找算力", detail: "按模型筛选", icon: Cpu, action: () => document.getElementById("compute-products")?.scrollIntoView({ behavior: "smooth" }) },
     { label: "托管设备", detail: "接入资源池", icon: Buildings, action: () => onNavigate("hosting") },
     { label: "我的订单", detail: "跟进交付", icon: Package, action: () => onOpenResource("orders", "all") },
@@ -288,20 +296,20 @@ function HomePage({
     <>
       <section className="compute-v2-hero">
         <div>
-          <span>COD COMPUTE</span>
+          <span>{variant === "showcase" ? "COD COMPUTE SHOWCASE" : "COD COMPUTE"}</span>
           <h1>让每一次训练，都用上合适的算力</h1>
-          <p>覆盖训练、推理与图形创作场景，按卡时灵活配置。</p>
+          <p>{variant === "showcase" ? "集中展示算力产品、交付参数与公开价格参考。" : "覆盖训练、推理与图形创作场景，按卡时灵活配置。"}</p>
           <div className="compute-v2-region-list">
             <span>华北</span><span>华东</span><span>西南</span><span>华南</span>
           </div>
         </div>
-        <img src="/compute/gpu-h200.svg" alt="H200 算力卡产品图" />
+        <img src="/compute/gpu-h200-real.webp" alt="NVIDIA H200 算力卡实拍图" />
       </section>
 
-      <section className="compute-v2-notices" aria-label="账户提醒">
+      {variant === "launch" && <section className="compute-v2-notices" aria-label="账户提醒">
         {session ? <button type="button" onClick={() => onOpenResource("assets")}><Wallet /><div><small>可用卡时</small><strong>{balanceCardHours}</strong><span>账户余额与权益已同步</span></div><CaretRight /></button> : <button type="button" onClick={onRequireLogin}><Wallet /><div><small>新用户注册权益</small><strong>注册后领取</strong><span>登录后显示卡时余额与明细</span></div><CaretRight /></button>}
         <button type="button" onClick={() => onOpenResource("orders", "running")}><Clock /><div><small>运行中的订单</small><strong>3 个实例</strong><span>今日预计消耗 82.4 卡时</span></div><CaretRight /></button>
-      </section>
+      </section>}
 
       <section className="compute-v2-quick" aria-label="快捷入口">
         {quickEntries.map((entry) => {
@@ -311,7 +319,7 @@ function HomePage({
       </section>
 
       <section className="compute-v2-catalog" id="compute-products">
-        <SectionTitle title="热门算力卡" description="参考公开云平台行情换算的市场卡时价" action="全部资源" onAction={() => setFilter("全部")} />
+        <SectionTitle title={variant === "showcase" ? "算力产品" : "热门算力卡"} description="参考公开云平台行情换算的市场卡时价" action="全部资源" onAction={() => setFilter("全部")} />
         <div className="compute-v2-filters" aria-label="筛选算力卡">
           <SlidersHorizontal />
           {filters.map((item) => <button type="button" className={filter === item ? "active" : ""} onClick={() => setFilter(item)} key={item}>{item}</button>)}
@@ -325,10 +333,12 @@ function HomePage({
 }
 
 function HostingPage({
+  readOnly,
   session,
   onRequireLogin,
   onOpenResource,
 }: {
+  readOnly: boolean;
   session: CodSession | null;
   onRequireLogin: () => void;
   onOpenResource: (view: MineResourceView) => void;
@@ -346,21 +356,21 @@ function HostingPage({
   return (
     <div className="compute-v2-page-stack">
       <section className="compute-v2-page-banner hosting">
-        <div><span>设备托管</span><h1>闲置设备，接入 COD 算力资源池</h1><p>标准化验收、运行监控与收益结算，托管状态随时可查。</p><button type="button" onClick={() => { setSubmitted(false); setDialog("apply"); }}>开始托管申请</button></div>
+        <div><span>设备托管</span><h1>闲置设备，接入 COD 算力资源池</h1><p>标准化验收、运行监控与收益结算，托管状态随时可查。</p><button type="button" onClick={() => { setSubmitted(false); setDialog(readOnly ? "plan" : "apply"); }}>{readOnly ? "了解托管方案" : "开始托管申请"}</button></div>
         <Buildings />
       </section>
-      <section className="compute-v2-status-grid">
+      {!readOnly && <section className="compute-v2-status-grid">
         <article><small>已托管设备</small><strong>12</strong><span>8 台运行中</span></article>
         <article><small>本月预计卡时</small><strong>6,840</strong><span>较上月 +12.6%</span></article>
         <article><small>待处理事项</small><strong>2</strong><span>1 台待验收</span></article>
         <article><small>在线率</small><strong>99.6%</strong><span>近 30 日</span></article>
-      </section>
+      </section>}
       <section className="compute-v2-host-card">
-        <img src="/compute/gpu-h200.svg" alt="H200 托管设备产品图" />
+        <img src="/compute/gpu-h200-real.webp" alt="NVIDIA H200 托管设备实拍图" />
         <div><span>重点资源计划</span><h2>H200 / H100 设备托管</h2><p>支持整机、机柜级接入；验收通过后进入资源池，运行数据和结算记录全程可追踪。</p><ul><li><Check /> 设备信息核验</li><li><Check /> 机房环境验收</li><li><Check /> 上线与持续监控</li></ul><button type="button" onClick={() => setDialog("plan")}>查看托管方案 <CaretRight /></button></div>
       </section>
       <section className="compute-v2-process"><SectionTitle title="托管流程" description="四步完成设备接入" /><ol><li><b>01</b><strong>提交资料</strong><span>设备、机房和网络信息</span></li><li><b>02</b><strong>方案评估</strong><span>核验卡况与交付条件</span></li><li><b>03</b><strong>验收接入</strong><span>完成联调并进入资源池</span></li><li><b>04</b><strong>运行结算</strong><span>查看状态与卡时收益</span></li></ol></section>
-      {dialog === "plan" && <MarketModal title="设备托管方案" description="从设备核验到收益结算的完整接入方案" onClose={() => setDialog(null)}><div className="compute-v2-plan-grid"><article><strong>整机托管</strong><p>适合 4–8 卡服务器，提供上架、网络联调、监控和故障响应。</p><span>预计 3–5 个工作日接入</span></article><article><strong>集群托管</strong><p>适合 16 卡以上资源池，支持专属网络、调度策略和批量运维。</p><span>预计 5–10 个工作日接入</span></article><article><strong>联合运营</strong><p>按实际运行卡时结算，经营数据、设备状态和收益明细可追踪。</p><span>按月生成结算单</span></article></div><div className="compute-v2-modal-actions"><button type="button" className="secondary" onClick={() => setDialog(null)}>稍后再看</button><button type="button" onClick={() => { setSubmitted(false); setDialog("apply"); }}>提交托管申请</button></div></MarketModal>}
+      {dialog === "plan" && <MarketModal title="设备托管方案" description="从设备核验到收益结算的完整接入方案" onClose={() => setDialog(null)}><div className="compute-v2-plan-grid"><article><strong>整机托管</strong><p>适合 4–8 卡服务器，提供上架、网络联调、监控和故障响应。</p><span>预计 3–5 个工作日接入</span></article><article><strong>集群托管</strong><p>适合 16 卡以上资源池，支持专属网络、调度策略和批量运维。</p><span>预计 5–10 个工作日接入</span></article><article><strong>联合运营</strong><p>按实际运行卡时结算，经营数据、设备状态和收益明细可追踪。</p><span>按月生成结算单</span></article></div><div className="compute-v2-modal-actions"><button type="button" className="secondary" onClick={() => setDialog(null)}>{readOnly ? "关闭" : "稍后再看"}</button>{!readOnly && <button type="button" onClick={() => { setSubmitted(false); setDialog("apply"); }}>提交托管申请</button>}</div></MarketModal>}
       {dialog === "apply" && <MarketModal title={submitted ? "申请已提交" : "提交托管申请"} description={submitted ? "我们会在 1 个工作日内联系并确认接入条件" : "填写硬件、交付环境与期望报价，获取可执行的接入方案"} onClose={() => setDialog(null)}>{submitted ? <div className="compute-v2-success"><i><Check /></i><h3>托管申请已进入资料核验</h3><p>申请编号 HT-0814-026，可在“我的资源 / 托管申请”查看后续进度。</p><div className="compute-v2-modal-actions"><button type="button" className="secondary" onClick={() => setDialog(null)}>完成</button><button type="button" onClick={() => { setDialog(null); onOpenResource("hosting"); }}>查看申请进度</button></div></div> : <form className="compute-v2-form" onSubmit={submitApplication}>
         <label><span>联系人</span><input name="contact" required placeholder="请输入联系人姓名" defaultValue={session?.account.displayName ?? ""} /></label>
         <label><span>联系电话</span><input name="phone" required inputMode="tel" pattern="1[3-9][0-9]{9}" placeholder="请输入 11 位手机号" /></label>
@@ -543,6 +553,7 @@ function OperationsDashboard({ onBack }: { onBack: () => void }) {
 }
 
 function ProductDetail({
+  readOnly,
   product,
   session,
   onBack,
@@ -550,6 +561,7 @@ function ProductDetail({
   onCreateOrder,
   onViewOrders,
 }: {
+  readOnly: boolean;
   product: ComputeDemoProduct;
   session: CodSession | null;
   onBack: () => void;
@@ -580,7 +592,7 @@ function ProductDetail({
     });
     setSubmittedOrder(order);
   };
-  return <div className="compute-v2-detail"><header className="compute-v2-detail-head"><button type="button" onClick={onBack}><ArrowLeft /> 返回</button><div><small>{product.region}</small><h1>{product.title}</h1></div><span>公开价格</span></header><div className="compute-v2-detail-grid"><section className="compute-v2-detail-summary"><img src={product.image} alt={`${product.gpuModel} 产品图`} /><div className="compute-v2-detail-title"><div><span>{product.badge}</span><h2>{product.gpuModel}</h2><p>{product.gpuMemory} · {product.availability}</p></div><strong>{product.price.toFixed(1)}<small> 卡时/小时</small></strong></div><dl className="compute-v2-detail-specs"><div><dt>交付形态</dt><dd>{product.specs.delivery}</dd></div><div><dt>CPU</dt><dd>{product.specs.cpu}</dd></div><div><dt>内存</dt><dd>{product.specs.memory}</dd></div><div><dt>存储</dt><dd>{product.specs.storage}</dd></div><div><dt>GPU 互联</dt><dd>{product.specs.interconnect}</dd></div><div><dt>网络</dt><dd>{product.specs.network}</dd></div><div><dt>系统</dt><dd>{product.specs.system}</dd></div><div><dt>环境</dt><dd>{product.specs.cuda}</dd></div></dl><div className="compute-v2-public-price"><div><small>外部公开参考价</small><strong>${product.priceReference.low === product.priceReference.high ? product.priceReference.low.toFixed(2) : `${product.priceReference.low.toFixed(2)} - ${product.priceReference.high.toFixed(2)}`} <span>/ GPU 小时</span></strong><p>{product.priceReference.basis}，采集于 {product.priceReference.observedAt}。COD 卡时价包含实际交付、区域和服务差异。</p></div><nav aria-label="公开价格来源">{product.priceReference.sources.map((source) => <a href={source.url} target="_blank" rel="noreferrer" key={source.provider}>{source.provider}</a>)}</nav></div><div className="compute-v2-detail-assurance"><span><ShieldCheck /> 资源验真</span><span><Lightning /> 快速交付</span><span><Headset /> 服务支持</span></div></section><section className="compute-v2-config"><header><h2>配置订单</h2><span>选择镜像、周期与数量</span></header><fieldset><legend>租用周期</legend><div className="compute-v2-choice-row">{["按小时","按日","按月"].map((item) => <button type="button" className={period === item ? "active" : ""} onClick={() => { selectPeriod(item); setSubmittedOrder(null); }} key={item}>{item}</button>)}</div></fieldset><fieldset><legend>运行镜像</legend><div className="compute-v2-image-options">{product.images.map((image) => <button type="button" className={imageId === image.id ? "active" : ""} onClick={() => { setImageId(image.id); setSubmittedOrder(null); }} key={image.id}><strong>{image.name}</strong><small>{image.detail}</small>{imageId === image.id && <Check />}</button>)}</div></fieldset><div className="compute-v2-runtime-note"><strong>交付环境</strong><span>{product.specs.system} · {product.specs.cuda} · Docker 与 NVIDIA Container Toolkit 可选</span></div><div className="compute-v2-number-row"><label><span>GPU 数量</span><div><button type="button" aria-label="减少 GPU 数量" onClick={() => { setQuantity(Math.max(1, quantity - 1)); setSubmittedOrder(null); }}>−</button><strong>{quantity} 卡</strong><button type="button" aria-label="增加 GPU 数量" onClick={() => { setQuantity(Math.min(8, quantity + 1)); setSubmittedOrder(null); }}>＋</button></div></label><label><span>租用时长</span><div><button type="button" aria-label="减少租用时长" onClick={() => { setHours(Math.max(1, hours - 1)); setSubmittedOrder(null); }}>−</button><strong>{hours} 小时</strong><button type="button" aria-label="增加租用时长" onClick={() => { setHours(Math.min(2160, hours + 1)); setSubmittedOrder(null); }}>＋</button></div></label></div><div className="compute-v2-cost"><span>预计消耗<small>{product.price.toFixed(1)} × {quantity} 卡 × {hours} 小时</small></span><strong>{total.toFixed(1)} <small>卡时</small></strong></div><button className="compute-v2-submit" type="button" onClick={submitOrder}>{submittedOrder ? "订单已提交" : "确认配置并提交"}</button>{submittedOrder && <div className="compute-v2-feedback" role="status"><span><Check /> 订单已提交，编号 {submittedOrder.id}</span><button type="button" onClick={onViewOrders}>查看订单 <CaretRight /></button></div>}</section></div><footer className="compute-v2-detail-sticky"><span><small>预计消耗</small><strong>{total.toFixed(1)} 卡时</strong></span><button type="button" onClick={submitOrder}>{submittedOrder ? "已提交" : "提交订单"}</button></footer></div>;
+  return <div className="compute-v2-detail"><header className="compute-v2-detail-head"><button type="button" onClick={onBack}><ArrowLeft /> 返回</button><div><small>{product.region}</small><h1>{product.title}</h1></div><span>公开价格</span></header><div className="compute-v2-detail-grid"><section className="compute-v2-detail-summary"><img src={product.image} alt={`${product.gpuModel} 产品图`} /><div className="compute-v2-detail-title"><div><span>{product.badge}</span><h2>{product.gpuModel}</h2><p>{product.gpuMemory} · {product.availability}</p></div><strong>{product.price.toFixed(1)}<small> 卡时/小时</small></strong></div><dl className="compute-v2-detail-specs"><div><dt>交付形态</dt><dd>{product.specs.delivery}</dd></div><div><dt>CPU</dt><dd>{product.specs.cpu}</dd></div><div><dt>内存</dt><dd>{product.specs.memory}</dd></div><div><dt>存储</dt><dd>{product.specs.storage}</dd></div><div><dt>GPU 互联</dt><dd>{product.specs.interconnect}</dd></div><div><dt>网络</dt><dd>{product.specs.network}</dd></div><div><dt>系统</dt><dd>{product.specs.system}</dd></div><div><dt>环境</dt><dd>{product.specs.cuda}</dd></div></dl><div className="compute-v2-public-price"><div><small>外部公开参考价</small><strong>${product.priceReference.low === product.priceReference.high ? product.priceReference.low.toFixed(2) : `${product.priceReference.low.toFixed(2)} - ${product.priceReference.high.toFixed(2)}`} <span>/ GPU 小时</span></strong><p>{product.priceReference.basis}，采集于 {product.priceReference.observedAt}。COD 卡时价包含实际交付、区域和服务差异。</p></div><nav aria-label="公开价格来源">{product.priceReference.sources.map((source) => <a href={source.url} target="_blank" rel="noreferrer" key={source.provider}>{source.provider}</a>)}</nav></div><div className="compute-v2-detail-assurance"><span><ShieldCheck /> 资源验真</span><span><Lightning /> 快速交付</span><span><Headset /> 服务支持</span></div></section><section className="compute-v2-config"><header><h2>{readOnly ? "配置展示" : "配置订单"}</h2><span>{readOnly ? "选择参数可查看卡时参考" : "选择镜像、周期与数量"}</span></header><fieldset><legend>租用周期</legend><div className="compute-v2-choice-row">{["按小时","按日","按月"].map((item) => <button type="button" className={period === item ? "active" : ""} onClick={() => { selectPeriod(item); setSubmittedOrder(null); }} key={item}>{item}</button>)}</div></fieldset><fieldset><legend>运行镜像</legend><div className="compute-v2-image-options">{product.images.map((image) => <button type="button" className={imageId === image.id ? "active" : ""} onClick={() => { setImageId(image.id); setSubmittedOrder(null); }} key={image.id}><strong>{image.name}</strong><small>{image.detail}</small>{imageId === image.id && <Check />}</button>)}</div></fieldset><div className="compute-v2-runtime-note"><strong>交付环境</strong><span>{product.specs.system} · {product.specs.cuda} · Docker 与 NVIDIA Container Toolkit 可选</span></div><div className="compute-v2-number-row"><label><span>GPU 数量</span><div><button type="button" aria-label="减少 GPU 数量" onClick={() => { setQuantity(Math.max(1, quantity - 1)); setSubmittedOrder(null); }}>−</button><strong>{quantity} 卡</strong><button type="button" aria-label="增加 GPU 数量" onClick={() => { setQuantity(Math.min(8, quantity + 1)); setSubmittedOrder(null); }}>＋</button></div></label><label><span>租用时长</span><div><button type="button" aria-label="减少租用时长" onClick={() => { setHours(Math.max(1, hours - 1)); setSubmittedOrder(null); }}>−</button><strong>{hours} 小时</strong><button type="button" aria-label="增加租用时长" onClick={() => { setHours(Math.min(2160, hours + 1)); setSubmittedOrder(null); }}>＋</button></div></label></div><div className="compute-v2-cost"><span>预计消耗<small>{product.price.toFixed(1)} × {quantity} 卡 × {hours} 小时</small></span><strong>{total.toFixed(1)} <small>卡时</small></strong></div>{readOnly ? <a className="compute-v2-submit" href={`/compute?offer=${product.id}`}>进入上线准备版</a> : <button className="compute-v2-submit" type="button" onClick={submitOrder}>{submittedOrder ? "订单已提交" : "确认配置并提交"}</button>}{submittedOrder && <div className="compute-v2-feedback" role="status"><span><Check /> 订单已提交，编号 {submittedOrder.id}</span><button type="button" onClick={onViewOrders}>查看订单 <CaretRight /></button></div>}</section></div>{!readOnly && <footer className="compute-v2-detail-sticky"><span><small>预计消耗</small><strong>{total.toFixed(1)} 卡时</strong></span><button type="button" onClick={submitOrder}>{submittedOrder ? "已提交" : "提交订单"}</button></footer>}</div>;
 }
 
 function scrollComputeToTop() {
@@ -588,12 +600,15 @@ function scrollComputeToTop() {
   document.querySelector<HTMLElement>(".compute-v2-shell")?.scrollTo?.({ top: 0, behavior: "smooth" });
 }
 
-export function ComputeMarketApp({ session, balanceCardHours, initialPath, platform, offers = [], onRequireLogin, onOpenAccount, onOpenSupport, onExit }: ComputeMarketAppProps) {
+export function ComputeMarketApp({ session, balanceCardHours, initialPath, platform, variant = "launch", offers = [], onRequireLogin, onOpenAccount, onOpenSupport, onExit }: ComputeMarketAppProps) {
   const initialRoute = readComputeRoute(initialPath);
-  const [tab, setTab] = useState<ComputeTab>(initialRoute.tab);
+  const readOnly = variant === "showcase";
+  const basePath = readOnly ? "/compute/showcase" : "/compute";
+  const visibleNavItems = readOnly ? navItems.filter((item) => item.id !== "mine") : navItems;
+  const [tab, setTab] = useState<ComputeTab>(readOnly && initialRoute.tab === "mine" ? "home" : initialRoute.tab);
   const [productId, setProductId] = useState<string | null>(initialRoute.productId);
-  const [operations, setOperations] = useState(initialRoute.operations);
-  const [mineView, setMineView] = useState<MineResourceView | null>(initialRoute.mineView);
+  const [operations, setOperations] = useState(readOnly ? false : initialRoute.operations);
+  const [mineView, setMineView] = useState<MineResourceView | null>(readOnly ? null : initialRoute.mineView);
   const [orderStatus, setOrderStatus] = useState<MineOrderStatus>(initialRoute.orderStatus);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [createdOrders, setCreatedOrders] = useState<MarketOrder[]>([]);
@@ -605,24 +620,25 @@ export function ComputeMarketApp({ session, balanceCardHours, initialPath, platf
   useEffect(() => {
     const handlePopState = () => {
       const route = readComputeRoute(window.location.href);
-      setTab(route.tab);
+      setTab(readOnly && route.tab === "mine" ? "home" : route.tab);
       setProductId(route.productId);
-      setOperations(route.operations);
-      setMineView(route.mineView);
+      setOperations(readOnly ? false : route.operations);
+      setMineView(readOnly ? null : route.mineView);
       setOrderStatus(route.orderStatus);
       setNotificationsOpen(false);
       scrollComputeToTop();
     };
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
-  }, []);
+  }, [readOnly]);
 
   const navigate = (nextTab: ComputeTab, nextProductId: string | null = null) => {
-    const url = new URL("/compute", window.location.origin);
-    if (nextTab !== "home") url.searchParams.set("tab", nextTab);
+    const safeTab = readOnly && nextTab === "mine" ? "home" : nextTab;
+    const url = new URL(basePath, window.location.origin);
+    if (safeTab !== "home") url.searchParams.set("tab", safeTab);
     if (nextProductId) url.searchParams.set("offer", nextProductId);
     window.history.pushState({}, "", `${url.pathname}${url.search}`);
-    setTab(nextTab);
+    setTab(safeTab);
     setProductId(nextProductId);
     setOperations(false);
     setMineView(null);
@@ -632,7 +648,8 @@ export function ComputeMarketApp({ session, balanceCardHours, initialPath, platf
   };
 
   const openOperations = () => {
-    const url = new URL("/compute", window.location.origin);
+    if (readOnly) return;
+    const url = new URL(basePath, window.location.origin);
     url.searchParams.set("tab", "mine");
     url.searchParams.set("view", "operations");
     window.history.pushState({}, "", `${url.pathname}${url.search}`);
@@ -646,7 +663,8 @@ export function ComputeMarketApp({ session, balanceCardHours, initialPath, platf
   };
 
   const openMineResource = (view: MineResourceView, status: MineOrderStatus = "all") => {
-    const url = new URL("/compute", window.location.origin);
+    if (readOnly) return;
+    const url = new URL(basePath, window.location.origin);
     url.searchParams.set("tab", "mine");
     url.searchParams.set("view", view);
     if (view === "orders" && status !== "all") url.searchParams.set("status", status);
@@ -677,19 +695,19 @@ export function ComputeMarketApp({ session, balanceCardHours, initialPath, platf
   };
 
   return (
-    <div className="compute-market-app" data-platform={platform}>
+    <div className="compute-market-app" data-platform={platform} data-variant={variant}>
       <aside className="compute-v2-sidebar">
         <button className="compute-v2-brand" type="button" onClick={() => navigate("home")}><i><Lightning weight="fill" /></i><span><strong>COD</strong><small>算力市场</small></span></button>
-        <nav aria-label="算力市场主导航">{navItems.map((item) => { const Icon=item.icon; return <button type="button" className={tab === item.id && !productId && !operations && !mineView ? "active" : ""} onClick={() => navigate(item.id)} key={item.id}><Icon weight={tab === item.id && !operations ? "fill" : "regular"} /><span>{item.label}</span></button>; })}</nav>
-        <button className={`compute-v2-operations-nav${operations ? " active" : ""}`} type="button" onClick={openOperations}><ChartBar weight={operations ? "fill" : "regular"} /><span><strong>经营看板</strong><small>公开经营数据</small></span></button>
-        {session && <section><small>可用卡时</small><strong>{balanceCardHours}</strong></section>}
+        <nav aria-label="算力市场主导航">{visibleNavItems.map((item) => { const Icon=item.icon; return <button type="button" className={tab === item.id && !productId && !operations && !mineView ? "active" : ""} onClick={() => navigate(item.id)} key={item.id}><Icon weight={tab === item.id && !operations ? "fill" : "regular"} /><span>{item.label}</span></button>; })}</nav>
+        {!readOnly && <button className={`compute-v2-operations-nav${operations ? " active" : ""}`} type="button" onClick={openOperations}><ChartBar weight={operations ? "fill" : "regular"} /><span><strong>经营看板</strong><small>公开经营数据</small></span></button>}
+        {!readOnly && session && <section><small>可用卡时</small><strong>{balanceCardHours}</strong></section>}
         <button className="compute-v2-exit" type="button" onClick={onExit}><ArrowLeft /> 返回 COD 工作区</button>
       </aside>
       <div className="compute-v2-shell">
-        <header className="compute-v2-topbar"><button className="compute-v2-mobile-brand" type="button" onClick={() => navigate("home")}><Lightning weight="fill" /><strong>COD 算力</strong></button><div><button type="button" aria-label="通知" aria-expanded={notificationsOpen} onClick={() => setNotificationsOpen(true)}><Bell /></button>{session ? <button type="button" className="compute-v2-user" onClick={openAccount}><UserCircle weight="fill" /> {session.account.displayName}</button> : <button type="button" className="compute-v2-login" onClick={() => onRequireLogin(window.location.href)}>注册或登录</button>}</div></header>
-        <main className="compute-v2-main">{operations ? <OperationsDashboard onBack={() => navigate("home")} /> : mineView ? <MineResourceDetail view={mineView} orderStatus={orderStatus} balanceCardHours={balanceCardHours} orders={orders} orderCounts={orderCounts} session={session} onBack={() => navigate("mine")} onRequireLogin={() => onRequireLogin(window.location.href)} onOpenAccount={openAccount} onOpenSupport={openSupport} /> : selectedProduct ? <ProductDetail product={selectedProduct} session={session} onBack={() => navigate("home")} onRequireLogin={() => onRequireLogin(window.location.href)} onCreateOrder={createMarketOrder} onViewOrders={() => openMineResource("orders", "pending")} /> : tab === "home" ? <HomePage session={session} balanceCardHours={balanceCardHours} products={products} onOpenProduct={(id) => navigate("home", id)} onNavigate={(nextTab) => navigate(nextTab)} onOpenOperations={openOperations} onOpenResource={openMineResource} onRequireLogin={() => onRequireLogin(window.location.href)} /> : tab === "hosting" ? <HostingPage session={session} onRequireLogin={() => onRequireLogin(window.location.href)} onOpenResource={openMineResource} /> : tab === "news" ? <NewsPage /> : tab === "ranking" ? <RankingPage onOpenProducts={() => navigate("home")} /> : <MinePage session={session} balanceCardHours={balanceCardHours} orderCounts={orderCounts} onRequireLogin={() => onRequireLogin(window.location.href)} onOpenOperations={openOperations} onOpenResource={openMineResource} />}</main>
-        {!selectedProduct && !operations && !mineView && <nav className="compute-v2-bottom-nav" aria-label="算力市场底部导航">{navItems.map((item) => { const Icon=item.icon; return <button type="button" className={tab === item.id ? "active" : ""} onClick={() => navigate(item.id)} key={item.id}><Icon weight={tab === item.id ? "fill" : "regular"} /><span>{item.label}</span></button>; })}</nav>}
-        {notificationsOpen && <MarketModal title="消息通知" description="资源、订单与平台动态" onClose={() => setNotificationsOpen(false)}><div className="compute-v2-notification-list"><button type="button" onClick={() => openMineResource("orders", "running")}><i><Lightning /></i><span><strong>3 个实例正在运行</strong><small>资源状态正常，今日预计消耗 82.4 卡时</small></span><CaretRight /></button><button type="button" onClick={() => openMineResource("hosting")}><i><Buildings /></i><span><strong>托管资料待补充</strong><small>H100 服务器托管申请等待验收信息</small></span><CaretRight /></button><button type="button" onClick={() => navigate("news")}><i><Newspaper /></i><span><strong>华东 B 区新增资源</strong><small>H100 资源池已开放配置</small></span><CaretRight /></button></div></MarketModal>}
+        <header className="compute-v2-topbar"><button className="compute-v2-mobile-brand" type="button" onClick={() => navigate("home")}><Lightning weight="fill" /><strong>COD 算力</strong></button><div>{readOnly ? <><span>产品展示版</span><a className="compute-v2-launch-link" href="/compute">上线准备版</a></> : <><span>上线准备版</span><button type="button" aria-label="通知" aria-expanded={notificationsOpen} onClick={() => setNotificationsOpen(true)}><Bell /></button>{session ? <button type="button" className="compute-v2-user" onClick={openAccount}><UserCircle weight="fill" /> {session.account.displayName}</button> : <button type="button" className="compute-v2-login" onClick={() => onRequireLogin(window.location.href)}>注册或登录</button>}</>}</div></header>
+        <main className="compute-v2-main">{operations ? <OperationsDashboard onBack={() => navigate("home")} /> : mineView ? <MineResourceDetail view={mineView} orderStatus={orderStatus} balanceCardHours={balanceCardHours} orders={orders} orderCounts={orderCounts} session={session} onBack={() => navigate("mine")} onRequireLogin={() => onRequireLogin(window.location.href)} onOpenAccount={openAccount} onOpenSupport={openSupport} /> : selectedProduct ? <ProductDetail readOnly={readOnly} product={selectedProduct} session={session} onBack={() => navigate("home")} onRequireLogin={() => onRequireLogin(window.location.href)} onCreateOrder={createMarketOrder} onViewOrders={() => openMineResource("orders", "pending")} /> : tab === "home" ? <HomePage variant={variant} session={session} balanceCardHours={balanceCardHours} products={products} onOpenProduct={(id) => navigate("home", id)} onNavigate={(nextTab) => navigate(nextTab)} onOpenOperations={openOperations} onOpenResource={openMineResource} onRequireLogin={() => onRequireLogin(window.location.href)} /> : tab === "hosting" ? <HostingPage readOnly={readOnly} session={session} onRequireLogin={() => onRequireLogin(window.location.href)} onOpenResource={openMineResource} /> : tab === "news" ? <NewsPage /> : tab === "ranking" ? <RankingPage onOpenProducts={() => navigate("home")} /> : <MinePage session={session} balanceCardHours={balanceCardHours} orderCounts={orderCounts} onRequireLogin={() => onRequireLogin(window.location.href)} onOpenOperations={openOperations} onOpenResource={openMineResource} />}</main>
+        {!selectedProduct && !operations && !mineView && <nav className="compute-v2-bottom-nav" aria-label="算力市场底部导航">{visibleNavItems.map((item) => { const Icon=item.icon; return <button type="button" className={tab === item.id ? "active" : ""} onClick={() => navigate(item.id)} key={item.id}><Icon weight={tab === item.id ? "fill" : "regular"} /><span>{item.label}</span></button>; })}</nav>}
+        {!readOnly && notificationsOpen && <MarketModal title="消息通知" description="资源、订单与平台动态" onClose={() => setNotificationsOpen(false)}><div className="compute-v2-notification-list"><button type="button" onClick={() => openMineResource("orders", "running")}><i><Lightning /></i><span><strong>3 个实例正在运行</strong><small>资源状态正常，今日预计消耗 82.4 卡时</small></span><CaretRight /></button><button type="button" onClick={() => openMineResource("hosting")}><i><Buildings /></i><span><strong>托管资料待补充</strong><small>H100 服务器托管申请等待验收信息</small></span><CaretRight /></button><button type="button" onClick={() => navigate("news")}><i><Newspaper /></i><span><strong>华东 B 区新增资源</strong><small>H100 资源池已开放配置</small></span><CaretRight /></button></div></MarketModal>}
       </div>
     </div>
   );

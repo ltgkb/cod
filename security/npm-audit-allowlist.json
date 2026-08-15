@@ -27,7 +27,7 @@
     {
       "name": "@expo/cli",
       "nodePath": "node_modules/@expo/cli",
-      "version": "57.0.14",
+      "version": "57.0.15",
       "isDirect": false
     },
     {
@@ -57,7 +57,7 @@
     {
       "name": "expo",
       "nodePath": "node_modules/expo",
-      "version": "57.0.12",
+      "version": "57.0.13",
       "isDirect": true
     },
     {
@@ -109,9 +109,9 @@
         "fromPath": "apps/mobile",
         "dependencyType": "dependencies",
         "dependencyName": "expo",
-        "specifier": "~57.0.12",
+        "specifier": "~57.0.13",
         "toPath": "node_modules/expo",
-        "toVersion": "57.0.12"
+        "toVersion": "57.0.13"
       },
       {
         "fromPath": "node_modules/expo",

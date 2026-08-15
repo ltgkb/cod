@@ -171,7 +171,7 @@ export default function App() {
               allowFileAccessFromFileURLs: false,
               allowUniversalAccessFromFileURLs: false,
               mixedContentMode: 'never',
-              scrollEnabled: false,
+              scrollEnabled: true,
               contentInsetAdjustmentBehavior: 'never',
               style: styles.workspace,
             }}

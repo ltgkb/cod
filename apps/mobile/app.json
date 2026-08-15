@@ -30,10 +30,12 @@
     ],
     "ios": {
       "bundleIdentifier": "com.kai.cod",
+      "buildNumber": "1",
       "supportsTablet": true
     },
     "android": {
       "package": "com.kai.cod",
+      "versionCode": 1,
       "allowBackup": false,
       "blockedPermissions": [
         "android.permission.READ_EXTERNAL_STORAGE",

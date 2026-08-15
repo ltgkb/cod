@@ -20,6 +20,7 @@ test('release uses the policy-capable WebView and preserves Expo DOM bootstrap i
   assert.match(app, /injectedJavaScriptForMainFrameOnly:\s*true/);
   assert.match(app, /allowFileAccessFromFileURLs:\s*false/);
   assert.match(app, /allowUniversalAccessFromFileURLs:\s*false/);
+  assert.match(app, /scrollEnabled:\s*true/);
   assert.match(app, /runAuthorizedNativeBridgeAction/);
   assert.doesNotMatch(webApp, /<a\b|href=/);
   assert.doesNotMatch(presentation, /<a\b|href=/);

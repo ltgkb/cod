@@ -2048,6 +2048,7 @@ export function App() {
     balanceCardHours={session ? session.account.billingExempt ? '不限卡时' : formatCardHours(creditPacks.summary.availableCardHoursMilli, creditPacks.summary.availableCents) : null}
     initialPath={computePath}
     platform={getCodRuntime().hostPlatform ? 'mobile' : hasDesktopBridge() ? 'desktop' : 'web'}
+    variant={computePath.startsWith('/compute/showcase') ? 'showcase' : 'launch'}
     onRequireLogin={(returnTo) => {
       setComputePath(returnTo);
       setComputeLoginReturnTo(returnTo);

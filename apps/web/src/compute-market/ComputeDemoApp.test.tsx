@@ -47,6 +47,33 @@ describe("ComputeMarketApp", () => {
     expect(screen.queryByText("1,286.5")).not.toBeInTheDocument();
   });
 
+  it("keeps the showcase version read-only and separate from the launch flow", () => {
+    window.history.replaceState({}, "", "/compute/showcase");
+    render(
+      <ComputeMarketApp
+        session={null}
+        balanceCardHours={null}
+        initialPath="/compute/showcase"
+        platform="mobile"
+        variant="showcase"
+        onRequireLogin={vi.fn()}
+        onExit={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("产品展示版")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "上线准备版" })).toHaveAttribute("href", "/compute");
+    expect(screen.queryByRole("button", { name: "通知" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "我的资源" })).not.toBeInTheDocument();
+    expect(screen.queryByText("运行中的订单")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "查看 B300 SXM 超大显存训练卡" }));
+    expect(window.location.pathname).toBe("/compute/showcase");
+    expect(screen.getByRole("heading", { name: "配置展示" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "进入上线准备版" })).toHaveAttribute("href", "/compute?offer=b300-sxm-288");
+    expect(screen.queryByRole("button", { name: "确认配置并提交" })).not.toBeInTheDocument();
+  });
+
   it("opens a priced product configurator and submits through the signed-in market flow", () => {
     render(
       <ComputeMarketApp
