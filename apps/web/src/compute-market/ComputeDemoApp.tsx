@@ -219,6 +219,65 @@ function RecordDetail({ title, meta, value }: MineResourceRow) {
   );
 }
 
+function CustomRecharge({
+  session,
+  onRequireLogin,
+}: {
+  session: CodSession | null;
+  onRequireLogin: () => void;
+}) {
+  const [amount, setAmount] = useState("100");
+  const [channel, setChannel] = useState<"wechat" | "alipay">("wechat");
+  const [demoOrder, setDemoOrder] = useState<{ amount: number; channel: string } | null>(null);
+  const yuan = Number(amount);
+  const valid = Number.isFinite(yuan) && yuan >= 1 && yuan <= 100_000;
+  const cardHours = valid ? yuan / cardHourPriceCny : 0;
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!valid) return;
+    if (!session) {
+      onRequireLogin();
+      return;
+    }
+    setDemoOrder({ amount: yuan, channel: channel === "wechat" ? "微信支付" : "支付宝" });
+  };
+
+  return (
+    <section className="compute-v2-custom-recharge" aria-labelledby="custom-recharge-title">
+      <header>
+        <div>
+          <h2 id="custom-recharge-title">自定义充值</h2>
+          <p>输入人民币金额，选择演示渠道并生成测试订单。</p>
+        </div>
+        <span>¥1-¥100,000</span>
+      </header>
+      <form onSubmit={submit} noValidate>
+        <label>
+          <span>充值金额</span>
+          <div><b>¥</b><input type="number" inputMode="decimal" min="1" max="100000" step="0.01" aria-label="自定义充值金额" value={amount} onChange={(event) => { setAmount(event.target.value); setDemoOrder(null); }} /></div>
+          <small>用于演示钱包充值与卡时换算，不会产生真实到账。</small>
+        </label>
+        <div className="compute-v2-custom-recharge-preview" aria-live="polite">
+          <span>基础换算参考</span>
+          <strong>{valid ? cardHours.toLocaleString("zh-CN", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : "--"} <small>卡时</small></strong>
+          <small>按 1 卡时 = ¥1.002 估算，演示订单不会增加卡时。</small>
+        </div>
+        <fieldset>
+          <legend>充值渠道</legend>
+          <div className="compute-v2-custom-recharge-channels">
+            <label className={channel === "wechat" ? "active" : ""}><input type="radio" name="demo-payment-channel" value="wechat" checked={channel === "wechat"} onChange={() => { setChannel("wechat"); setDemoOrder(null); }} /><span><strong>微信支付</strong><small>演示已开通</small></span></label>
+            <label className={channel === "alipay" ? "active" : ""}><input type="radio" name="demo-payment-channel" value="alipay" checked={channel === "alipay"} onChange={() => { setChannel("alipay"); setDemoOrder(null); }} /><span><strong>支付宝</strong><small>演示已开通</small></span></label>
+          </div>
+          <small>当前为演示渠道，不会实际扣款，也不会增加账户余额。</small>
+        </fieldset>
+        <button type="submit" disabled={!valid}>{session ? "生成演示订单" : "登录后充值"} <CaretRight /></button>
+        {!valid && amount !== "" && <p role="alert">请输入 ¥1-¥100,000 之间的金额。</p>}
+        {demoOrder && <div className="compute-v2-custom-recharge-result" role="status"><Check weight="bold" /><span><strong>演示订单已创建</strong><small>{demoOrder.channel} · ¥{demoOrder.amount.toFixed(2)}，未实际扣款</small></span></div>}
+      </form>
+    </section>
+  );
+}
+
 function ProductCard({
   product,
   onOpen,
@@ -658,7 +717,7 @@ function MineResourceDetail({
     setSelected(row);
   };
   const action = view === "support" ? { label: "继续联系客服", run: onOpenSupport } : view === "assets" || view === "ledger" ? { label: "打开账户中心", run: session ? onOpenAccount : onRequireLogin } : null;
-  return <div className="compute-v2-resource-detail"><header className="compute-v2-detail-head"><button type="button" onClick={onBack}><ArrowLeft /> 返回我的资源</button><div><small>我的资源</small><h1>{content.title}</h1></div><span>{content.badge}</span></header><section className="compute-v2-resource-hero"><i><Icon weight="fill" /></i><div><small>COD 算力服务</small><h2>{content.title}</h2><p>{content.description}</p></div><div className="compute-v2-resource-metrics">{content.metrics.map(([label, value]) => <span key={label}><small>{label}</small><strong>{value}</strong></span>)}</div></section><section className="compute-v2-resource-panel"><header><div><h2>详细信息</h2><p>{content.description}</p></div><span>{content.rows.length} 条记录</span></header><div className="compute-v2-resource-list">{content.rows.map((row) => <button type="button" onClick={() => openRecord(row)} key={row.title}><div><strong>{row.title}</strong><p>{row.meta}</p></div><b>{row.value}</b>{row.tone && <span className={`tone-${row.tone}`}>{row.tone === "active" ? "正常" : row.tone === "warning" ? "待处理" : "已记录"}</span>}<CaretRight /></button>)}</div></section>{selectedRow && <MarketModal title={selectedRow.title} description={content.title} onClose={() => setSelected(null)}><RecordDetail {...selectedRow} />{action && <div className="compute-v2-modal-actions"><button type="button" className="secondary" onClick={() => setSelected(null)}>关闭</button><button type="button" onClick={() => { setSelected(null); action.run(); }}>{action.label}</button></div>}</MarketModal>}</div>;
+  return <div className="compute-v2-resource-detail"><header className="compute-v2-detail-head"><button type="button" onClick={onBack}><ArrowLeft /> 返回我的资源</button><div><small>我的资源</small><h1>{content.title}</h1></div><span>{content.badge}</span></header><section className="compute-v2-resource-hero"><i><Icon weight="fill" /></i><div><small>COD 算力服务</small><h2>{content.title}</h2><p>{content.description}</p></div><div className="compute-v2-resource-metrics">{content.metrics.map(([label, value]) => <span key={label}><small>{label}</small><strong>{value}</strong></span>)}</div></section>{view === "purchase" && <CustomRecharge session={session} onRequireLogin={onRequireLogin} />}<section className="compute-v2-resource-panel"><header><div><h2>详细信息</h2><p>{content.description}</p></div><span>{content.rows.length} 条记录</span></header><div className="compute-v2-resource-list">{content.rows.map((row) => <button type="button" onClick={() => openRecord(row)} key={row.title}><div><strong>{row.title}</strong><p>{row.meta}</p></div><b>{row.value}</b>{row.tone && <span className={`tone-${row.tone}`}>{row.tone === "active" ? "正常" : row.tone === "warning" ? "待处理" : "已记录"}</span>}<CaretRight /></button>)}</div></section>{selectedRow && <MarketModal title={selectedRow.title} description={content.title} onClose={() => setSelected(null)}><RecordDetail {...selectedRow} />{action && <div className="compute-v2-modal-actions"><button type="button" className="secondary" onClick={() => setSelected(null)}>关闭</button><button type="button" onClick={() => { setSelected(null); action.run(); }}>{action.label}</button></div>}</MarketModal>}</div>;
 }
 
 function MinePage({ session, balanceCardHours, orderCounts, onRequireLogin, onOpenOperations, onOpenResource }: { session: CodSession | null; balanceCardHours: string | null; orderCounts: Record<Exclude<MineOrderStatus, "all">, number>; onRequireLogin: () => void; onOpenOperations: () => void; onOpenResource: (view: MineResourceView, status?: MineOrderStatus) => void }) {

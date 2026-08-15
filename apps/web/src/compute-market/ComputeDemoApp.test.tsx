@@ -354,6 +354,16 @@ describe("ComputeMarketApp", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /轻量卡时包/ }));
     expect(onOpenAccount).toHaveBeenCalledTimes(1);
+    const amount = screen.getByRole("spinbutton", { name: "自定义充值金额" });
+    fireEvent.change(amount, { target: { value: "100001" } });
+    expect(screen.getByRole("alert")).toHaveTextContent("¥1-¥100,000");
+    expect(screen.getByRole("button", { name: "生成演示订单" })).toBeDisabled();
+    fireEvent.change(amount, { target: { value: "321.50" } });
+    expect(screen.getByText("320.9", { exact: false })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("radio", { name: /支付宝/ }));
+    fireEvent.click(screen.getByRole("button", { name: "生成演示订单" }));
+    expect(screen.getByRole("status")).toHaveTextContent("支付宝 · ¥321.50，未实际扣款");
+    expect(onOpenAccount).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "返回我的资源" }));
     fireEvent.click(screen.getByRole("button", { name: /^专属客服/ }));
     fireEvent.click(screen.getByRole("button", { name: /H200 镜像环境确认/ }));

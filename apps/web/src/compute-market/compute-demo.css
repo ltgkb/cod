@@ -270,6 +270,42 @@
 .compute-v2-resource-metrics small, .compute-v2-resource-metrics strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .compute-v2-resource-metrics small { color: var(--compute-secondary); font-size: 8px; }
 .compute-v2-resource-metrics strong { margin-top: 7px; font: 13px "DM Mono", monospace; }
+.compute-v2-custom-recharge { overflow: hidden; background: var(--compute-surface); border: 1px solid var(--compute-border); border-radius: 12px; box-shadow: var(--compute-shadow); }
+.compute-v2-custom-recharge > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 68px; padding: 14px 18px; background: var(--compute-subtle); border-bottom: 1px solid var(--compute-border); }
+.compute-v2-custom-recharge > header h2 { margin: 0; font-size: 15px; }
+.compute-v2-custom-recharge > header p { margin: 4px 0 0; color: var(--compute-secondary); font-size: 9px; }
+.compute-v2-custom-recharge > header > span { color: var(--compute-accent); font: 10px "DM Mono", monospace; white-space: nowrap; }
+.compute-v2-custom-recharge > form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: end; gap: 16px 18px; padding: 18px; }
+.compute-v2-custom-recharge > form > label { display: grid; gap: 7px; }
+.compute-v2-custom-recharge > form > label > span, .compute-v2-custom-recharge fieldset legend { color: var(--compute-text); font-size: 10px; font-weight: 650; }
+.compute-v2-custom-recharge > form > label > div { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; overflow: hidden; min-height: 46px; background: var(--compute-surface); border: 1px solid var(--compute-border); border-radius: 8px; }
+.compute-v2-custom-recharge > form > label > div:focus-within { border-color: var(--compute-accent); box-shadow: 0 0 0 3px var(--compute-accent-soft); }
+.compute-v2-custom-recharge > form > label b { padding-left: 13px; color: var(--compute-secondary); font: 15px "DM Mono", monospace; }
+.compute-v2-custom-recharge input[type="number"] { width: 100%; min-width: 0; min-height: 44px; padding: 0 12px 0 7px; color: var(--compute-text); background: transparent; border: 0; outline: 0; font: 17px "DM Mono", monospace; }
+.compute-v2-custom-recharge > form > label > small, .compute-v2-custom-recharge fieldset > small, .compute-v2-custom-recharge-preview > small { color: var(--compute-secondary); font-size: 8px; line-height: 1.55; }
+.compute-v2-custom-recharge-preview { display: grid; align-content: center; min-height: 76px; padding: 12px 14px; background: var(--compute-accent-soft); border-radius: 8px; }
+.compute-v2-custom-recharge-preview > span { color: var(--compute-accent); font-size: 8px; }
+.compute-v2-custom-recharge-preview > strong { margin: 5px 0 3px; font: 18px "DM Mono", monospace; }
+.compute-v2-custom-recharge-preview > strong small { color: var(--compute-secondary); font: 9px "Work Sans", sans-serif; }
+.compute-v2-custom-recharge fieldset { grid-column: 1 / -1; min-width: 0; margin: 0; padding: 0; border: 0; }
+.compute-v2-custom-recharge-channels { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 8px 0 6px; }
+.compute-v2-custom-recharge-channels label { display: flex; align-items: center; gap: 9px; min-height: 48px; padding: 8px 11px; background: var(--compute-surface); border: 1px solid var(--compute-border); border-radius: 8px; cursor: pointer; }
+.compute-v2-custom-recharge-channels label.active { background: var(--compute-accent-soft); border-color: #8fc8c3; }
+.compute-v2-custom-recharge-channels input { accent-color: var(--compute-accent); }
+.compute-v2-custom-recharge-channels span, .compute-v2-custom-recharge-channels strong, .compute-v2-custom-recharge-channels small { display: block; }
+.compute-v2-custom-recharge-channels strong { font-size: 10px; }
+.compute-v2-custom-recharge-channels small { margin-top: 2px; color: var(--compute-accent); font-size: 8px; }
+.compute-v2-custom-recharge > form > button { grid-column: 2; display: flex; align-items: center; justify-content: center; justify-self: end; gap: 5px; min-width: 150px; min-height: 42px; padding: 0 16px; color: #fff; background: var(--compute-accent); border: 0; border-radius: 8px; font-size: 10px; font-weight: 700; }
+.compute-v2-custom-recharge > form > button:hover { background: var(--compute-accent-hover); }
+.compute-v2-custom-recharge > form > button:active { transform: translateY(1px); }
+.compute-v2-custom-recharge > form > button:disabled { color: var(--compute-secondary); background: var(--compute-subtle); border: 1px solid var(--compute-border); cursor: not-allowed; }
+.compute-v2-custom-recharge > form > button svg { width: 14px; }
+.compute-v2-custom-recharge > form > p { grid-column: 1 / -1; margin: -8px 0 0; color: #b62832; font-size: 9px; }
+.compute-v2-custom-recharge-result { grid-column: 1 / -1; display: flex; align-items: center; gap: 9px; padding: 11px 13px; color: var(--compute-accent); background: var(--compute-accent-soft); border-radius: 8px; }
+.compute-v2-custom-recharge-result > svg { flex: 0 0 auto; width: 18px; }
+.compute-v2-custom-recharge-result strong, .compute-v2-custom-recharge-result small { display: block; }
+.compute-v2-custom-recharge-result strong { font-size: 10px; }
+.compute-v2-custom-recharge-result small { margin-top: 3px; color: var(--compute-secondary); font-size: 8px; }
 .compute-v2-resource-panel { overflow: hidden; background: var(--compute-surface); border: 1px solid var(--compute-border); border-radius: 12px; box-shadow: var(--compute-shadow); }
 .compute-v2-resource-panel > header { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-height: 68px; padding: 14px 18px; background: var(--compute-subtle); border-bottom: 1px solid var(--compute-border); }
 .compute-v2-resource-panel > header h2 { margin: 0; font-size: 15px; }
@@ -530,6 +566,10 @@
   .compute-v2-resource-metrics { grid-column: 1 / -1; }
   .compute-v2-resource-metrics > span { min-height: 66px; padding: 9px; }
   .compute-v2-resource-metrics strong { font-size: 11px; }
+  .compute-v2-custom-recharge > header { padding: 12px 14px; }
+  .compute-v2-custom-recharge > form { grid-template-columns: 1fr; gap: 13px; padding: 14px; }
+  .compute-v2-custom-recharge fieldset, .compute-v2-custom-recharge > form > button, .compute-v2-custom-recharge > form > p, .compute-v2-custom-recharge-result { grid-column: 1; }
+  .compute-v2-custom-recharge > form > button { justify-self: stretch; width: 100%; }
   .compute-v2-resource-panel > header { padding: 12px 14px; }
   .compute-v2-resource-list > button { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; min-height: 76px; padding: 12px 14px; }
   .compute-v2-resource-list > button > span { grid-column: 2; }
