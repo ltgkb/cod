@@ -106,7 +106,7 @@
 .compute-v2-spark-visual > span { position: absolute; top: 18px; left: 18px; padding: 6px 9px; color: #fff; background: var(--compute-accent); border-radius: 6px; font-size: 9px; font-weight: 700; }
 .compute-v2-spark-content { display: flex; min-width: 0; padding: 25px; flex-direction: column; }
 .compute-v2-spark-content > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.compute-v2-spark-content > header span { color: var(--compute-accent); font-size: 10px; font-weight: 700; letter-spacing: .03em; }
+.compute-v2-spark-content > header span { color: var(--compute-accent); font-size: 16px; font-weight: 750; line-height: 1.25; letter-spacing: .01em; }
 .compute-v2-spark-content > header strong { padding: 5px 8px; color: #b62832; background: #fff0f1; border-radius: 5px; font-size: 9px; }
 .compute-v2-spark-content h2 { margin: 15px 0 7px; font-size: 25px; letter-spacing: -.035em; }
 .compute-v2-spark-content > p { max-width: 620px; margin: 0; color: var(--compute-secondary); font-size: 10px; line-height: 1.7; }
@@ -475,6 +475,7 @@
   .compute-v2-spark-visual img { max-height: 178px; }
   .compute-v2-spark-visual > span { top: 11px; left: 11px; }
   .compute-v2-spark-content { padding: 17px 15px; }
+  .compute-v2-spark-content > header span { font-size: 14px; }
   .compute-v2-spark-content h2 { margin-top: 12px; font-size: 20px; }
   .compute-v2-spark-content > dl { grid-template-columns: 1fr; }
   .compute-v2-spark-content > dl div { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 10px; }
