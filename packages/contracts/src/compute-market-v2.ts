@@ -75,6 +75,9 @@ export interface ComputeHardwareSpecs {
   driverVersion: string;
   cudaVersion: string;
   networkLabel: string;
+  storageLabel?: string;
+  gpuInterconnectLabel?: string;
+  powerLabel?: string;
 }
 
 export interface ComputeImageOption {
@@ -84,6 +87,19 @@ export interface ComputeImageOption {
   frameworkVersion: string;
   pythonVersion: string;
   cudaVersion: string;
+  operatingSystem?: string;
+  containerRuntime?: string;
+  includedSoftware?: string[];
+}
+
+export interface ComputePriceReference {
+  currency: 'USD';
+  unit: 'gpu_hour';
+  low: number;
+  high: number;
+  observedAt: string;
+  basis: string;
+  sources: Array<{ provider: string; url: string }>;
 }
 
 export interface ComputeSkuV2 {
@@ -119,6 +135,7 @@ export interface ComputeOfferV2 {
   media: ComputeOfferMedia[];
   skus: ComputeSkuV2[];
   availability: { level: ComputeAvailabilityLevel; label: string };
+  priceReference?: ComputePriceReference;
   updatedAt: string;
 }
 
@@ -230,6 +247,21 @@ export interface HostingDeviceInput {
   model: string;
   gpuModel: string;
   gpuCount: number;
+  gpuMemoryGb?: number | null;
+  deliveryMode?: ComputeDeliveryMode;
+  gpuInterconnectLabel?: string;
+  cpuModel?: string;
+  cpuCores?: number | null;
+  ramGb?: number | null;
+  systemDiskGb?: number | null;
+  dataDiskGb?: number | null;
+  operatingSystem?: string;
+  driverVersion?: string;
+  cudaVersion?: string;
+  frameworks?: string[];
+  networkLabel?: string;
+  askingPriceCnyPerGpuHour?: number | null;
+  minimumRentalHours?: number | null;
   serialLastFour: string;
   machineSpecs: string;
   ownershipProofStatus: 'ready' | 'pending';

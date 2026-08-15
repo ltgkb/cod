@@ -40,6 +40,9 @@ describe("ComputeMarketApp", () => {
     expect(screen.getByText("热门算力卡")).toBeInTheDocument();
     expect(screen.getByText("NVIDIA B300 SXM")).toBeInTheDocument();
     expect(screen.getByText("NVIDIA H200 SXM")).toBeInTheDocument();
+    expect(screen.getByText("NVIDIA A100 SXM")).toBeInTheDocument();
+    expect(screen.getAllByText(/外部公开参考/)).toHaveLength(7);
+    expect(screen.getAllByText("裸金属整机").length).toBeGreaterThan(0);
     expect(screen.getByText("注册后领取")).toBeInTheDocument();
     expect(screen.queryByText("1,286.5")).not.toBeInTheDocument();
   });
@@ -59,6 +62,10 @@ describe("ComputeMarketApp", () => {
     fireEvent.click(screen.getByRole("button", { name: "查看 B300 SXM 超大显存训练卡" }));
     expect(screen.getByRole("heading", { name: "配置订单" })).toBeInTheDocument();
     expect(screen.getByText("44.0")).toBeInTheDocument();
+    expect(screen.getByText("外部公开参考价")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "RunPod" })).toHaveAttribute("href", "https://www.runpod.io/pricing");
+    expect(screen.getByText("裸金属整机")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /PyTorch 2.8/ })).toBeInTheDocument();
     expect(screen.getAllByText("1,286.5").length).toBeGreaterThan(0);
     expect(window.location.search).toContain("offer=b300-sxm-288");
 
@@ -106,6 +113,9 @@ describe("ComputeMarketApp", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "开始托管申请" }));
     const dialog = screen.getByRole("dialog", { name: "提交托管申请" });
+    expect(within(dialog).getByLabelText("交付形态")).toHaveValue("bare-metal");
+    expect(within(dialog).getByLabelText("PyTorch")).toBeChecked();
+    expect(within(dialog).getByLabelText("期望价格")).toHaveAttribute("placeholder", "元 / GPU 小时");
     fireEvent.change(within(dialog).getByPlaceholderText("请输入 11 位手机号"), { target: { value: "13900000000" } });
     fireEvent.change(within(dialog).getByPlaceholderText("例如：成都"), { target: { value: "成都" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "提交申请" }));

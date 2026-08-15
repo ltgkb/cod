@@ -16,6 +16,7 @@ const offer: ComputeOfferV2 = {
   gpu: { model: 'RTX 5090', memoryGb: 32, countPerUnit: 1 }, specs: { cpuModel: 'AMD EPYC', cpuCores: 16, ramGb: 128, systemDiskGb: 100, dataDiskGb: 500, driverVersion: '570.133', cudaVersion: '12.8', networkLabel: '高可用网络' },
   tags: ['生成式AI', '高性能计算'], media: [{ id: 'media-1', url: '/compute/gpu-accelerator.webp', alt: '无品牌专业 GPU 加速卡商品图' }],
   skus: [{ id: 'sku-1', offerId: 'offer-1', deliveryMode: 'container', period: 'hour', minimumUnits: 1, maximumUnits: 8, priceCardHoursMilli: 64_600, compareAtPriceCardHoursMilli: 68_000, inventoryRevision: 1, imageOptions: [{ id: 'image-1', label: 'PyTorch 2.4.1 · Python 3.11', framework: 'PyTorch', frameworkVersion: '2.4.1', pythonVersion: '3.11', cudaVersion: '12.8' }] }],
+  priceReference: { currency: 'USD', unit: 'gpu_hour', low: 1.58, high: 1.58, observedAt: '2026-08-15', basis: 'RunPod 公开价格', sources: [{ provider: 'RunPod', url: 'https://www.runpod.io/pricing' }] },
   availability: { level: 'quote', label: '询价' }, updatedAt: '2026-08-13T00:00:00.000Z',
 };
 
@@ -40,8 +41,8 @@ describe('ComputeApp', () => {
     expect(await screen.findByText('高性能算力，按需透明匹配')).toBeInTheDocument();
     expect(screen.getByText('热门算力卡')).toBeInTheDocument(); expect(screen.getByText('精选高性能计算资源')).toBeInTheDocument();
     const card = screen.getByRole('link', { name: /查看 RTX 5090/ });
-    expect(within(card).getByText('64.60')).toBeInTheDocument(); expect(within(card).getByText('AMD EPYC')).toBeInTheDocument(); expect(within(card).getByText('询价')).toBeInTheDocument();
-    expect(within(card).getByText('卡时/小时')).toBeInTheDocument();
+    expect(within(card).getByText('64.60')).toBeInTheDocument(); expect(within(card).getByText('容器实例')).toBeInTheDocument(); expect(within(card).getByText('PyTorch 2.4.1')).toBeInTheDocument(); expect(within(card).getByText('询价')).toBeInTheDocument();
+    expect(within(card).getByText('卡时/小时')).toBeInTheDocument(); expect(within(card).getByText('外部公开参考 $1.58 / GPU 小时')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '排行榜' })).not.toBeInTheDocument();
   });
 
@@ -56,18 +57,27 @@ describe('ComputeApp', () => {
     const onRequireLogin = vi.fn(); mockFetch(); render(<ComputeApp {...props} initialPath="/compute/offers/offer-1" onRequireLogin={onRequireLogin} />);
     expect(await screen.findByRole('button', { name: '提交租赁需求' })).toBeInTheDocument();
     expect(screen.getByText('人工核验库存后报价')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '外部公开价格参考' })).toBeInTheDocument(); expect(screen.getByRole('link', { name: /RunPod/ })).toHaveAttribute('href', 'https://www.runpod.io/pricing');
     fireEvent.click(screen.getByRole('button', { name: '提交租赁需求' }));
     expect(onRequireLogin).toHaveBeenCalledWith(expect.stringMatching(/^\/compute\/checkout\/sku-1\?/));
     expect(screen.queryByText('立即购买')).not.toBeInTheDocument();
   });
 
   it('uses a four-step hosting form and keeps the draft locally', async () => {
+    const stored = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((key: string) => stored.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => stored.set(key, String(value))),
+      removeItem: vi.fn((key: string) => stored.delete(key)),
+      clear: vi.fn(() => stored.clear()),
+    });
     mockFetch(); const session = { token: 'token', account: { userId: 'user', displayName: '测试用户', balanceCents: 0, currency: 'CNY' as const, plan: 'developer' as const, role: 'member' as const, billingExempt: false } };
     render(<ComputeApp {...props} session={session} initialPath="/compute/hosting/apply" />);
     expect(await screen.findByRole('heading', { name: '主体与联系方式' })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('联系人'), { target: { value: '设备负责人' } }); fireEvent.change(screen.getByLabelText('联系电话'), { target: { value: '13800001111' } });
     fireEvent.click(screen.getByRole('button', { name: '下一步' }));
-    expect(screen.getByRole('heading', { name: '设备清单' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '设备与可售配置' })).toBeInTheDocument();
+    expect(screen.getByLabelText('PyTorch')).toBeChecked(); expect(screen.getByLabelText('交付形态')).toHaveValue('bare_metal');
     await waitFor(() => expect(localStorage.getItem('cod.compute.hosting-draft.v2')).toContain('设备负责人'));
   });
 

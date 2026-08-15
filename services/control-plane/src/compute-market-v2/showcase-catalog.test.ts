@@ -12,10 +12,11 @@ describe('compute showcase catalog', () => {
       hosting: false,
       assets: false,
     });
-    expect(new Set(computeShowcaseOffers.map((offer) => offer.gpu.model))).toEqual(new Set(['B300', 'H100', 'L40S', 'RTX 5090']));
+    expect(new Set(computeShowcaseOffers.map((offer) => offer.gpu.model))).toEqual(new Set(['B300', 'H200', 'H100', 'A100', 'L40S', 'RTX 4090', 'RTX 5090']));
 
     expect(catalog.listOffers({ gpuSeries: 'H100' }).items).toHaveLength(4);
-    for (const series of ['RTX', 'L40S', 'B300']) expect(catalog.listOffers({ gpuSeries: series }).items).toHaveLength(1);
+    for (const series of ['H200', 'A100', 'L40S', 'B300']) expect(catalog.listOffers({ gpuSeries: series }).items).toHaveLength(1);
+    expect(catalog.listOffers({ gpuSeries: 'RTX' }).items).toHaveLength(2);
     for (const offer of catalog.listOffers({}).items) {
       expect(offer).toMatchObject({
         purchaseMode: 'instant',
@@ -24,6 +25,8 @@ describe('compute showcase catalog', () => {
       });
       expect(offer.tags).not.toContain('方案展示');
       expect(offer.skus[0]).toMatchObject({ period: 'hour', compareAtPriceCardHoursMilli: null, priceCardHoursMilli: expect.any(Number) });
+      expect(offer.skus[0]?.imageOptions.map((image) => image.framework)).toContain('纯净环境');
+      expect(offer.priceReference).toMatchObject({ currency: 'USD', unit: 'gpu_hour', observedAt: '2026-08-15' });
     }
 
     const h100 = catalog.listOffers({ gpuSeries: 'H100', sort: 'price_asc' }).items;
@@ -42,10 +45,10 @@ describe('compute showcase catalog', () => {
       { cards: 8, cores: 252, ramGb: 1_440, systemDiskGb: 100, dataDiskGb: 6_500, network: '10G', price: 160_000 },
     ]);
 
-    expect(Object.fromEntries(['B300', 'L40S', 'RTX 5090'].map((series) => {
+    expect(Object.fromEntries(['B300', 'H200', 'A100', 'L40S', 'RTX 4090', 'RTX 5090'].map((series) => {
       const offer = catalog.listOffers({ gpuSeries: series }).items[0];
       return [series, offer.skus[0]?.priceCardHoursMilli];
-    }))).toEqual({ B300: 44_000, L40S: 7_700, 'RTX 5090': 7_000 });
+    }))).toEqual({ B300: 44_000, H200: 26_000, A100: 13_600, L40S: 7_700, 'RTX 4090': 4_800, 'RTX 5090': 7_000 });
   });
 
   it('covers every visible use case and delivery category', () => {

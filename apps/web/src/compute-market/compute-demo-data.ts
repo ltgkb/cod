@@ -15,8 +15,19 @@ export interface ComputeDemoProduct {
     memory: string;
     system: string;
     cuda: string;
+    delivery: string;
+    storage: string;
+    network: string;
+    interconnect: string;
   };
   images: Array<{ id: string; name: string; detail: string }>;
+  priceReference: {
+    low: number;
+    high: number;
+    basis: string;
+    observedAt: string;
+    sources: Array<{ provider: string; url: string }>;
+  };
 }
 
 export const computeDemoProducts: ComputeDemoProduct[] = [
@@ -37,11 +48,16 @@ export const computeDemoProducts: ComputeDemoProduct[] = [
       memory: "768GB DDR5",
       system: "Ubuntu 24.04",
       cuda: "CUDA 13.0",
+      delivery: "裸金属整机",
+      storage: "本地 NVMe，容量交付前确认",
+      network: "100G / IB 可选",
+      interconnect: "NVLink / NVSwitch",
     },
     images: [
       { id: "pytorch", name: "PyTorch 2.8", detail: "Python 3.12 · CUDA 13.0" },
       { id: "vllm", name: "vLLM 0.10", detail: "推理环境 · CUDA 13.0" },
     ],
+    priceReference: { low: 9.98, high: 9.98, basis: "RunPod B300 Serverless 公开按小时价格，裸金属整机单独询价", observedAt: "2026-08-15", sources: [{ provider: "RunPod", url: "https://www.runpod.io/pricing" }] },
   },
   {
     id: "h200-sxm-141",
@@ -60,12 +76,17 @@ export const computeDemoProducts: ComputeDemoProduct[] = [
       memory: "512GB DDR5",
       system: "Ubuntu 22.04",
       cuda: "CUDA 12.4",
+      delivery: "裸金属 / 独占实例",
+      storage: "2TB 企业级 NVMe",
+      network: "100G 以太网 / IB 可选",
+      interconnect: "SXM · NVLink 900 GB/s",
     },
     images: [
       { id: "pytorch", name: "PyTorch 2.5", detail: "Python 3.11 · CUDA 12.4" },
       { id: "vllm", name: "vLLM 0.7", detail: "推理环境 · CUDA 12.4" },
       { id: "blank", name: "纯净镜像", detail: "Ubuntu 22.04 · CUDA 12.4" },
     ],
+    priceReference: { low: 4.98, high: 5.93, basis: "AWS Capacity Blocks 与 RunPod H200 公开价格", observedAt: "2026-08-15", sources: [{ provider: "AWS", url: "https://aws.amazon.com/ec2/capacityblocks/pricing/" }, { provider: "RunPod", url: "https://www.runpod.io/pricing" }] },
   },
   {
     id: "h100-sxm-80",
@@ -84,34 +105,44 @@ export const computeDemoProducts: ComputeDemoProduct[] = [
       memory: "384GB DDR5",
       system: "Ubuntu 22.04",
       cuda: "CUDA 12.2",
+      delivery: "独占虚拟机 / 裸金属",
+      storage: "1TB 企业级 NVMe",
+      network: "100Gb 网络",
+      interconnect: "SXM · NVLink",
     },
     images: [
       { id: "pytorch", name: "PyTorch 2.4", detail: "Python 3.10 · CUDA 12.2" },
       { id: "tensorflow", name: "TensorFlow 2.17", detail: "Python 3.10 · CUDA 12.2" },
     ],
+    priceReference: { low: 3.93, high: 4.55, basis: "AWS、Lambda 与 RunPod H100 公开价格", observedAt: "2026-08-15", sources: [{ provider: "AWS", url: "https://aws.amazon.com/ec2/capacityblocks/pricing/" }, { provider: "Lambda", url: "https://lambda.ai/instances" }, { provider: "RunPod", url: "https://www.runpod.io/pricing" }] },
   },
   {
-    id: "a800-pcie-80",
-    title: "A800 PCIe 推理实例",
-    gpuModel: "NVIDIA A800 PCIe",
+    id: "a100-sxm-80",
+    title: "A100 80GB 训练与推理实例",
+    gpuModel: "NVIDIA A100 SXM",
     gpuMemory: "80GB HBM2e",
-    price: 12.0,
+    price: 13.6,
     image: "/compute/gpu-a800.svg",
     imageTone: "graphite",
     badge: "性价比",
     region: "西南 C 区",
     availability: "现货 52 卡 · 支持弹性扩容",
-    tags: ["在线推理", "弹性扩容", "按量计费"],
+    tags: ["模型微调", "在线推理", "按量计费"],
     specs: {
       cpu: "Intel 8358 · 32 核",
       memory: "256GB DDR4",
       system: "Ubuntu 20.04",
       cuda: "CUDA 11.8",
+      delivery: "独占虚拟机",
+      storage: "1TB NVMe SSD",
+      network: "10G，集群网络另询",
+      interconnect: "SXM / PCIe 以节点为准",
     },
     images: [
       { id: "vllm", name: "vLLM 0.6", detail: "Python 3.10 · CUDA 11.8" },
       { id: "blank", name: "纯净镜像", detail: "Ubuntu 20.04 · CUDA 11.8" },
     ],
+    priceReference: { low: 2.72, high: 2.79, basis: "Lambda 与 RunPod A100 80GB 公开价格", observedAt: "2026-08-15", sources: [{ provider: "Lambda", url: "https://lambda.ai/instances" }, { provider: "RunPod", url: "https://www.runpod.io/pricing" }] },
   },
   {
     id: "4090-24",
@@ -130,11 +161,16 @@ export const computeDemoProducts: ComputeDemoProduct[] = [
       memory: "128GB DDR5",
       system: "Ubuntu 22.04",
       cuda: "CUDA 12.1",
+      delivery: "独占容器 / 裸金属",
+      storage: "500GB NVMe SSD",
+      network: "1G / 10G 可选",
+      interconnect: "PCIe 4.0",
     },
     images: [
       { id: "comfy", name: "ComfyUI", detail: "常用插件预装 · CUDA 12.1" },
       { id: "pytorch", name: "PyTorch 2.3", detail: "Python 3.10 · CUDA 12.1" },
     ],
+    priceReference: { low: 1.1, high: 1.1, basis: "RunPod RTX 4090 公开按小时价格", observedAt: "2026-08-15", sources: [{ provider: "RunPod", url: "https://www.runpod.io/pricing" }] },
   },
   {
     id: "l40s-48",
@@ -153,11 +189,16 @@ export const computeDemoProducts: ComputeDemoProduct[] = [
       memory: "256GB DDR5",
       system: "Ubuntu 22.04",
       cuda: "CUDA 12.8",
+      delivery: "独占虚拟机 / 容器",
+      storage: "1TB NVMe SSD",
+      network: "10G",
+      interconnect: "PCIe 4.0",
     },
     images: [
       { id: "vllm", name: "vLLM 0.9", detail: "Python 3.11 · CUDA 12.8" },
       { id: "comfy", name: "ComfyUI", detail: "常用插件预装 · CUDA 12.8" },
     ],
+    priceReference: { low: 1.75, high: 1.75, basis: "RunPod L40S 公开按小时价格", observedAt: "2026-08-15", sources: [{ provider: "RunPod", url: "https://www.runpod.io/pricing" }] },
   },
   {
     id: "rtx-5090-32",
@@ -176,11 +217,16 @@ export const computeDemoProducts: ComputeDemoProduct[] = [
       memory: "128GB DDR5",
       system: "Ubuntu 24.04",
       cuda: "CUDA 12.8",
+      delivery: "独占容器 / 裸金属",
+      storage: "1TB NVMe SSD",
+      network: "1G / 10G 可选",
+      interconnect: "PCIe 5.0",
     },
     images: [
       { id: "comfy", name: "ComfyUI", detail: "视频与图像工作流 · CUDA 12.8" },
       { id: "pytorch", name: "PyTorch 2.7", detail: "Python 3.11 · CUDA 12.8" },
     ],
+    priceReference: { low: 1.58, high: 1.58, basis: "RunPod RTX 5090 公开按小时价格", observedAt: "2026-08-15", sources: [{ provider: "RunPod", url: "https://www.runpod.io/pricing" }] },
   },
 ];
 

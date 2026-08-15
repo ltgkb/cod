@@ -409,12 +409,13 @@ describe('control-plane production rules', () => {
     expect(discoveryHome.quickActions).toEqual(['offers']);
     expect(discoveryHome.featuredOffers.map((offer) => offer.title)).toEqual([
       'B300 / 288 GB',
-      '1× H100 / 80 GB',
-      '2× H100 / 80 GB',
-      '4× H100 / 80 GB',
-      '8× H100 / 80 GB',
+      'H200 SXM / 141 GB',
+      'A100 SXM / 80 GB',
+      'RTX 4090 / 24 GB',
       'L40S / 48 GB',
       'RTX 5090 / 32 GB',
+      '1× H100 / 80 GB',
+      '2× H100 / 80 GB',
     ]);
     expect(discoveryHome.featuredOffers.every((offer) => offer.providerName === 'COD 认证算力节点' && offer.skus[0]?.period === 'hour' && Number(offer.skus[0]?.priceCardHoursMilli) > 0)).toBe(true);
 

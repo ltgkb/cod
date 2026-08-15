@@ -90,6 +90,14 @@ export function validateHostingDraft(input: HostingApplicationDraft, submitting 
       brand: device.brand?.trim() ?? '',
       model: device.model?.trim() ?? '',
       gpuModel: device.gpuModel?.trim() ?? '',
+      deliveryMode: device.deliveryMode ?? 'bare_metal',
+      gpuInterconnectLabel: device.gpuInterconnectLabel?.trim() ?? '',
+      cpuModel: device.cpuModel?.trim() ?? '',
+      operatingSystem: device.operatingSystem?.trim() ?? '',
+      driverVersion: device.driverVersion?.trim() ?? '',
+      cudaVersion: device.cudaVersion?.trim() ?? '',
+      frameworks: Array.isArray(device.frameworks) ? device.frameworks.map((item) => item.trim()).filter(Boolean).slice(0, 12) : [],
+      networkLabel: device.networkLabel?.trim() ?? '',
       serialLastFour: device.serialLastFour?.trim().toUpperCase() ?? '',
       machineSpecs: device.machineSpecs?.trim() ?? '',
     })) : [],
@@ -99,6 +107,10 @@ export function validateHostingDraft(input: HostingApplicationDraft, submitting 
   if (normalized.devices.length > 100) throw new HttpError('单次最多登记 100 台设备', 400, 'too_many_devices');
   for (const device of normalized.devices) {
     if (!Number.isInteger(device.gpuCount) || device.gpuCount < 1 || device.gpuCount > 64) throw new HttpError('GPU 数量无效', 400, 'invalid_gpu_count');
+    for (const value of [device.gpuMemoryGb, device.cpuCores, device.ramGb, device.systemDiskGb, device.dataDiskGb, device.minimumRentalHours]) {
+      if (value !== null && value !== undefined && (!Number.isFinite(value) || value < 0)) throw new HttpError('设备规格数值无效', 400, 'invalid_device_specs');
+    }
+    if (device.askingPriceCnyPerGpuHour !== null && device.askingPriceCnyPerGpuHour !== undefined && (!Number.isFinite(device.askingPriceCnyPerGpuHour) || device.askingPriceCnyPerGpuHour < 0)) throw new HttpError('参考报价无效', 400, 'invalid_device_price');
     if (device.serialLastFour && !/^[A-Z0-9]{4}$/.test(device.serialLastFour)) throw new HttpError('序列号后四位无效', 400, 'invalid_serial_suffix');
   }
   if (submitting) {
