@@ -35,8 +35,15 @@ test('workspace entry, manifest, and service worker share the /app/ scope', asyn
 });
 
 test('compute entry keeps deep-link assets rooted at the public origin', async () => {
-  const compute = await read('../compute/index.html');
+  const [compute, showcase, nginx] = await Promise.all([
+    read('../compute/index.html'),
+    read('../compute/showcase/index.html'),
+    read('../../../deploy/cod.nginx.conf'),
+  ]);
   assert.match(compute, /<base href="\/" \/>/);
   assert.match(compute, /src="\/src\/main\.tsx"/);
   assert.match(compute, /<title>COD · 算力市场<\/title>/);
+  assert.match(showcase, /<base href="\/" \/>/);
+  assert.match(showcase, /<title>COD · 算力产品展示<\/title>/);
+  assert.match(nginx, /location = \/compute\/showcase\/\s*\{[\s\S]*?try_files \/compute\/showcase\/index\.html =404;/);
 });
