@@ -45,5 +45,6 @@ test('compute entry keeps deep-link assets rooted at the public origin', async (
   assert.match(compute, /<title>COD · 算力市场<\/title>/);
   assert.match(showcase, /<base href="\/" \/>/);
   assert.match(showcase, /<title>COD · 算力产品展示<\/title>/);
+  assert.match(nginx, /location = \/compute\/showcase\s*\{\s*return 308 https:\/\/\$host\/compute\/showcase\/;/);
   assert.match(nginx, /location = \/compute\/showcase\/\s*\{[\s\S]*?try_files \/compute\/showcase\/index\.html =404;/);
 });
