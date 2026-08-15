@@ -20,6 +20,7 @@ import { ComputeCatalogService, defaultComputeCapabilities } from './compute-mar
 import { createComputeReviewCatalog } from './compute-market-v2/review-catalog.js';
 import { createComputeShowcaseCatalog } from './compute-market-v2/showcase-catalog.js';
 import { OfficialPaymentService } from './payments.js';
+import { OidcClient } from './oidc.js';
 import { defaultPinnedFetcher, maskRegistrationDestination, normalizeRegistrationEmail, normalizeRegistrationPhone, RegistrationVerification, registrationDeliveryFromConfig, validateRegistrationChallengeId, validateRegistrationCode, type PinnedFetcher, type RegistrationDelivery, type RegistrationEndpointValidator } from './registration-verification.js';
 
 export interface ControlPlaneOptions {
@@ -31,6 +32,7 @@ export interface ControlPlaneOptions {
   registrationEndpointValidator?: RegistrationEndpointValidator;
   now?: () => Date;
   reservationKeepaliveIntervalMs?: number;
+  oidcFetcher?: typeof fetch;
 }
 
 const validStatuses = new Set<TaskStatus>(['draft', 'running', 'waiting', 'complete', 'failed', 'cancelled']);
@@ -38,9 +40,9 @@ const uuidPattern=/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i;
 const userIdFor = (email: string) => `usr_${createHash('sha256').update(email).digest('hex').slice(0, 20)}`;
 const tenantIdFor = (email: string) => `tenant_${email.split('@')[1]?.replace(/[^a-z0-9]+/g, '_') ?? 'unknown'}`;
 
-async function currentPrincipal(database: CodDatabase, session: { sub: string; tenantId: string; email: string }): Promise<Principal | null> {
+async function currentPrincipal(database: CodDatabase, session: { sub: string; tenantId: string; email: string; authMethod?: 'password' | 'oidc' }): Promise<Principal | null> {
   const identity = await database.findIdentityByEmail(session.email);
-  if (!identity?.passwordHash) return null;
+  if (!identity || (session.authMethod !== 'oidc' && !identity.passwordHash)) return null;
   const principal = identity.principal;
   if (
     principal.userId !== session.sub
@@ -379,8 +381,9 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
   const registrationDelivery = options.registrationDelivery ?? registrationDeliveryFromConfig(config.registrationVerification, registrationPinnedFetcher,options.registrationEndpointValidator);
   const registration = new RegistrationVerification(config.registrationVerification, registrationDelivery, registrationPinnedFetcher,options.registrationEndpointValidator);
   const now = options.now ?? (() => new Date());
+  const oidc = config.oidc ? new OidcClient(config.oidc, options.oidcFetcher, () => now().getTime()) : null;
   const requireRegistration = () => {
-    if (!config.registrationEnabled || (config.registrationVerificationRequired && !registration.available)) throw new HttpError('账号注册暂未开放', 503, 'registration_unavailable');
+    if (config.authMode === 'oidc' || !config.registrationEnabled || (config.registrationVerificationRequired && !registration.available)) throw new HttpError('账号注册暂未开放', 503, 'registration_unavailable');
   };
   const requireVerifiedRegistration = () => {
     requireRegistration();
@@ -445,7 +448,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       if (request.method === 'GET' && url.pathname === '/api/capabilities') {
         const legacyIdentity=config.developmentLoginEnabled&&config.pilotAccessCodeHash?await database.findIdentityByEmail(config.developmentLoginEmail):null;
         return sendJson(response, 200, {
-        authentication: { mode: 'password', registrationEnabled: config.registrationEnabled&&(!config.registrationVerificationRequired||registration.available), legacyMigrationEnabled: Boolean(legacyIdentity&&!legacyIdentity.passwordHash), inviteCodeOptional: !config.inviteCodeRequired, inviteCodeRequired: config.inviteCodeRequired, accessCodeRequired: false, verificationMethods: config.registrationVerificationRequired?['email_otp','sms_otp']:[], turnstileSiteKey: config.registrationVerificationRequired?config.registrationVerification.turnstileSiteKey:null, registrationWebOnly: config.registrationVerificationRequired, publicRegistrationUrl: config.publicRegistrationUrl },
+        authentication: { mode: config.authMode, oidcLoginUrl: oidc ? '/api/auth/oidc/start?returnTo=%2Fapp%2F' : null, registrationEnabled: config.authMode !== 'oidc'&&config.registrationEnabled&&(!config.registrationVerificationRequired||registration.available), legacyMigrationEnabled: config.authMode !== 'oidc'&&Boolean(legacyIdentity&&!legacyIdentity.passwordHash), inviteCodeOptional: !config.inviteCodeRequired, inviteCodeRequired: config.inviteCodeRequired, accessCodeRequired: false, verificationMethods: config.registrationVerificationRequired?['email_otp','sms_otp']:[], turnstileSiteKey: config.registrationVerificationRequired?config.registrationVerification.turnstileSiteKey:null, registrationWebOnly: config.registrationVerificationRequired, publicRegistrationUrl: config.publicRegistrationUrl },
         ai: { mode: await gateway.mode(), streaming: true, streamingMode: 'buffered-sse' },
         knowledge: { mode: knowledge.mode() },
         payments: {
@@ -463,7 +466,40 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
       }
       if (request.method === 'GET' && url.pathname === '/api/model-catalog') return sendJson(response, 200, publicModelCatalog(await gateway.listSources()));
       if (request.method === 'GET' && url.pathname === '/api/compute/offers') return sendJson(response, 200, computeOfferCatalog);
+      if (request.method === 'GET' && url.pathname === '/api/auth/oidc/start') {
+        if (!oidc) throw new HttpError('统一身份登录暂未配置', 503, 'oidc_unavailable');
+        const authorizationUrl = await oidc.begin(url.searchParams.get('returnTo') ?? '/app/');
+        response.writeHead(302, { location: authorizationUrl, 'cache-control': 'no-store' });response.end();return;
+      }
+      if (request.method === 'GET' && (url.pathname === '/api/auth/oidc/callback' || url.pathname === '/api/auth/kai/callback')) {
+        if (!oidc || !config.oidc) throw new HttpError('统一身份登录暂未配置', 503, 'oidc_unavailable');
+        if (url.searchParams.has('error')) { response.writeHead(302, { location: '/app/?auth=oidc_error', 'cache-control': 'no-store' });response.end();return; }
+        const completed = await oidc.complete(url.searchParams.get('state') ?? '', url.searchParams.get('code') ?? '');
+        const registered = await database.registerExternalIdentity({
+          issuer: completed.identity.issuer,
+          subject: completed.identity.subject,
+          email: completed.identity.email,
+          displayName: completed.identity.name,
+          tenantId: config.oidc.tenantId,
+          userId: `usr_${createHash('sha256').update(`${completed.identity.issuer}\0${completed.identity.subject}`).digest('hex').slice(0,20)}`,
+          now: now(),
+        });
+        const principal = registered.identity.principal;
+        await database.audit(principal, 'auth.oidc_login', 'session', null);
+        const token = createSessionToken({ sub: principal.userId, tenantId: principal.tenantId, email: principal.email, role: principal.role, authMethod: 'oidc' }, config.sessionSecret);
+        const exchangeCode = oidc.issueExchangeTicket(token);
+        const destination = new URL(completed.returnTo, 'https://cod.kai.com');
+        destination.searchParams.set('auth', 'oidc');destination.searchParams.set('code', exchangeCode);
+        response.writeHead(302, { location: `${destination.pathname}${destination.search}${destination.hash}`, 'cache-control': 'no-store' });response.end();return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/auth/oidc/exchange') {
+        if (!oidc) throw new HttpError('统一身份登录暂未配置', 503, 'oidc_unavailable');
+        const body = await readJson<{code?:unknown}|null>(request);
+        const token = oidc.consumeExchangeTicket(typeof body?.code === 'string' ? body.code : '');
+        return sendJson(response, 200, { token });
+      }
       if (request.method === 'POST' && url.pathname === '/api/auth/login') {
+        if (config.authMode === 'oidc') throw new HttpError('请使用 KAI 统一身份验证登录', 403, 'password_login_disabled');
         const body = await readJson<{ email?: string; password?: string } | null>(request);
         const email = validateAuthEmail(body?.email);
         const identity=await database.findIdentityByEmail(email);
@@ -471,7 +507,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         if(!identity?.passwordHash||!passwordMatches)throw new HttpError('邮箱或密码错误',401,'invalid_credentials');
         const principal=identity.principal;
         await database.audit(principal, 'auth.login', 'session', null);
-        const token = createSessionToken({ sub: principal.userId, tenantId: principal.tenantId, email, role: principal.role }, config.sessionSecret);
+        const token = createSessionToken({ sub: principal.userId, tenantId: principal.tenantId, email, role: principal.role, authMethod: 'password' }, config.sessionSecret);
         return sendJson(response, 200, { token, user: { id: principal.userId, email } });
       }
       if (request.method === 'POST' && url.pathname === '/api/auth/registration/email/start') {
@@ -674,7 +710,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         if(!model||model.length>200)throw new HttpError('Model is invalid',400,'invalid_model');
         await database.assertTaskLease(principal,taskId,{executionId,leaseToken});
         await gateway.getModel(sourceId,model);
-        const issuedAt=Date.now();const scope={taskId,executionId,sourceId,model};const token=createAgentSessionToken({sub:principal.userId,tenantId:principal.tenantId,email:principal.email,role:principal.role},scope,config.sessionSecret,issuedAt);
+        const issuedAt=Date.now();const scope={taskId,executionId,sourceId,model};const token=createAgentSessionToken({sub:principal.userId,tenantId:principal.tenantId,email:principal.email,role:principal.role,authMethod:session?.authMethod},scope,config.sessionSecret,issuedAt);
         await database.audit(principal,'agent_session.issue','task',taskId,{executionId,sourceId,model,expiresAt:new Date(issuedAt+AGENT_SESSION_TTL_MS).toISOString()});
         return sendJson(response,201,{token,expiresAt:new Date(issuedAt+AGENT_SESSION_TTL_MS).toISOString(),scope});
       }

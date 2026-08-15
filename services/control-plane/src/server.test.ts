@@ -59,6 +59,15 @@ describe('control-plane production rules', () => {
       KAI_AI_STATUS_URL: 'https://provider.example/api/status',
     })).not.toThrow();
     expect(loadConfig({ NODE_ENV: 'test', KAI_AI_BASE_URL: 'http://127.0.0.1:9000/v1' }).modelSources[0]?.baseUrl).toBe('http://127.0.0.1:9000/v1');
+    const oidcConfig = loadConfig({
+      ...productionEnvironment,
+      COD_AUTH_MODE: 'hybrid',
+      KAI_IDENTITY_OIDC_CLIENT_ID: 'cod-web-client',
+      KAI_IDENTITY_OIDC_CLIENT_SECRET: 'client-secret',
+      KAI_IDENTITY_OIDC_REDIRECT_URI: 'https://cod.kai.com/api/auth/kai/callback',
+    });
+    expect(oidcConfig.oidc).toMatchObject({ issuer: 'https://auth.kai.com/api/auth', redirectUri: 'https://cod.kai.com/api/auth/kai/callback' });
+    expect(() => loadConfig({ ...productionEnvironment, COD_AUTH_MODE: 'hybrid' })).toThrow('OIDC configuration is required');
   });
 
   it('rejects empty assistant content before it can be settled as a successful reply', () => {

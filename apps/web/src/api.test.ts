@@ -79,6 +79,27 @@ describe('API session recovery', () => {
     expect(window.localStorage.getItem('cod.session.token')).toBe('stored-token');
   });
 
+  it('exchanges an OIDC callback code once, persists the COD session, and removes it from the URL', async () => {
+    window.history.replaceState({}, '', '/app/?auth=oidc&code=one-time-code#workspace');
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/api/auth/oidc/exchange')) {
+        expect(init?.method).toBe('POST');
+        expect(JSON.parse(String(init?.body))).toEqual({ code: 'one-time-code' });
+        return Response.json({ token: 'oidc-session-token' });
+      }
+      if (url.endsWith('/api/account')) return Response.json(account);
+      if (url.endsWith('/api/model-sources')) return Response.json([]);
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetcher);
+
+    await expect(resumeCodSession()).resolves.toEqual({ token: 'oidc-session-token', account, sources: [] });
+    expect(window.localStorage.getItem('cod.session.token')).toBe('oidc-session-token');
+    expect(window.location.search).toBe('');
+    expect(window.location.hash).toBe('#workspace');
+  });
+
   it('removes only a definitively unauthorized stored token', async () => {
     const fetcher = vi.fn(async () => Response.json({ error: 'unauthorized' }, { status: 401 }));
     vi.stubGlobal('fetch', fetcher);

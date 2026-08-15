@@ -29,6 +29,16 @@ export interface RegistrationResult {
   created: boolean;
 }
 
+export interface ExternalIdentityInput {
+  issuer: string;
+  subject: string;
+  email: string;
+  displayName: string | null;
+  tenantId: string;
+  userId: string;
+  now: Date;
+}
+
 export interface RegistrationChallengeResult {
   challengeId: string;
   email: string;
@@ -310,6 +320,8 @@ export interface CodDatabase {
   health(): Promise<boolean>;
   ensurePrincipal(principal: Principal): Promise<void>;
   findIdentityByEmail(email: string): Promise<IdentityRecord | null>;
+  findExternalIdentity(issuer: string, subject: string): Promise<IdentityRecord | null>;
+  registerExternalIdentity(input: ExternalIdentityInput): Promise<RegistrationResult>;
   registerIdentity(principal: Principal, passwordHash: string, inviteCode: string | null, allowExisting: boolean): Promise<RegistrationResult>;
   startEmailRegistration(input: StartEmailRegistrationInput): Promise<RegistrationChallengeResult>;
   verifyRegistrationEmail(input: VerifyRegistrationEmailInput): Promise<void>;
@@ -853,6 +865,17 @@ ${legacyInviteCodeBackfillMigration}
 CREATE UNIQUE INDEX IF NOT EXISTS cod_users_invite_code_unique ON cod_users (upper(invite_code)) WHERE invite_code IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS cod_users_phone_global_unique ON cod_users (phone_e164) WHERE phone_e164 IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS cod_users_registration_attempt_unique ON cod_users (registration_attempt_id) WHERE registration_attempt_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS cod_external_identities (
+  issuer text NOT NULL,
+  subject text NOT NULL,
+  tenant_id text NOT NULL,
+  user_id text NOT NULL,
+  email_snapshot text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  last_login_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (issuer, subject),
+  FOREIGN KEY (tenant_id, user_id) REFERENCES cod_users (tenant_id, user_id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS cod_registration_challenges (
   id uuid PRIMARY KEY,
   email text NOT NULL,
@@ -1141,6 +1164,30 @@ export class PostgresDatabase implements CodDatabase {
   async findIdentityByEmail(email: string) {
     const { rows } = await this.pool.query('SELECT * FROM cod_users WHERE lower(email)=lower($1) LIMIT 1',[email]);
     return rows[0] ? identityFromRow(rows[0]) : null;
+  }
+  async findExternalIdentity(issuer: string, subject: string) {
+    const { rows } = await this.pool.query(`SELECT users.* FROM cod_external_identities identities JOIN cod_users users ON users.tenant_id=identities.tenant_id AND users.user_id=identities.user_id WHERE identities.issuer=$1 AND identities.subject=$2 LIMIT 1`,[issuer,subject]);
+    return rows[0] ? identityFromRow(rows[0]) : null;
+  }
+  async registerExternalIdentity(input: ExternalIdentityInput) {
+    return this.transaction(async(client)=>{
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`oidc:${input.issuer}:${input.subject}`]);
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`auth-register:${input.email.toLowerCase()}`]);
+      const mapped=await client.query(`SELECT users.* FROM cod_external_identities identities JOIN cod_users users ON users.tenant_id=identities.tenant_id AND users.user_id=identities.user_id WHERE identities.issuer=$1 AND identities.subject=$2 LIMIT 1 FOR UPDATE OF identities,users`,[input.issuer,input.subject]);
+      if(mapped.rows[0]){
+        await client.query(`UPDATE cod_external_identities SET email_snapshot=$3,last_login_at=$4 WHERE issuer=$1 AND subject=$2`,[input.issuer,input.subject,input.email,input.now]);
+        return{identity:identityFromRow(mapped.rows[0]),created:false};
+      }
+      const emailOwner=await client.query(`SELECT 1 FROM cod_users WHERE lower(email)=lower($1) LIMIT 1`,[input.email]);
+      if(emailOwner.rows[0])throw new HttpError('该邮箱已有 COD 账号，请先使用原方式登录后绑定统一身份',409,'external_identity_link_required');
+      const inviteCode=`KAI-${input.userId.replace(/^usr_/,'').slice(0,10).toUpperCase()}`;
+      const inserted=await client.query(`INSERT INTO cod_users (tenant_id,user_id,email,display_name,password_hash,invite_code,email_verified_at,registration_method,role) VALUES ($1,$2,$3,$4,NULL,$5,$6,'trusted_federated','member') RETURNING *`,[input.tenantId,input.userId,input.email,input.displayName??input.email.split('@')[0],inviteCode,input.now]);
+      await client.query(`INSERT INTO cod_external_identities (issuer,subject,tenant_id,user_id,email_snapshot,created_at,last_login_at) VALUES ($1,$2,$3,$4,$5,$6,$6)`,[input.issuer,input.subject,input.tenantId,input.userId,input.email,input.now]);
+      const grantId=randomUUID();const key='trial-credit-v1';
+      await client.query(`INSERT INTO cod_credit_grants (id,tenant_id,user_id,pack_id,name,purchase_price_cents,original_cents,remaining_cents,expires_at,status,idempotency_key) VALUES ($1,$2,$3,'trial','新用户试用金',0,1000,1000,$4+interval '30 days','active',$5)`,[grantId,input.tenantId,input.userId,input.now,key]);
+      await client.query(`INSERT INTO cod_ledger (id,tenant_id,user_id,type,amount_cents,wallet_amount_cents,credit_amount_cents,reference,idempotency_key,payment_direction,created_at) VALUES ($1,$2,$3,'trial_credit',1000,0,1000,'新用户试用金',$4,'平台赠送 → COD 使用额度',$5)`,[randomUUID(),input.tenantId,input.userId,key,input.now]);
+      return{identity:identityFromRow(inserted.rows[0]),created:true};
+    });
   }
   async registerIdentity(p: Principal, passwordHash: string, inviteCode: string | null, allowExisting: boolean) {
     return this.transaction(async(client)=>{

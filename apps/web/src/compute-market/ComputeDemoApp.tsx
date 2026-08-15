@@ -34,6 +34,20 @@ import "./compute-demo.css";
 type ComputeTab = "home" | "hosting" | "news" | "ranking" | "mine";
 type MineResourceView = "orders" | "devices" | "hosting" | "assets" | "verification" | "support" | "help" | "purchase" | "ledger";
 type MineOrderStatus = "all" | "pending" | "running" | "delivery" | "completed";
+type DeliveryMode = "裸金属" | "GPU 虚拟机" | "GPU 容器" | "共享 GPU";
+
+const deliveryModes: Array<{ id: DeliveryMode; description: string }> = [
+  { id: "裸金属", description: "整台物理服务器独占" },
+  { id: "GPU 虚拟机", description: "独立系统与隔离资源" },
+  { id: "GPU 容器", description: "预装驱动与容器运行时" },
+  { id: "共享 GPU", description: "按显存或算力份额共享" },
+];
+const defaultDeliveryMode: DeliveryMode = "GPU 容器";
+const sparkOriginalPriceUsd = 4_699;
+const sparkSalePriceUsd = sparkOriginalPriceUsd / 2;
+const sparkUsdCnyRate = 6.7878;
+const cardHourPriceCny = 1.002;
+const sparkSaleCardHours = Math.ceil((sparkSalePriceUsd * sparkUsdCnyRate / cardHourPriceCny) * 10) / 10;
 
 const mineResourceViews = new Set<MineResourceView>(["orders", "devices", "hosting", "assets", "verification", "support", "help", "purchase", "ledger"]);
 const mineOrderStatuses = new Set<MineOrderStatus>(["all", "pending", "running", "delivery", "completed"]);
@@ -237,7 +251,7 @@ function ProductCard({
           {product.tags.map((tag) => <span key={tag}>{tag}</span>)}
         </div>
         <dl className="compute-v2-spec-grid">
-          <div><dt>交付</dt><dd>{product.specs.delivery}</dd></div>
+          <div><dt>默认交付</dt><dd>{defaultDeliveryMode}</dd></div>
           <div><dt>镜像</dt><dd>{product.images[0]?.name ?? "纯净环境"}</dd></div>
           <div><dt>内存</dt><dd>{product.specs.memory}</dd></div>
           <div><dt>存储</dt><dd>{product.specs.storage}</dd></div>
@@ -253,6 +267,94 @@ function ProductCard({
   );
 }
 
+function SparkFlashSale({
+  readOnly,
+  session,
+  balanceCardHours,
+  onRequireLogin,
+  onPurchaseCardHours,
+  onCreateOrder,
+  onViewOrders,
+}: {
+  readOnly: boolean;
+  session: CodSession | null;
+  balanceCardHours: string | null;
+  onRequireLogin: () => void;
+  onPurchaseCardHours: () => void;
+  onCreateOrder: (order: Omit<MarketOrder, "id">) => MarketOrder;
+  onViewOrders: () => void;
+}) {
+  const [secondsUntilSale, setSecondsUntilSale] = useState(60);
+  const [submittedOrder, setSubmittedOrder] = useState<MarketOrder | null>(null);
+  const saleOpen = secondsUntilSale === 0;
+  const countdown = `${String(Math.floor(secondsUntilSale / 60)).padStart(2, "0")}:${String(secondsUntilSale % 60).padStart(2, "0")}`;
+  const parsedBalance = Number((balanceCardHours ?? "").replaceAll(",", ""));
+  const hasEnoughCardHours = Boolean(session?.account.billingExempt) || (Number.isFinite(parsedBalance) && parsedBalance >= sparkSaleCardHours);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setSecondsUntilSale((current) => {
+        if (current <= 1) {
+          window.clearInterval(timer);
+          return 0;
+        }
+        return current - 1;
+      });
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const purchase = () => {
+    if (!saleOpen || submittedOrder) return;
+    if (!session) {
+      onRequireLogin();
+      return;
+    }
+    if (!hasEnoughCardHours) {
+      onPurchaseCardHours();
+      return;
+    }
+    const order = onCreateOrder({
+      status: "pending",
+      resource: "NVIDIA DGX Spark 1 台",
+      meta: "02672 白鸽在线特供款，预计下单后 3 个月发货",
+      amount: `${sparkSaleCardHours.toLocaleString("zh-CN", { minimumFractionDigits: 1 })} 卡时`,
+      label: "待确认",
+    });
+    setSubmittedOrder(order);
+  };
+
+  return (
+    <section className="compute-v2-spark-sale" role="region" aria-labelledby="spark-sale-title">
+      <div className="compute-v2-spark-visual">
+        <img src="/compute/dgx-spark-real.jpg" alt="白色背景上的 NVIDIA DGX Spark 实物图" />
+        <span>500 台限定</span>
+      </div>
+      <div className="compute-v2-spark-content">
+        <header>
+          <span>02672 白鸽在线特供款</span>
+          <strong>限时五折</strong>
+        </header>
+        <h2 id="spark-sale-title">NVIDIA DGX Spark</h2>
+        <p>GB10 Grace Blackwell 超级芯片，128GB 统一内存与 4TB NVMe，桌面端最高 1 PFLOP FP4 AI 算力。</p>
+        <dl>
+          <div><dt>活动库存</dt><dd>{submittedOrder ? 499 : 500} 台</dd></div>
+          <div><dt>开抢时间</dt><dd>{saleOpen ? "现已开抢" : "页面打开 1 分钟后"}</dd></div>
+          <div><dt>预计发货</dt><dd>下单后 3 个月</dd></div>
+        </dl>
+        <div className="compute-v2-spark-purchase">
+          <div><small>官网原价 <s>${sparkOriginalPriceUsd.toLocaleString("en-US")}.00</s></small><span>五折参考 ${sparkSalePriceUsd.toLocaleString("en-US", { minimumFractionDigits: 2 })}</span><strong>{sparkSaleCardHours.toLocaleString("zh-CN", { minimumFractionDigits: 1 })} <em>卡时</em></strong></div>
+          <div className="compute-v2-spark-action">
+            <span aria-live="polite"><Clock /> {saleOpen ? "已开抢" : `${countdown} 后开抢`}</span>
+            {readOnly ? <a href="/compute">进入上线准备版抢购</a> : submittedOrder ? <button type="button" onClick={onViewOrders}>查看抢购订单</button> : <button type="button" disabled={!saleOpen} onClick={purchase}>{saleOpen ? (!session ? "登录后抢购" : hasEnoughCardHours ? "立即抢购" : "先兑换卡时") : `${countdown} 后开抢`}</button>}
+          </div>
+        </div>
+        <footer><span>每个账号限购 1 台，需先兑换卡时后购买。按 2026-08-14 汇率中间价与 1 卡时 = ¥1.002 折算。</span><a href="https://marketplace.nvidia.com/en-us/enterprise/personal-ai-supercomputers/dgx-spark/" target="_blank" rel="noreferrer">查看英伟达官方价格与规格</a></footer>
+      </div>
+    </section>
+  );
+}
+
 function HomePage({
   variant,
   session,
@@ -263,6 +365,9 @@ function HomePage({
   onOpenOperations,
   onOpenResource,
   onRequireLogin,
+  onPurchaseCardHours,
+  onCreateOrder,
+  onViewOrders,
 }: {
   variant: "showcase" | "launch";
   session: CodSession | null;
@@ -273,6 +378,9 @@ function HomePage({
   onOpenOperations: () => void;
   onOpenResource: (view: MineResourceView, status?: MineOrderStatus) => void;
   onRequireLogin: () => void;
+  onPurchaseCardHours: () => void;
+  onCreateOrder: (order: Omit<MarketOrder, "id">) => MarketOrder;
+  onViewOrders: () => void;
 }) {
   const [filter, setFilter] = useState("全部");
   const filters = ["全部", "B300", "H200", "H100", "A100", "L40S", "消费级"];
@@ -317,6 +425,8 @@ function HomePage({
           return <button type="button" onClick={entry.action} key={entry.label}><i><Icon /></i><strong>{entry.label}</strong><small>{entry.detail}</small></button>;
         })}
       </section>
+
+      <SparkFlashSale readOnly={variant === "showcase"} session={session} balanceCardHours={balanceCardHours} onRequireLogin={onRequireLogin} onPurchaseCardHours={onPurchaseCardHours} onCreateOrder={onCreateOrder} onViewOrders={onViewOrders} />
 
       <section className="compute-v2-catalog" id="compute-products">
         <SectionTitle title={variant === "showcase" ? "算力产品" : "热门算力卡"} description="参考公开云平台行情换算的市场卡时价" action="全部资源" onAction={() => setFilter("全部")} />
@@ -454,7 +564,7 @@ function mineResourceContent(view: Exclude<MineResourceView, "orders">, balanceC
     verification: { icon: ShieldCheck, title: "实名认证", description: "查看账户认证、企业信息和安全状态。", badge: "认证完成", metrics: [["身份认证", "已完成"], ["企业认证", "已完成"], ["账户安全", "正常"]], rows: [{ title: "个人身份认证", meta: "身份信息已通过核验", value: "已完成", tone: "active" }, { title: "企业主体认证", meta: "成都贤酷吉步科技有限公司", value: "已完成", tone: "active" }, { title: "联系人认证", meta: "业务联系人和手机号已核验", value: "已完成", tone: "active" }, { title: "交易安全检查", meta: "最近检查 2026-08-14", value: "正常", tone: "active" }] },
     support: { icon: Headset, title: "专属客服", description: "跟进资源配置、部署和售后问题。", badge: "服务时间 09:00-18:00", metrics: [["当前工单", "2 单"], ["平均响应", "8 分钟"], ["服务评价", "4.9"]], rows: [{ title: "H200 镜像环境确认", meta: "工单 CS-0814-019, 技术支持", value: "处理中", tone: "active" }, { title: "托管设备网络核验", meta: "工单 CS-0813-041, 交付支持", value: "待回复", tone: "warning" }, { title: "卡时结算说明", meta: "工单 CS-0812-028, 账户支持", value: "已解决", tone: "neutral" }] },
     help: { icon: Wrench, title: "帮助中心", description: "查看算力购买、运行、托管和结算指引。", badge: "6 个主题", metrics: [["新手指南", "12 篇"], ["运行与镜像", "18 篇"], ["托管与结算", "15 篇"]], rows: [{ title: "如何选择合适的 GPU", meta: "按模型规模、显存和任务时长进行比较", value: "选型指南" }, { title: "卡时如何计算", meta: "了解资源价格、数量和运行时长的关系", value: "计费说明" }, { title: "镜像和环境怎么选", meta: "PyTorch、vLLM 和 ComfyUI 环境说明", value: "运行指南" }, { title: "设备托管流程", meta: "从资料提交到验收接入的完整流程", value: "托管指南" }] },
-    purchase: { icon: Wallet, title: "购买卡时", description: "选择卡时包后用于算力租赁和运行结算。", badge: "即时到账", metrics: [["当前余额", balanceCardHours ?? "注册后领取"], ["有效期", "长期有效"], ["到账方式", "账户余额"]], rows: [{ title: "轻量卡时包", meta: "适合开发测试和短时推理", value: "50 卡时" }, { title: "标准卡时包", meta: "适合模型微调和批量推理", value: "200 卡时" }, { title: "团队卡时包", meta: "适合多卡训练和团队任务", value: "500 卡时" }] },
+    purchase: { icon: Wallet, title: "购买卡时", description: "先兑换卡时，再用于算力租赁、设备抢购和运行结算。", badge: "即时到账", metrics: [["当前余额", balanceCardHours ?? "注册后领取"], ["换算规则", "1 卡时 = ¥1.002"], ["到账方式", "账户余额"]], rows: [{ title: "DGX Spark 特供卡时包", meta: "本次 02672 白鸽在线特供活动购买所需", value: `${sparkSaleCardHours.toLocaleString("zh-CN", { minimumFractionDigits: 1 })} 卡时` }, { title: "轻量卡时包", meta: "适合开发测试和短时推理", value: "50 卡时" }, { title: "标准卡时包", meta: "适合模型微调和批量推理", value: "200 卡时" }, { title: "团队卡时包", meta: "适合多卡训练和团队任务", value: "500 卡时" }] },
     ledger: { icon: Wallet, title: "卡时明细", description: "查看卡时发放、冻结、扣减和退回记录。", badge: "近 30 日", metrics: ledgerMetrics, rows: ledgerRows },
   };
   return resources[view];
@@ -570,6 +680,7 @@ function ProductDetail({
   onViewOrders: () => void;
 }) {
   const [imageId, setImageId] = useState(product.images[0]?.id ?? "");
+  const [deliveryMode, setDeliveryMode] = useState<DeliveryMode>(defaultDeliveryMode);
   const [period, setPeriod] = useState("按日");
   const [quantity, setQuantity] = useState(1);
   const [hours, setHours] = useState(24);
@@ -586,13 +697,13 @@ function ProductDetail({
     const order = onCreateOrder({
       status: "pending",
       resource: `${product.gpuModel.replace("NVIDIA ", "")} ${quantity} 卡`,
-      meta: `${product.region}, ${image?.name ?? "标准镜像"} · ${period} ${hours} 小时`,
+      meta: `${product.region}, ${deliveryMode}, ${image?.name ?? "标准镜像"}, ${period} ${hours} 小时`,
       amount: `${total.toFixed(1)} 卡时`,
       label: "待确认",
     });
     setSubmittedOrder(order);
   };
-  return <div className="compute-v2-detail"><header className="compute-v2-detail-head"><button type="button" onClick={onBack}><ArrowLeft /> 返回</button><div><small>{product.region}</small><h1>{product.title}</h1></div><span>公开价格</span></header><div className="compute-v2-detail-grid"><section className="compute-v2-detail-summary"><img src={product.image} alt={`${product.gpuModel} 产品图`} /><div className="compute-v2-detail-title"><div><span>{product.badge}</span><h2>{product.gpuModel}</h2><p>{product.gpuMemory} · {product.availability}</p></div><strong>{product.price.toFixed(1)}<small> 卡时/小时</small></strong></div><dl className="compute-v2-detail-specs"><div><dt>交付形态</dt><dd>{product.specs.delivery}</dd></div><div><dt>CPU</dt><dd>{product.specs.cpu}</dd></div><div><dt>内存</dt><dd>{product.specs.memory}</dd></div><div><dt>存储</dt><dd>{product.specs.storage}</dd></div><div><dt>GPU 互联</dt><dd>{product.specs.interconnect}</dd></div><div><dt>网络</dt><dd>{product.specs.network}</dd></div><div><dt>系统</dt><dd>{product.specs.system}</dd></div><div><dt>环境</dt><dd>{product.specs.cuda}</dd></div></dl><div className="compute-v2-public-price"><div><small>外部公开参考价</small><strong>${product.priceReference.low === product.priceReference.high ? product.priceReference.low.toFixed(2) : `${product.priceReference.low.toFixed(2)} - ${product.priceReference.high.toFixed(2)}`} <span>/ GPU 小时</span></strong><p>{product.priceReference.basis}，采集于 {product.priceReference.observedAt}。COD 卡时价包含实际交付、区域和服务差异。</p></div><nav aria-label="公开价格来源">{product.priceReference.sources.map((source) => <a href={source.url} target="_blank" rel="noreferrer" key={source.provider}>{source.provider}</a>)}</nav></div><div className="compute-v2-detail-assurance"><span><ShieldCheck /> 资源验真</span><span><Lightning /> 快速交付</span><span><Headset /> 服务支持</span></div></section><section className="compute-v2-config"><header><h2>{readOnly ? "配置展示" : "配置订单"}</h2><span>{readOnly ? "选择参数可查看卡时参考" : "选择镜像、周期与数量"}</span></header><fieldset><legend>租用周期</legend><div className="compute-v2-choice-row">{["按小时","按日","按月"].map((item) => <button type="button" className={period === item ? "active" : ""} onClick={() => { selectPeriod(item); setSubmittedOrder(null); }} key={item}>{item}</button>)}</div></fieldset><fieldset><legend>运行镜像</legend><div className="compute-v2-image-options">{product.images.map((image) => <button type="button" className={imageId === image.id ? "active" : ""} onClick={() => { setImageId(image.id); setSubmittedOrder(null); }} key={image.id}><strong>{image.name}</strong><small>{image.detail}</small>{imageId === image.id && <Check />}</button>)}</div></fieldset><div className="compute-v2-runtime-note"><strong>交付环境</strong><span>{product.specs.system} · {product.specs.cuda} · Docker 与 NVIDIA Container Toolkit 可选</span></div><div className="compute-v2-number-row"><label><span>GPU 数量</span><div><button type="button" aria-label="减少 GPU 数量" onClick={() => { setQuantity(Math.max(1, quantity - 1)); setSubmittedOrder(null); }}>−</button><strong>{quantity} 卡</strong><button type="button" aria-label="增加 GPU 数量" onClick={() => { setQuantity(Math.min(8, quantity + 1)); setSubmittedOrder(null); }}>＋</button></div></label><label><span>租用时长</span><div><button type="button" aria-label="减少租用时长" onClick={() => { setHours(Math.max(1, hours - 1)); setSubmittedOrder(null); }}>−</button><strong>{hours} 小时</strong><button type="button" aria-label="增加租用时长" onClick={() => { setHours(Math.min(2160, hours + 1)); setSubmittedOrder(null); }}>＋</button></div></label></div><div className="compute-v2-cost"><span>预计消耗<small>{product.price.toFixed(1)} × {quantity} 卡 × {hours} 小时</small></span><strong>{total.toFixed(1)} <small>卡时</small></strong></div>{readOnly ? <a className="compute-v2-submit" href={`/compute?offer=${product.id}`}>进入上线准备版</a> : <button className="compute-v2-submit" type="button" onClick={submitOrder}>{submittedOrder ? "订单已提交" : "确认配置并提交"}</button>}{submittedOrder && <div className="compute-v2-feedback" role="status"><span><Check /> 订单已提交，编号 {submittedOrder.id}</span><button type="button" onClick={onViewOrders}>查看订单 <CaretRight /></button></div>}</section></div>{!readOnly && <footer className="compute-v2-detail-sticky"><span><small>预计消耗</small><strong>{total.toFixed(1)} 卡时</strong></span><button type="button" onClick={submitOrder}>{submittedOrder ? "已提交" : "提交订单"}</button></footer>}</div>;
+  return <div className="compute-v2-detail"><header className="compute-v2-detail-head"><button type="button" onClick={onBack}><ArrowLeft /> 返回</button><div><small>{product.region}</small><h1>{product.title}</h1></div><span>公开价格</span></header><div className="compute-v2-detail-grid"><section className="compute-v2-detail-summary"><img src={product.image} alt={`${product.gpuModel} 产品图`} /><div className="compute-v2-detail-title"><div><span>{product.badge}</span><h2>{product.gpuModel}</h2><p>{product.gpuMemory} · {product.availability}</p></div><strong>{product.price.toFixed(1)}<small> 卡时/小时</small></strong></div><dl className="compute-v2-detail-specs"><div><dt>交付方式</dt><dd>4 种方式可选</dd></div><div><dt>CPU</dt><dd>{product.specs.cpu}</dd></div><div><dt>内存</dt><dd>{product.specs.memory}</dd></div><div><dt>存储</dt><dd>{product.specs.storage}</dd></div><div><dt>GPU 互联</dt><dd>{product.specs.interconnect}</dd></div><div><dt>网络</dt><dd>{product.specs.network}</dd></div><div><dt>系统</dt><dd>{product.specs.system}</dd></div><div><dt>环境</dt><dd>{product.specs.cuda}</dd></div></dl><div className="compute-v2-public-price"><div><small>外部公开参考价</small><strong>${product.priceReference.low === product.priceReference.high ? product.priceReference.low.toFixed(2) : `${product.priceReference.low.toFixed(2)} - ${product.priceReference.high.toFixed(2)}`} <span>/ GPU 小时</span></strong><p>{product.priceReference.basis}，采集于 {product.priceReference.observedAt}。COD 卡时价包含实际交付、区域和服务差异。</p></div><nav aria-label="公开价格来源">{product.priceReference.sources.map((source) => <a href={source.url} target="_blank" rel="noreferrer" key={source.provider}>{source.provider}</a>)}</nav></div><div className="compute-v2-detail-assurance"><span><ShieldCheck /> 资源验真</span><span><Lightning /> 快速交付</span><span><Headset /> 服务支持</span></div></section><section className="compute-v2-config"><header><h2>{readOnly ? "配置展示" : "配置订单"}</h2><span>{readOnly ? "选择参数可查看卡时参考" : "选择交付方式、镜像、周期与数量"}</span></header><fieldset><legend>交付方式 <span className="compute-v2-required">必选</span></legend><div className="compute-v2-delivery-options" role="radiogroup" aria-label="交付方式" aria-required="true">{deliveryModes.map((mode) => <button type="button" role="radio" aria-checked={deliveryMode === mode.id} className={deliveryMode === mode.id ? "active" : ""} onClick={() => { setDeliveryMode(mode.id); setSubmittedOrder(null); }} key={mode.id}><strong>{mode.id}</strong><small>{mode.description}</small>{deliveryMode === mode.id && <Check />}</button>)}</div></fieldset><fieldset><legend>租用周期</legend><div className="compute-v2-choice-row">{["按小时","按日","按月"].map((item) => <button type="button" className={period === item ? "active" : ""} onClick={() => { selectPeriod(item); setSubmittedOrder(null); }} key={item}>{item}</button>)}</div></fieldset><fieldset><legend>运行镜像</legend><div className="compute-v2-image-options">{product.images.map((image) => <button type="button" className={imageId === image.id ? "active" : ""} onClick={() => { setImageId(image.id); setSubmittedOrder(null); }} key={image.id}><strong>{image.name}</strong><small>{image.detail}</small>{imageId === image.id && <Check />}</button>)}</div></fieldset><div className="compute-v2-runtime-note"><strong>交付环境</strong><span>{deliveryMode}，{product.specs.system}，{product.specs.cuda}。镜像将在资源交付时安装。</span></div><div className="compute-v2-number-row"><label><span>GPU 数量</span><div><button type="button" aria-label="减少 GPU 数量" onClick={() => { setQuantity(Math.max(1, quantity - 1)); setSubmittedOrder(null); }}>−</button><strong>{quantity} 卡</strong><button type="button" aria-label="增加 GPU 数量" onClick={() => { setQuantity(Math.min(8, quantity + 1)); setSubmittedOrder(null); }}>＋</button></div></label><label><span>租用时长</span><div><button type="button" aria-label="减少租用时长" onClick={() => { setHours(Math.max(1, hours - 1)); setSubmittedOrder(null); }}>−</button><strong>{hours} 小时</strong><button type="button" aria-label="增加租用时长" onClick={() => { setHours(Math.min(2160, hours + 1)); setSubmittedOrder(null); }}>＋</button></div></label></div><div className="compute-v2-cost"><span>预计消耗<small>{product.price.toFixed(1)} × {quantity} 卡 × {hours} 小时</small></span><strong>{total.toFixed(1)} <small>卡时</small></strong></div>{readOnly ? <a className="compute-v2-submit" href={`/compute?offer=${product.id}`}>进入上线准备版</a> : <button className="compute-v2-submit" type="button" onClick={submitOrder}>{submittedOrder ? "订单已提交" : "确认配置并提交"}</button>}{submittedOrder && <div className="compute-v2-feedback" role="status"><span><Check /> 订单已提交，编号 {submittedOrder.id}</span><button type="button" onClick={onViewOrders}>查看订单 <CaretRight /></button></div>}</section></div>{!readOnly && <footer className="compute-v2-detail-sticky"><span><small>预计消耗</small><strong>{total.toFixed(1)} 卡时</strong></span><button type="button" onClick={submitOrder}>{submittedOrder ? "已提交" : "提交订单"}</button></footer>}</div>;
 }
 
 function scrollComputeToTop() {
@@ -705,7 +816,7 @@ export function ComputeMarketApp({ session, balanceCardHours, initialPath, platf
       </aside>
       <div className="compute-v2-shell">
         <header className="compute-v2-topbar"><button className="compute-v2-mobile-brand" type="button" onClick={() => navigate("home")}><Lightning weight="fill" /><strong>COD 算力</strong></button><div>{readOnly ? <><span>产品展示版</span><a className="compute-v2-launch-link" href="/compute">上线准备版</a></> : <><span>上线准备版</span><button type="button" aria-label="通知" aria-expanded={notificationsOpen} onClick={() => setNotificationsOpen(true)}><Bell /></button>{session ? <button type="button" className="compute-v2-user" onClick={openAccount}><UserCircle weight="fill" /> {session.account.displayName}</button> : <button type="button" className="compute-v2-login" onClick={() => onRequireLogin(window.location.href)}>注册或登录</button>}</>}</div></header>
-        <main className="compute-v2-main">{operations ? <OperationsDashboard onBack={() => navigate("home")} /> : mineView ? <MineResourceDetail view={mineView} orderStatus={orderStatus} balanceCardHours={balanceCardHours} orders={orders} orderCounts={orderCounts} session={session} onBack={() => navigate("mine")} onRequireLogin={() => onRequireLogin(window.location.href)} onOpenAccount={openAccount} onOpenSupport={openSupport} /> : selectedProduct ? <ProductDetail readOnly={readOnly} product={selectedProduct} session={session} onBack={() => navigate("home")} onRequireLogin={() => onRequireLogin(window.location.href)} onCreateOrder={createMarketOrder} onViewOrders={() => openMineResource("orders", "pending")} /> : tab === "home" ? <HomePage variant={variant} session={session} balanceCardHours={balanceCardHours} products={products} onOpenProduct={(id) => navigate("home", id)} onNavigate={(nextTab) => navigate(nextTab)} onOpenOperations={openOperations} onOpenResource={openMineResource} onRequireLogin={() => onRequireLogin(window.location.href)} /> : tab === "hosting" ? <HostingPage readOnly={readOnly} session={session} onRequireLogin={() => onRequireLogin(window.location.href)} onOpenResource={openMineResource} /> : tab === "news" ? <NewsPage /> : tab === "ranking" ? <RankingPage onOpenProducts={() => navigate("home")} /> : <MinePage session={session} balanceCardHours={balanceCardHours} orderCounts={orderCounts} onRequireLogin={() => onRequireLogin(window.location.href)} onOpenOperations={openOperations} onOpenResource={openMineResource} />}</main>
+        <main className="compute-v2-main">{operations ? <OperationsDashboard onBack={() => navigate("home")} /> : mineView ? <MineResourceDetail view={mineView} orderStatus={orderStatus} balanceCardHours={balanceCardHours} orders={orders} orderCounts={orderCounts} session={session} onBack={() => navigate("mine")} onRequireLogin={() => onRequireLogin(window.location.href)} onOpenAccount={openAccount} onOpenSupport={openSupport} /> : selectedProduct ? <ProductDetail readOnly={readOnly} product={selectedProduct} session={session} onBack={() => navigate("home")} onRequireLogin={() => onRequireLogin(window.location.href)} onCreateOrder={createMarketOrder} onViewOrders={() => openMineResource("orders", "pending")} /> : tab === "home" ? <HomePage variant={variant} session={session} balanceCardHours={balanceCardHours} products={products} onOpenProduct={(id) => navigate("home", id)} onNavigate={(nextTab) => navigate(nextTab)} onOpenOperations={openOperations} onOpenResource={openMineResource} onRequireLogin={() => onRequireLogin(window.location.href)} onPurchaseCardHours={() => openMineResource("purchase")} onCreateOrder={createMarketOrder} onViewOrders={() => openMineResource("orders", "pending")} /> : tab === "hosting" ? <HostingPage readOnly={readOnly} session={session} onRequireLogin={() => onRequireLogin(window.location.href)} onOpenResource={openMineResource} /> : tab === "news" ? <NewsPage /> : tab === "ranking" ? <RankingPage onOpenProducts={() => navigate("home")} /> : <MinePage session={session} balanceCardHours={balanceCardHours} orderCounts={orderCounts} onRequireLogin={() => onRequireLogin(window.location.href)} onOpenOperations={openOperations} onOpenResource={openMineResource} />}</main>
         {!selectedProduct && !operations && !mineView && <nav className="compute-v2-bottom-nav" aria-label="算力市场底部导航">{visibleNavItems.map((item) => { const Icon=item.icon; return <button type="button" className={tab === item.id ? "active" : ""} onClick={() => navigate(item.id)} key={item.id}><Icon weight={tab === item.id ? "fill" : "regular"} /><span>{item.label}</span></button>; })}</nav>}
         {!readOnly && notificationsOpen && <MarketModal title="消息通知" description="资源、订单与平台动态" onClose={() => setNotificationsOpen(false)}><div className="compute-v2-notification-list"><button type="button" onClick={() => openMineResource("orders", "running")}><i><Lightning /></i><span><strong>3 个实例正在运行</strong><small>资源状态正常，今日预计消耗 82.4 卡时</small></span><CaretRight /></button><button type="button" onClick={() => openMineResource("hosting")}><i><Buildings /></i><span><strong>托管资料待补充</strong><small>H100 服务器托管申请等待验收信息</small></span><CaretRight /></button><button type="button" onClick={() => navigate("news")}><i><Newspaper /></i><span><strong>华东 B 区新增资源</strong><small>H100 资源池已开放配置</small></span><CaretRight /></button></div></MarketModal>}
       </div>

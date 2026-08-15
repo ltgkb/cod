@@ -393,6 +393,7 @@ button:active { transform: translateY(1px); }
 .login-copy h1, .login-copy h2 { margin: 8px 0; color: var(--ink); font-size: 24px; letter-spacing: -.035em; }
 .login-copy p { margin: 0; color: var(--muted-foreground); font-size: 12px; line-height: 1.65; }
 .login-card form, .login-form form, .modal-form { display: grid; gap: 14px; }
+.oidc-login-button { width: 100%; margin-bottom: 14px; }
 .login-card label, .login-form label, .modal-form label { display: grid; gap: 7px; color: var(--foreground); font-size: 10px; font-weight: 500; }
 .login-form label > small { color: var(--muted-foreground); font-size: 8px; font-weight: 400; }
 .password-hint { margin: -3px 0 0; color: var(--muted-foreground); font-size: 8px; line-height: 1.55; }

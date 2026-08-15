@@ -1,16 +1,16 @@
-# KAI Account integration decision
+# KAI Identity integration
 
-Status: proposed, blocked on OAuth client registration and the security gates below.
+Status: Web OIDC client implemented behind `COD_AUTH_MODE`; production activation requires a registered client ID and secret in the server environment.
 
 Reviewed inputs:
 
 - COD commit `8303f47`
 - `Kai_Zanzibar_Next` production commit `f1b0c81959f23ff03c4bce0f24ef574e1812afda`
-- Live issuer discovery at `https://account.kai.com/connect/.well-known/openid-configuration`
+- Live issuer discovery at `https://auth.kai.com/api/auth/.well-known/openid-configuration`
 
 ## Decision
 
-Do not copy or merge the KAI Account services, databases, sessions, memberships, or SQL authorization service into COD. Keep KAI Account deployed as an independent identity control plane and connect COD to its public OIDC Broker over HTTPS.
+Do not copy or merge the KAI Identity services, databases, or sessions into COD. Keep it as an independent identity provider and connect COD to its public OIDC endpoints over HTTPS.
 
 The reviewed repository also has no committed `LICENSE` file. Even within the same organization, copying its implementation into COD would leave provenance and redistribution terms undocumented. Resolve that independently if source reuse is ever proposed; the OIDC integration described here does not require source reuse.
 
@@ -44,39 +44,37 @@ CREATE TABLE cod_external_identities (
 );
 ```
 
-New OIDC users receive a random internal `user_id`. The configured COD client determines the tenant. Neither the email domain nor KAI Account Organization role determines a COD tenant or role.
+New OIDC users receive a non-guessable internal `user_id` derived from the stable issuer and subject. The configured COD client determines the tenant. Neither the email domain nor a KAI Identity role determines a COD tenant or role.
 
-Use a one-time server-side login transaction containing:
+The implementation uses a one-time, ten-minute server-side login transaction containing:
 
 - a digest of `state`
 - `nonce`
-- the PKCE verifier protected at rest
-- the intended COD client and safe post-login destination
-- optional onboarding or referral context
-- creation and expiry timestamps
-- a consumed timestamp
+- the PKCE verifier
+- a validated relative post-login destination
+- an expiry timestamp
 
-Replace the current seven-day self-contained bearer for OIDC sessions with an opaque, hashed, server-revocable COD session. Provider tokens must be discarded after claims are verified and the required profile is resolved.
+After the callback, COD issues a one-time, 60-second browser exchange code and then creates its own signed session. Provider tokens are discarded after claims are verified and the required profile is resolved. Moving all COD sessions to opaque, hashed, server-revocable records remains a follow-up hardening item.
 
 ## Protocol contract
 
 The only accepted issuer is:
 
 ```text
-https://account.kai.com/connect
+https://auth.kai.com/api/auth
 ```
 
 Use Authorization Code with PKCE S256. Validate all of the following before mapping a user:
 
 - exact HTTPS issuer
-- ES256 signature through the discovered JWKS
+- EdDSA signature through the discovered JWKS
 - audience and `azp` where applicable
 - expiry, issued-at time, nonce, state, and one-time transaction consumption
 - redirect URI and client identity for the initiating platform
 
-Start with `openid email`. Add `kai:name` only when COD displays the name. Treat `kai:organization_membership` as an optional login admission signal only; its current boolean value cannot authorize COD resources.
+Use `openid profile email`. Require a verified email. Identity-provider roles or organization claims must never authorize COD resources.
 
-KAI Account roles must not map to COD roles. In particular, KAI Account `admin` must never become COD `admin`, because COD administrators can ingest usage and are exempt from billing.
+KAI Identity roles must not map to COD roles. In particular, an identity-provider `admin` must never become COD `admin`, because COD administrators can ingest usage and are exempt from billing.
 
 ## Client separation
 
@@ -84,7 +82,7 @@ Register a distinct OAuth client for every platform and environment:
 
 | Client | Type | Callback | Session storage |
 |---|---|---|---|
-| COD Web | confidential | `https://cod.kai.com/api/auth/oidc/callback` | Secure, HttpOnly COD cookie |
+| COD Web | confidential | `https://cod.kai.com/api/auth/kai/callback` | COD session token after one-time callback exchange |
 | COD iOS | public native | verified Universal Link, with an app-specific scheme only as fallback | Keychain |
 | COD Android | public native | verified App Link, with an app-specific scheme only as fallback | Keystore-backed secure storage |
 | COD Desktop | public native | app-specific protocol with cold-start and second-instance forwarding | OS credential store |
@@ -123,36 +121,31 @@ Store Web client configuration in the control-plane environment, for example:
 
 ```text
 COD_AUTH_MODE=hybrid
-KAI_ACCOUNT_OIDC_ISSUER=https://account.kai.com/connect
-KAI_ACCOUNT_OIDC_CLIENT_ID=...
-KAI_ACCOUNT_OIDC_CLIENT_SECRET=...
-KAI_ACCOUNT_OIDC_REDIRECT_URI=https://cod.kai.com/api/auth/oidc/callback
+KAI_IDENTITY_OIDC_ISSUER=https://auth.kai.com/api/auth
+KAI_IDENTITY_OIDC_CLIENT_ID=...
+KAI_IDENTITY_OIDC_CLIENT_SECRET=...
+KAI_IDENTITY_OIDC_REDIRECT_URI=https://cod.kai.com/api/auth/kai/callback
+KAI_IDENTITY_OIDC_TENANT_ID=tenant_kai_identity
 ```
 
 The callback route must not log its query string. Never log authorization codes, state, nonce, PKCE verifier, provider tokens, COD session tokens, or raw provider error descriptions.
 
 ## Security gates before production enablement
 
-The source repository passed type checking, its build, 1,212 tests, and npm vulnerability scanning after regenerating its lock metadata. PostgreSQL integration tests were skipped because no Docker daemon was available. The following findings should be fixed before COD depends on it for production sign-in:
-
-1. Password mutation occurs before durable local session invalidation. A database failure can leave another local session valid for up to the configured eight-hour TTL after the upstream password has changed.
-2. High-risk security audit writes are best-effort and can be silently lost. Use a durable mutation intent or outbox and reconcile a terminal audit event.
-3. The advertised Zanzibar authorization service is implemented but not wired into the Account runtime. COD must not depend on it as a policy decision point.
-4. Runtime PostgreSQL role convergence is asymmetric. Account and Broker roles need the same membership cleanup, attribute reset, and credential rotation checks as Registration.
-5. Applied migrations are tracked only by filename. Add checksums and reject modified or out-of-order migrations.
-6. The committed npm lock is incomplete on npm 11, lacks integrity metadata for many registry packages, and does not reproduce a clean install. Regenerate it with the supported toolchain and pin `packageManager`.
-7. Login V2 PAT defaults to a far-future expiry and has no implemented rotation and revocation workflow.
-8. Passkey ceremonies use a bounded in-memory store. Move them to a shared consume-once store before horizontal scaling.
-9. Pin production image digests consistently, including the main application, Traefik, and PostgreSQL images.
+- Register the exact production callback and deliver the client secret only through the server environment.
+- Exercise callback replay, wrong issuer/audience, nonce mismatch, expired tokens, key rotation, rate limiting, and provider outage.
+- Add an explicit authenticated linking flow for existing COD emails; matching email alone is deliberately rejected.
+- Move OIDC transaction and exchange-ticket state to a shared consume-once store before running multiple control-plane replicas.
+- Replace self-contained COD sessions with opaque, hashed, server-revocable records.
 
 ## Delivery sequence
 
 1. Fix KAI Account P1/P2 security gates and its reproducible lock file.
-2. Register only the COD Web development client.
-3. Implement external identity mapping, one-time OIDC transactions, revocable COD sessions, and explicit account linking behind `COD_AUTH_MODE=hybrid`.
+2. Register the COD Web client with the exact callback URI.
+3. Supply the OIDC environment variables and enable `COD_AUTH_MODE=hybrid` first.
 4. Exercise cancellation, replay, wrong issuer/audience, expired code, key rotation, 429/503, and account-link conflicts.
 5. Enable Web production gradually with metrics and a password-login rollback path.
 6. Add separate iOS, Android, and Desktop public clients and test real packaged callback flows.
 7. Remove password login only after linked-user coverage and recovery procedures are proven.
 
-OAuth client creation is intentionally not part of this change. It creates persistent access and must be performed only after the exact clients, redirect URIs, owners, and secret-handling path are approved.
+OAuth client creation remains an identity-administrator action. Do not commit the client secret or expose it to the browser, mobile bundle, or desktop renderer.

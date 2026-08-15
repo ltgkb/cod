@@ -64,7 +64,7 @@ interface AuthenticationRequestOptions {
 
 export interface CapabilityReport {
   authentication: {
-    mode: 'password'; registrationEnabled: boolean; legacyMigrationEnabled?: boolean; inviteCodeOptional: boolean; inviteCodeRequired: boolean;
+    mode: 'password' | 'hybrid' | 'oidc'; oidcLoginUrl?: string | null; registrationEnabled: boolean; legacyMigrationEnabled?: boolean; inviteCodeOptional: boolean; inviteCodeRequired: boolean;
     accessCodeRequired: false; turnstileSiteKey?: string; verificationMethods?: Array<'email_otp' | 'sms_otp'>; registrationWebOnly?: boolean;
     publicRegistrationUrl?: string;
   };
@@ -676,6 +676,20 @@ export async function listModelSources(token: string, signal?: AbortSignal): Pro
 }
 
 export async function resumeCodSession(): Promise<CodSession | null> {
+  const callbackUrl = new URL(window.location.href);
+  if (callbackUrl.searchParams.get('auth') === 'oidc') {
+    const code = callbackUrl.searchParams.get('code') ?? '';
+    callbackUrl.searchParams.delete('auth');callbackUrl.searchParams.delete('code');
+    window.history.replaceState(window.history.state, '', `${callbackUrl.pathname}${callbackUrl.search}${callbackUrl.hash}`);
+    const exchange = await request<{ token: string }>('/api/auth/oidc/exchange', undefined, { method: 'POST', body: JSON.stringify({ code }) });
+    await persistCodSession(exchange.token);
+    return hydrateCodSession(exchange.token);
+  }
+  if (callbackUrl.searchParams.get('auth') === 'oidc_error') {
+    callbackUrl.searchParams.delete('auth');
+    window.history.replaceState(window.history.state, '', `${callbackUrl.pathname}${callbackUrl.search}${callbackUrl.hash}`);
+    throw new ApiError('KAI 统一身份验证未完成，请重试。', 401, 'oidc_login_failed');
+  }
   const token = await loadPersistedSessionToken();
   if (!token) return null;
   try {
@@ -683,6 +697,13 @@ export async function resumeCodSession(): Promise<CodSession | null> {
   } catch {
     return null;
   }
+}
+
+export function beginOidcLogin(loginUrl = '/api/auth/oidc/start?returnTo=%2Fapp%2F'): void {
+  const controlPlaneUrl = getControlPlaneUrl();
+  const target = new URL(loginUrl, controlPlaneUrl || window.location.origin);
+  if (target.pathname !== '/api/auth/oidc/start') throw new ApiError('统一身份登录地址无效。', 500, 'invalid_oidc_login_url');
+  window.location.assign(target.href);
 }
 
 export async function loginCod(email: string, password: string, options: AuthenticationRequestOptions = {}): Promise<string> {

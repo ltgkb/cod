@@ -74,6 +74,15 @@
       "license": "Third-party product media; confirm commercial usage authorization",
       "createdAt": "2026-08-15T00:00:00.000Z",
       "usageNote": "NVIDIA GeForce RTX 5090 Founders Edition reference photo composited on a white background."
+    },
+    {
+      "path": "/compute/dgx-spark-real.jpg",
+      "kind": "product-photo",
+      "source": "https://www.pny.com/file%20library/company/press%20center/press%20images/nvidia-professional-graphics/nvidia-dgx-spark-72dpi-press-images.zip",
+      "author": "PNY NVIDIA DGX Spark press media",
+      "license": "Third-party press media; confirm commercial usage authorization",
+      "createdAt": "2026-08-15T00:00:00.000Z",
+      "usageNote": "Official white-background NVIDIA DGX Spark three-quarter product image for the limited-sale feature."
     }
   ]
 }

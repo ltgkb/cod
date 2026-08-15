@@ -57,6 +57,15 @@ export interface RegistrationVerificationConfig {
   maxFailedAttempts: number;
 }
 
+export interface OidcConfig {
+  mode: 'password' | 'hybrid' | 'oidc';
+  issuer: string;
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
+  tenantId: string;
+}
+
 export interface ControlPlaneConfig {
   port: number;
   sessionSecret: string;
@@ -66,6 +75,8 @@ export interface ControlPlaneConfig {
   registrationEnabled: boolean;
   registrationVerificationRequired: boolean;
   registrationVerification: RegistrationVerificationConfig;
+  oidc: OidcConfig | null;
+  authMode: OidcConfig['mode'];
   publicRegistrationUrl: string | null;
   inviteCodeRequired: boolean;
   developmentLoginEnabled: boolean;
@@ -173,6 +184,8 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
   const pilotAccessCodeHash = environment.COD_PILOT_ACCESS_CODE_HASH ?? null;
   const registrationEnabled = environment.COD_REGISTRATION_ENABLED === undefined ? !production : environment.COD_REGISTRATION_ENABLED === 'true';
   const registrationVerificationRequired = environment.COD_REGISTRATION_VERIFICATION_REQUIRED !== 'false';
+  const authMode = (environment.COD_AUTH_MODE ?? 'password') as OidcConfig['mode'];
+  if (!['password', 'hybrid', 'oidc'].includes(authMode)) throw new Error('COD_AUTH_MODE must be password, hybrid, or oidc');
   const allowedEmailDomains = (environment.COD_ALLOWED_EMAIL_DOMAINS ?? 'kai.com').split(',').map((value) => value.trim().toLowerCase()).filter(Boolean);
   const allowedOrigins = (environment.COD_ALLOWED_ORIGINS ?? (production
     ? 'https://cod.kai.com,https://localhost,capacitor://localhost,null'
@@ -209,6 +222,29 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     siteKey: environment.COD_TURNSTILE_SITE_KEY,
     secretKey: environment.COD_TURNSTILE_SECRET_KEY,
   });
+  const oidcValues = configuredGroup('KAI Identity OIDC', {
+    clientId: environment.KAI_IDENTITY_OIDC_CLIENT_ID,
+    clientSecret: environment.KAI_IDENTITY_OIDC_CLIENT_SECRET,
+    redirectUri: environment.KAI_IDENTITY_OIDC_REDIRECT_URI,
+  });
+  const oidc: OidcConfig | null = oidcValues ? {
+    mode: authMode,
+    issuer: (environment.KAI_IDENTITY_OIDC_ISSUER ?? 'https://auth.kai.com/api/auth').replace(/\/$/, ''),
+    clientId: oidcValues.clientId,
+    clientSecret: oidcValues.clientSecret,
+    redirectUri: oidcValues.redirectUri,
+    tenantId: environment.KAI_IDENTITY_OIDC_TENANT_ID ?? 'tenant_kai_identity',
+  } : null;
+  if (authMode !== 'password' && !oidc) throw new Error('KAI Identity OIDC configuration is required when COD_AUTH_MODE is hybrid or oidc');
+  if (oidc) {
+    const issuer = new URL(oidc.issuer);
+    const redirect = new URL(oidc.redirectUri);
+    if (issuer.protocol !== 'https:' || issuer.username || issuer.password || issuer.search || issuer.hash) throw new Error('KAI_IDENTITY_OIDC_ISSUER must be a valid HTTPS issuer');
+    if (production && issuer.href !== 'https://auth.kai.com/api/auth') throw new Error('Production KAI_IDENTITY_OIDC_ISSUER must use auth.kai.com');
+    if (redirect.protocol !== 'https:' || redirect.username || redirect.password || redirect.hash) throw new Error('KAI_IDENTITY_OIDC_REDIRECT_URI must be a valid HTTPS URL');
+    if (production && !['https://cod.kai.com/api/auth/oidc/callback','https://cod.kai.com/api/auth/kai/callback'].includes(redirect.href)) throw new Error('Production KAI_IDENTITY_OIDC_REDIRECT_URI must use a registered COD callback');
+    if (!/^[A-Za-z0-9_-]{3,100}$/.test(oidc.tenantId)) throw new Error('KAI_IDENTITY_OIDC_TENANT_ID is invalid');
+  }
   const registrationHmacKey = environment.COD_REGISTRATION_HMAC_KEY
     ?? (!production ? '0123456789abcdef0123456789abcdef' : null);
   const decodedRegistrationHmacKey = (value: string | null): Buffer | null => {
@@ -369,6 +405,8 @@ export function loadConfig(environment = process.env): ControlPlaneConfig {
     registrationEnabled,
     registrationVerificationRequired,
     registrationVerification,
+    oidc,
+    authMode,
     publicRegistrationUrl,
     inviteCodeRequired,
     developmentLoginEnabled,

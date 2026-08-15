@@ -9,6 +9,7 @@ interface TokenPrincipal {
   tenantId: string;
   email: string;
   role: 'member' | 'admin';
+  authMethod?: 'password' | 'oidc';
 }
 
 export interface SessionPayload extends TokenPrincipal {
@@ -85,7 +86,7 @@ function verifySignedPayload(token: string, secret: string): Record<string, unkn
   }
 }
 
-const hasValidPrincipal = (value: Record<string, unknown>): boolean => typeof value.sub === 'string' && Boolean(value.sub) && typeof value.tenantId === 'string' && Boolean(value.tenantId) && typeof value.email === 'string' && Boolean(value.email) && (value.role === 'member' || value.role === 'admin');
+const hasValidPrincipal = (value: Record<string, unknown>): boolean => typeof value.sub === 'string' && Boolean(value.sub) && typeof value.tenantId === 'string' && Boolean(value.tenantId) && typeof value.email === 'string' && Boolean(value.email) && (value.role === 'member' || value.role === 'admin') && (value.authMethod === undefined || value.authMethod === 'password' || value.authMethod === 'oidc');
 
 export function createSessionToken(principal: TokenPrincipal, secret: string, now = Date.now()): string {
   return signPayload({ ...principal, kind: 'session', exp: now + 7 * 24 * 60 * 60 * 1000 }, secret);

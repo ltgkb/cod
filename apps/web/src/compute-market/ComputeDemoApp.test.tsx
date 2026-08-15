@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ComputeMarketApp } from "./ComputeDemoApp";
 
@@ -17,6 +17,7 @@ describe("ComputeMarketApp", () => {
 
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
     window.history.replaceState({}, "", "/app/");
     vi.restoreAllMocks();
   });
@@ -42,7 +43,10 @@ describe("ComputeMarketApp", () => {
     expect(screen.getByText("NVIDIA H200 SXM")).toBeInTheDocument();
     expect(screen.getByText("NVIDIA A100 SXM")).toBeInTheDocument();
     expect(screen.getAllByText(/外部公开参考/)).toHaveLength(7);
-    expect(screen.getAllByText("裸金属整机").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("GPU 容器")).toHaveLength(7);
+    expect(screen.getByRole("region", { name: "NVIDIA DGX Spark" })).toHaveTextContent("02672 白鸽在线特供款");
+    expect(screen.getByRole("region", { name: "NVIDIA DGX Spark" })).toHaveTextContent("500 台");
+    expect(screen.getByRole("region", { name: "NVIDIA DGX Spark" })).toHaveTextContent("$2,349.50");
     expect(screen.getByText("注册后领取")).toBeInTheDocument();
     expect(screen.queryByText("1,286.5")).not.toBeInTheDocument();
   });
@@ -70,6 +74,10 @@ describe("ComputeMarketApp", () => {
     fireEvent.click(screen.getByRole("button", { name: "查看 B300 SXM 超大显存训练卡" }));
     expect(window.location.pathname).toBe("/compute/showcase");
     expect(screen.getByRole("heading", { name: "配置展示" })).toBeInTheDocument();
+    expect(screen.getByRole("radiogroup", { name: "交付方式" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /GPU 容器/ })).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(screen.getByRole("radio", { name: /共享 GPU/ }));
+    expect(screen.getByRole("radio", { name: /共享 GPU/ })).toHaveAttribute("aria-checked", "true");
     expect(screen.getByRole("link", { name: "进入上线准备版" })).toHaveAttribute("href", "/compute?offer=b300-sxm-288");
     expect(screen.queryByRole("button", { name: "确认配置并提交" })).not.toBeInTheDocument();
   });
@@ -91,7 +99,12 @@ describe("ComputeMarketApp", () => {
     expect(screen.getByText("44.0")).toBeInTheDocument();
     expect(screen.getByText("外部公开参考价")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "RunPod" })).toHaveAttribute("href", "https://www.runpod.io/pricing");
-    expect(screen.getByText("裸金属整机")).toBeInTheDocument();
+    expect(screen.getByText("4 种方式可选")).toBeInTheDocument();
+    expect(screen.getAllByRole("radio")).toHaveLength(4);
+    expect(screen.getByRole("radio", { name: /GPU 容器/ })).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(screen.getByRole("radio", { name: /裸金属/ }));
+    expect(screen.getByRole("radio", { name: /裸金属/ })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("radio", { name: /GPU 容器/ })).toHaveAttribute("aria-checked", "false");
     expect(screen.getByRole("button", { name: /PyTorch 2.8/ })).toBeInTheDocument();
     expect(screen.getAllByText("1,286.5").length).toBeGreaterThan(0);
     expect(window.location.search).toContain("offer=b300-sxm-288");
@@ -102,7 +115,57 @@ describe("ComputeMarketApp", () => {
     fireEvent.click(screen.getByRole("button", { name: /查看订单/ }));
     expect(screen.getByRole("heading", { name: "待确认订单", level: 1 })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /COD-NEW-001/ })).toHaveTextContent("B300 SXM 1 卡");
+    expect(screen.getByRole("button", { name: /COD-NEW-001/ })).toHaveTextContent("裸金属");
     expect(screen.getByText("共 3 单")).toBeInTheDocument();
+  });
+
+  it("opens the DGX Spark special sale after one minute and records the purchase", () => {
+    vi.useFakeTimers();
+    render(
+      <ComputeMarketApp
+        session={signedInSession}
+        balanceCardHours="20,000.0"
+        initialPath="/compute"
+        platform="web"
+        onRequireLogin={vi.fn()}
+        onExit={vi.fn()}
+      />,
+    );
+
+    const sale = screen.getByRole("region", { name: "NVIDIA DGX Spark" });
+    expect(within(sale).getByRole("button", { name: "01:00 后开抢" })).toBeDisabled();
+    expect(sale).toHaveTextContent("下单后 3 个月");
+
+    act(() => vi.advanceTimersByTime(60_000));
+    fireEvent.click(within(sale).getByRole("button", { name: "立即抢购" }));
+    expect(within(sale).getByRole("button", { name: "查看抢购订单" })).toBeInTheDocument();
+    expect(sale).toHaveTextContent("499 台");
+
+    fireEvent.click(within(sale).getByRole("button", { name: "查看抢购订单" }));
+    expect(screen.getByRole("heading", { name: "待确认订单", level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /COD-NEW-001/ })).toHaveTextContent("NVIDIA DGX Spark 1 台");
+    expect(screen.getByRole("button", { name: /COD-NEW-001/ })).toHaveTextContent("02672 白鸽在线特供款");
+  });
+
+  it("requires enough card-hours before the DGX Spark purchase", () => {
+    vi.useFakeTimers();
+    render(
+      <ComputeMarketApp
+        session={signedInSession}
+        balanceCardHours="1,286.5"
+        initialPath="/compute"
+        platform="web"
+        onRequireLogin={vi.fn()}
+        onExit={vi.fn()}
+      />,
+    );
+
+    const sale = screen.getByRole("region", { name: "NVIDIA DGX Spark" });
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(sale).toHaveTextContent("15,916.2 卡时");
+    fireEvent.click(within(sale).getByRole("button", { name: "先兑换卡时" }));
+    expect(screen.getByRole("heading", { name: "购买卡时", level: 1 })).toBeInTheDocument();
+    expect(screen.getByText("DGX Spark 特供卡时包")).toBeInTheDocument();
   });
 
   it("switches to a substantive hosting page instead of an empty shell", () => {

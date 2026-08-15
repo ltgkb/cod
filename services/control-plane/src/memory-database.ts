@@ -1,6 +1,6 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { AccountSummary, AdminComputeRequestSummary, ComputeQuoteDecision, ComputeQuoteInput, ComputeRequestStatus, DeviceRecord, TaskStatus, UsageEvent } from '@cod/contracts';
-import { billedUsageEvent, CHAT_RESPONSE_CACHE_MAX_BYTES, computeRequestMatchesInput, creditPackCatalog, DEVICE_OFFLINE_AFTER_MS, encodeComputeRequestCursor, hashTaskLeaseToken, LEGACY_TASK_INTERRUPTED_ERROR, normalizeAdminComputeRequestQuery, requireAdmin, TASK_LEASE_DURATION_MS, TASK_LEASE_EXPIRED_ERROR, topupMatchesLedger, USAGE_RESERVATION_LEASE_DURATION_MS, USAGE_RESERVATION_REAP_BATCH_SIZE, USAGE_RESERVATION_REAP_INTERVAL_MS, usageMatchesLedger, validateComputeRequestId, validateComputeRequestStatus, validateComputeRequestTransition, validateDeviceInput, validateTaskExecutionClaimCredential, validateTaskExecutionCredential, validateTaskOutcome, validateTaskTransition, validateTopupRequest, validateUsageEvent, type AdminComputeRequestQuery, type AssertVerifiedRegistrationInput, type AuditEntry, type ChatRequestClaim, type ChatRequestCompletion, type CodDatabase, type CompleteVerifiedRegistrationInput, type CreditGrant, type CreditSummary, type IdentityRecord, type InvalidateRegistrationCodeInput, type LedgerEntry, type PaymentCompletion, type PaymentOrder, type PaymentOrderRequest, type Principal, type RegistrationRateLimitInput, type StartEmailRegistrationInput, type StartPhoneRegistrationInput, type SyncedTask, type TaskEvent, type TaskExecutionClaim, type TaskExecutionClaimCredential, type TaskExecutionCredential, type TaskLeaseHeartbeat, type TaskOutcome, type TopupRequest, type VerifyRegistrationEmailInput, type VerifyRegistrationPhoneInput } from './database.js';
+import { billedUsageEvent, CHAT_RESPONSE_CACHE_MAX_BYTES, computeRequestMatchesInput, creditPackCatalog, DEVICE_OFFLINE_AFTER_MS, encodeComputeRequestCursor, hashTaskLeaseToken, LEGACY_TASK_INTERRUPTED_ERROR, normalizeAdminComputeRequestQuery, requireAdmin, TASK_LEASE_DURATION_MS, TASK_LEASE_EXPIRED_ERROR, topupMatchesLedger, USAGE_RESERVATION_LEASE_DURATION_MS, USAGE_RESERVATION_REAP_BATCH_SIZE, USAGE_RESERVATION_REAP_INTERVAL_MS, usageMatchesLedger, validateComputeRequestId, validateComputeRequestStatus, validateComputeRequestTransition, validateDeviceInput, validateTaskExecutionClaimCredential, validateTaskExecutionCredential, validateTaskOutcome, validateTaskTransition, validateTopupRequest, validateUsageEvent, type AdminComputeRequestQuery, type AssertVerifiedRegistrationInput, type AuditEntry, type ChatRequestClaim, type ChatRequestCompletion, type CodDatabase, type CompleteVerifiedRegistrationInput, type CreditGrant, type CreditSummary, type ExternalIdentityInput, type IdentityRecord, type InvalidateRegistrationCodeInput, type LedgerEntry, type PaymentCompletion, type PaymentOrder, type PaymentOrderRequest, type Principal, type RegistrationRateLimitInput, type StartEmailRegistrationInput, type StartPhoneRegistrationInput, type SyncedTask, type TaskEvent, type TaskExecutionClaim, type TaskExecutionClaimCredential, type TaskExecutionCredential, type TaskLeaseHeartbeat, type TaskOutcome, type TopupRequest, type VerifyRegistrationEmailInput, type VerifyRegistrationPhoneInput } from './database.js';
 import { HttpError } from './errors.js';
 import type { ComputeRequest, ComputeRequestInput } from './compute-market.js';
 import { recordUsageReservationsReaped } from './metrics.js';
@@ -55,6 +55,7 @@ const retrySeconds=(at:number,now:number)=>Math.max(0,Math.ceil((at-now)/1000));
 export class MemoryDatabase implements CodDatabase {
   private readonly users = new Map<string, UserState>();
   private readonly identities = new Map<string, IdentityRecord>();
+  private readonly externalIdentities = new Map<string, IdentityRecord>();
   private readonly providerEvents = new Map<string, string>();
   private readonly registrationChallenges = new Map<string, MemoryRegistrationChallenge>();
   private readonly registrationRateLimits = new Map<string,{count:number;expiresAt:number}>();
@@ -65,6 +66,14 @@ export class MemoryDatabase implements CodDatabase {
   async health() { return true; }
   async ensurePrincipal(p: Principal) { this.state(p);this.ensureLegacyIdentity(p); }
   async findIdentityByEmail(email:string){return this.identities.get(email.toLowerCase())??null;}
+  async findExternalIdentity(issuer:string,subject:string){return this.externalIdentities.get(`${issuer}\0${subject}`)??null;}
+  async registerExternalIdentity(input:ExternalIdentityInput){
+    const key=`${input.issuer}\0${input.subject}`;const mapped=this.externalIdentities.get(key);if(mapped)return{identity:mapped,created:false};
+    if(this.identities.has(input.email.toLowerCase()))throw new HttpError('该邮箱已有 COD 账号，请先使用原方式登录后绑定统一身份',409,'external_identity_link_required');
+    const principal:Principal={userId:input.userId,tenantId:input.tenantId,email:input.email,role:'member'};
+    const identity:IdentityRecord={principal,passwordHash:null,phoneE164:null,emailVerifiedAt:input.now.toISOString(),phoneVerifiedAt:null,inviteCode:`KAI-${input.userId.replace(/^usr_/,'').slice(0,10).toUpperCase()}`,referredByUserId:null,referralCodeUsed:null};
+    this.state(principal);this.identities.set(input.email.toLowerCase(),identity);this.externalIdentities.set(key,identity);return{identity,created:true};
+  }
   async registerIdentity(p:Principal,passwordHash:string,inviteCode:string|null,allowExisting:boolean){
     const email=p.email.toLowerCase();const current=this.identities.get(email);
     if(current?.passwordHash)throw new HttpError('该邮箱已经注册，请直接登录',409,'email_registered');
