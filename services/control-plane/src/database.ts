@@ -314,6 +314,7 @@ export interface AdminComputeRequestQuery {
 export const CHAT_RESPONSE_CACHE_MAX_BYTES = 512 * 1024;
 export const adminComputeRequestIndexMigration = 'CREATE INDEX CONCURRENTLY IF NOT EXISTS cod_compute_requests_admin_created_idx ON cod_compute_requests(created_at DESC, id DESC)';
 export const userEmailGlobalUniqueIndexMigration = 'CREATE UNIQUE INDEX CONCURRENTLY cod_users_email_global_unique ON cod_users (lower(email))';
+export const externalIdentityTrialCreditSql = `INSERT INTO cod_credit_grants (id,tenant_id,user_id,pack_id,name,purchase_price_cents,original_cents,remaining_cents,expires_at,status,idempotency_key) VALUES ($1,$2,$3,'trial','新用户试用金',0,1000,1000,$4::timestamptz+interval '30 days','active',$5)`;
 
 export interface CodDatabase {
   initialize(): Promise<void>;
@@ -1184,7 +1185,7 @@ export class PostgresDatabase implements CodDatabase {
       const inserted=await client.query(`INSERT INTO cod_users (tenant_id,user_id,email,display_name,password_hash,invite_code,email_verified_at,registration_method,role) VALUES ($1,$2,$3,$4,NULL,$5,$6,'trusted_federated','member') RETURNING *`,[input.tenantId,input.userId,input.email,input.displayName??input.email.split('@')[0],inviteCode,input.now]);
       await client.query(`INSERT INTO cod_external_identities (issuer,subject,tenant_id,user_id,email_snapshot,created_at,last_login_at) VALUES ($1,$2,$3,$4,$5,$6,$6)`,[input.issuer,input.subject,input.tenantId,input.userId,input.email,input.now]);
       const grantId=randomUUID();const key='trial-credit-v1';
-      await client.query(`INSERT INTO cod_credit_grants (id,tenant_id,user_id,pack_id,name,purchase_price_cents,original_cents,remaining_cents,expires_at,status,idempotency_key) VALUES ($1,$2,$3,'trial','新用户试用金',0,1000,1000,$4+interval '30 days','active',$5)`,[grantId,input.tenantId,input.userId,input.now,key]);
+      await client.query(externalIdentityTrialCreditSql,[grantId,input.tenantId,input.userId,input.now,key]);
       await client.query(`INSERT INTO cod_ledger (id,tenant_id,user_id,type,amount_cents,wallet_amount_cents,credit_amount_cents,reference,idempotency_key,payment_direction,created_at) VALUES ($1,$2,$3,'trial_credit',1000,0,1000,'新用户试用金',$4,'平台赠送 → COD 使用额度',$5)`,[randomUUID(),input.tenantId,input.userId,key,input.now]);
       return{identity:identityFromRow(inserted.rows[0]),created:true};
     });

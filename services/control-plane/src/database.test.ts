@@ -1,9 +1,14 @@
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
-import { PostgresDatabase, USAGE_RESERVATION_REAP_BATCH_SIZE, USAGE_RESERVATION_REAP_INTERVAL_MS, usageReservationLeaseSchemaMigration, usageReservationReapSql } from './database.js';
+import { externalIdentityTrialCreditSql, PostgresDatabase, USAGE_RESERVATION_REAP_BATCH_SIZE, USAGE_RESERVATION_REAP_INTERVAL_MS, usageReservationLeaseSchemaMigration, usageReservationReapSql } from './database.js';
 
 describe('PostgresDatabase pool lifecycle', () => {
+  it('casts the federated registration timestamp before calculating trial-credit expiry', () => {
+    expect(externalIdentityTrialCreditSql).toContain("$4::timestamptz+interval '30 days'");
+    expect(externalIdentityTrialCreditSql).not.toContain("$4+interval '30 days'");
+  });
+
   it('logs idle pool errors instead of letting EventEmitter terminate the service', async () => {
     const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const database = new PostgresDatabase('postgresql://cod:test@127.0.0.1:5432/cod');
