@@ -44,6 +44,9 @@ describe("ComputeMarketApp", () => {
     expect(screen.getByText("NVIDIA A100 SXM")).toBeInTheDocument();
     expect(screen.getAllByText(/外部公开参考/)).toHaveLength(7);
     expect(screen.getAllByText("GPU 容器")).toHaveLength(7);
+    expect(screen.getByRole("region", { name: "限时秒杀" })).toHaveTextContent("500 台特供 · 官网原价五折");
+    expect(screen.getByRole("link", { name: "进入限时秒杀" })).toHaveAttribute("href", "#flash-sale");
+    expect(screen.getAllByText("NVIDIA DGX Spark")).toHaveLength(2);
     expect(screen.getByRole("region", { name: "NVIDIA DGX Spark" })).toHaveTextContent("02672 白鸽在线特供款");
     expect(screen.getByRole("region", { name: "NVIDIA DGX Spark" })).toHaveTextContent("500 台");
     expect(screen.getByRole("region", { name: "NVIDIA DGX Spark" })).toHaveTextContent("$2,349.50");
@@ -134,7 +137,7 @@ describe("ComputeMarketApp", () => {
 
     const sale = screen.getByRole("region", { name: "NVIDIA DGX Spark" });
     expect(within(sale).getByRole("button", { name: "01:00 后开抢" })).toBeDisabled();
-    expect(sale).toHaveTextContent("下单后 3 个月");
+    expect(sale).toHaveTextContent("下单后 3 个月内");
 
     act(() => vi.advanceTimersByTime(60_000));
     fireEvent.click(within(sale).getByRole("button", { name: "立即抢购" }));

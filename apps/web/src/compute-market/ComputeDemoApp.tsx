@@ -267,6 +267,39 @@ function ProductCard({
   );
 }
 
+function SparkCatalogCard() {
+  return (
+    <article className="compute-v2-product-card compute-v2-spark-catalog-card">
+      <a className="compute-v2-product-image" href="#flash-sale" aria-label="前往 NVIDIA DGX Spark 限时秒杀">
+        <img src="/compute/dgx-spark-real.jpg" alt="白色背景上的 NVIDIA DGX Spark 实物图" />
+        <span>限时秒杀</span>
+      </a>
+      <div className="compute-v2-product-body">
+        <header>
+          <div>
+            <h3>NVIDIA DGX Spark</h3>
+            <p>GB10 Grace Blackwell · 128GB 统一内存</p>
+          </div>
+          <strong>{sparkSaleCardHours.toLocaleString("zh-CN", { minimumFractionDigits: 1 })} <small>卡时/台</small></strong>
+        </header>
+        <div className="compute-v2-tags"><span>个人 AI 超算</span><span>500 台限定</span><span>五折特供</span></div>
+        <dl className="compute-v2-spec-grid">
+          <div><dt>超级芯片</dt><dd>GB10 Grace Blackwell</dd></div>
+          <div><dt>AI 算力</dt><dd>最高 1 PFLOP FP4</dd></div>
+          <div><dt>统一内存</dt><dd>128GB</dd></div>
+          <div><dt>存储</dt><dd>4TB NVMe</dd></div>
+        </dl>
+        <p className="compute-v2-price-reference">普通区仅展示，购买统一前往限时秒杀专区</p>
+        <footer>
+          <span><MapPin /> 02672 白鸽在线特供</span>
+          <a href="#flash-sale">进入限时秒杀 <CaretRight /></a>
+        </footer>
+        <p className="compute-v2-availability"><i />预计下单后 3 个月内发货</p>
+      </div>
+    </article>
+  );
+}
+
 function SparkFlashSale({
   readOnly,
   session,
@@ -317,7 +350,7 @@ function SparkFlashSale({
     const order = onCreateOrder({
       status: "pending",
       resource: "NVIDIA DGX Spark 1 台",
-      meta: "02672 白鸽在线特供款，预计下单后 3 个月发货",
+      meta: "02672 白鸽在线特供款，预计下单后 3 个月内发货",
       amount: `${sparkSaleCardHours.toLocaleString("zh-CN", { minimumFractionDigits: 1 })} 卡时`,
       label: "待确认",
     });
@@ -325,32 +358,44 @@ function SparkFlashSale({
   };
 
   return (
-    <section className="compute-v2-spark-sale" role="region" aria-labelledby="spark-sale-title">
-      <div className="compute-v2-spark-visual">
-        <img src="/compute/dgx-spark-real.jpg" alt="白色背景上的 NVIDIA DGX Spark 实物图" />
-        <span>500 台限定</span>
-      </div>
-      <div className="compute-v2-spark-content">
-        <header>
-          <span>02672 白鸽在线特供款</span>
-          <strong>限时五折</strong>
-        </header>
-        <h2 id="spark-sale-title">NVIDIA DGX Spark</h2>
-        <p>GB10 Grace Blackwell 超级芯片，128GB 统一内存与 4TB NVMe，桌面端最高 1 PFLOP FP4 AI 算力。</p>
-        <dl>
-          <div><dt>活动库存</dt><dd>{submittedOrder ? 499 : 500} 台</dd></div>
-          <div><dt>开抢时间</dt><dd>{saleOpen ? "现已开抢" : "页面打开 1 分钟后"}</dd></div>
-          <div><dt>预计发货</dt><dd>下单后 3 个月</dd></div>
-        </dl>
-        <div className="compute-v2-spark-purchase">
-          <div><small>官网原价 <s>${sparkOriginalPriceUsd.toLocaleString("en-US")}.00</s></small><span>五折参考 ${sparkSalePriceUsd.toLocaleString("en-US", { minimumFractionDigits: 2 })}</span><strong>{sparkSaleCardHours.toLocaleString("zh-CN", { minimumFractionDigits: 1 })} <em>卡时</em></strong></div>
-          <div className="compute-v2-spark-action">
-            <span aria-live="polite"><Clock /> {saleOpen ? "已开抢" : `${countdown} 后开抢`}</span>
-            {readOnly ? <a href="/compute">进入上线准备版抢购</a> : submittedOrder ? <button type="button" onClick={onViewOrders}>查看抢购订单</button> : <button type="button" disabled={!saleOpen} onClick={purchase}>{saleOpen ? (!session ? "登录后抢购" : hasEnoughCardHours ? "立即抢购" : "先兑换卡时") : `${countdown} 后开抢`}</button>}
-          </div>
+    <section className="compute-v2-flash-sale" id="flash-sale" aria-labelledby="flash-sale-heading">
+      <header className="compute-v2-flash-sale-heading">
+        <div>
+          <h2 id="flash-sale-heading"><Lightning /> 限时秒杀</h2>
+          <p>独立特供活动 · 限量设备先到先得</p>
         </div>
-        <footer><span>每个账号限购 1 台，需先兑换卡时后购买。按 2026-08-14 汇率中间价与 1 卡时 = ¥1.002 折算。</span><a href="https://marketplace.nvidia.com/en-us/enterprise/personal-ai-supercomputers/dgx-spark/" target="_blank" rel="noreferrer">查看英伟达官方价格与规格</a></footer>
-      </div>
+        <div className="compute-v2-flash-sale-status">
+          <small>500 台特供 · 官网原价五折</small>
+          <strong><Clock /> {saleOpen ? "正在抢购" : `${countdown} 后开抢`}</strong>
+        </div>
+      </header>
+      <article className="compute-v2-spark-sale" role="region" aria-labelledby="spark-sale-title">
+        <div className="compute-v2-spark-visual">
+          <img src="/compute/dgx-spark-real.jpg" alt="白色背景上的 NVIDIA DGX Spark 实物图" />
+          <span>500 台限定</span>
+        </div>
+        <div className="compute-v2-spark-content">
+          <header>
+            <span>02672 白鸽在线特供款</span>
+            <strong>限时五折</strong>
+          </header>
+          <h2 id="spark-sale-title">NVIDIA DGX Spark</h2>
+          <p>GB10 Grace Blackwell 超级芯片，128GB 统一内存与 4TB NVMe，桌面端最高 1 PFLOP FP4 AI 算力。</p>
+          <dl>
+            <div><dt>活动库存</dt><dd>{submittedOrder ? 499 : 500} 台</dd></div>
+            <div><dt>开抢时间</dt><dd>{saleOpen ? "现已开抢" : "页面打开 1 分钟后"}</dd></div>
+            <div><dt>预计发货</dt><dd>下单后 3 个月内</dd></div>
+          </dl>
+          <div className="compute-v2-spark-purchase">
+            <div><small>官网原价 <s>${sparkOriginalPriceUsd.toLocaleString("en-US")}.00</s></small><span>五折参考 ${sparkSalePriceUsd.toLocaleString("en-US", { minimumFractionDigits: 2 })}</span><strong>{sparkSaleCardHours.toLocaleString("zh-CN", { minimumFractionDigits: 1 })} <em>卡时</em></strong></div>
+            <div className="compute-v2-spark-action">
+              <span aria-live="polite"><Clock /> {saleOpen ? "已开抢" : `${countdown} 后开抢`}</span>
+              {readOnly ? <a href="/compute">进入上线准备版抢购</a> : submittedOrder ? <button type="button" onClick={onViewOrders}>查看抢购订单</button> : <button type="button" disabled={!saleOpen} onClick={purchase}>{saleOpen ? (!session ? "登录后抢购" : hasEnoughCardHours ? "立即抢购" : "先兑换卡时") : `${countdown} 后开抢`}</button>}
+            </div>
+          </div>
+          <footer><span>每个账号限购 1 台，需先兑换卡时后购买。按 2026-08-14 汇率中间价与 1 卡时 = ¥1.002 折算。</span><a href="https://marketplace.nvidia.com/en-us/enterprise/personal-ai-supercomputers/dgx-spark/" target="_blank" rel="noreferrer">查看英伟达官方价格与规格</a></footer>
+        </div>
+      </article>
     </section>
   );
 }
@@ -383,7 +428,8 @@ function HomePage({
   onViewOrders: () => void;
 }) {
   const [filter, setFilter] = useState("全部");
-  const filters = ["全部", "B300", "H200", "H100", "A100", "L40S", "消费级"];
+  const filters = ["全部", "DGX", "B300", "H200", "H100", "A100", "L40S", "消费级"];
+  const showSparkProduct = filter === "全部" || filter === "DGX";
   const visibleProducts = products.filter((product) => {
     if (filter === "全部") return true;
     if (filter === "消费级") return product.gpuModel.includes("4090") || product.gpuModel.includes("5090");
@@ -435,6 +481,7 @@ function HomePage({
           {filters.map((item) => <button type="button" className={filter === item ? "active" : ""} onClick={() => setFilter(item)} key={item}>{item}</button>)}
         </div>
         <div className="compute-v2-product-list">
+          {showSparkProduct && <SparkCatalogCard />}
           {visibleProducts.map((product) => <ProductCard product={product} onOpen={() => onOpenProduct(product.id)} key={product.id} />)}
         </div>
       </section>
