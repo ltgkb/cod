@@ -32,11 +32,12 @@
     {
       "path": "/compute/gpu-h100-real.webp",
       "kind": "product-photo",
-      "source": "https://www.hpc.co.jp/tech-blog/wp-content/uploads/sites/11/2022/12/h100-pci-e-3qtr-right-reverse_small.png",
-      "author": "HPC SYSTEMS product media",
+      "source": "https://calhountech.com/products/900-21010-0000-000-nvidia-h100-80-gb-graphic-card-pcie-hbm2e-memory-350w.html",
+      "sourceImage": "https://cdn11.bigcommerce.com/s-r86drclj/images/stencil/1280x1280/products/1020344/1477713/s-l1600_1__24453.1703178928.jpg?c=2",
+      "author": "Calhoun Technologies product media; white-background cleanup by COD product team with OpenAI image editing",
       "license": "Third-party product media; confirm commercial usage authorization",
       "createdAt": "2026-08-15T00:00:00.000Z",
-      "usageNote": "NVIDIA H100 accelerator reference photo on a white background."
+      "usageNote": "NVIDIA H100 accelerator reference photo normalized to the marketplace's 16:7 pure-white product-image standard."
     },
     {
       "path": "/compute/gpu-a100-real.webp",
