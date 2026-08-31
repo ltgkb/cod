@@ -25,40 +25,10 @@
   ],
   "affectedPackages": [
     {
-      "name": "@expo/cli",
-      "nodePath": "node_modules/@expo/cli",
-      "version": "57.0.15",
-      "isDirect": false
-    },
-    {
       "name": "@expo/metro",
       "nodePath": "node_modules/@expo/metro",
       "version": "56.0.0",
       "isDirect": false
-    },
-    {
-      "name": "@expo/metro-config",
-      "nodePath": "node_modules/@expo/metro-config",
-      "version": "57.0.8",
-      "isDirect": false
-    },
-    {
-      "name": "@react-native/community-cli-plugin",
-      "nodePath": "node_modules/@react-native/community-cli-plugin",
-      "version": "0.86.2",
-      "isDirect": false
-    },
-    {
-      "name": "@react-native/virtualized-lists",
-      "nodePath": "node_modules/@react-native/virtualized-lists",
-      "version": "0.86.2",
-      "isDirect": false
-    },
-    {
-      "name": "expo",
-      "nodePath": "node_modules/expo",
-      "version": "57.0.13",
-      "isDirect": true
     },
     {
       "name": "image-size",
@@ -83,12 +53,6 @@
       "nodePath": "node_modules/metro-transform-worker",
       "version": "0.84.4",
       "isDirect": false
-    },
-    {
-      "name": "react-native",
-      "nodePath": "node_modules/react-native",
-      "version": "0.86.2",
-      "isDirect": true
     }
   ],
   "lockfile": {

@@ -165,8 +165,8 @@ test('rejects a new or changed image-size parent', () => {
 
 test('rejects an allowlisted propagation edge that no longer terminates at image-size', () => {
   const input = makeInput();
-  input.fullAudit.vulnerabilities['@expo/cli'].via = ['@expo/metro-config'];
-  input.fullAudit.vulnerabilities['@expo/metro-config'].via = ['@expo/cli'];
+  input.fullAudit.vulnerabilities['@expo/metro'].via = ['metro-config'];
+  input.fullAudit.vulnerabilities['metro-config'].via = ['@expo/metro'];
   assert.throws(() => validateAuditGate(input), /does not terminate at image-size/);
 });
 
