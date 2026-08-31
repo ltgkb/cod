@@ -5,9 +5,10 @@ import test from 'node:test';
 const read = (path) => readFile(new URL(path, import.meta.url), 'utf8');
 
 test('public landing page keeps the workspace behind /app/', async () => {
-  const [landing, showcaseScript] = await Promise.all([
+  const [landing, showcaseScript, showcaseStyles] = await Promise.all([
     read('../index.html'),
     read('../public/showcase/script.js'),
+    read('../public/showcase/styles.css'),
   ]);
   assert.match(landing, /href="\.\/app\/"/);
   assert.match(landing, /id="registerButton"[\s\S]*href="\.\/app\/\?auth=register"[\s\S]*hidden/);
@@ -15,6 +16,9 @@ test('public landing page keeps the workspace behind /app/', async () => {
   assert.match(showcaseScript, /fetch\("\/api\/capabilities"/);
   assert.match(showcaseScript, /registrationEnabled === true/);
   assert.match(showcaseScript, /heroDownloadButton\.hidden = true/);
+  const heroImageRule = showcaseStyles.match(/\.hero-image-shell img\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(heroImageRule, /display:\s*block/);
+  assert.doesNotMatch(heroImageRule, /aspect-ratio|object-fit|object-position/);
   assert.doesNotMatch(landing, /src="\/src\/main\.tsx"/);
   assert.doesNotMatch(landing, /cdn-cgi|challenge-platform/);
 });
