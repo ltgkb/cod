@@ -34,4 +34,10 @@ describe('chatFailureMessage', () => {
     expect(message).toContain('模型服务认证配置异常');
     expect(message).not.toContain('自动重试');
   });
+
+  it('distinguishes upstream provider credit from the COD wallet', () => {
+    const message = chatFailureMessage(new ApiError('Provider quota exhausted', 402, 'ai_upstream_quota_exhausted'));
+    expect(message).toContain('ai.kai.com 上游额度不足');
+    expect(message).not.toContain('COD 可用额度不足');
+  });
 });

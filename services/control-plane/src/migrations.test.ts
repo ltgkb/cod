@@ -121,6 +121,17 @@ describe('production-safe migrations and rate limits', () => {
     expect(databaseSource).toContain('ALTER TABLE cod_tasks VALIDATE CONSTRAINT cod_tasks_execution_lease_check');
   });
 
+  it('persists native taskboard tasks and comments with owner-scoped relations',()=>{
+    const databaseSource=readFileSync(new URL('./database.ts',import.meta.url),'utf8');
+    expect(databaseSource).toContain('CREATE TABLE IF NOT EXISTS cod_project_tasks');
+    expect(databaseSource).toContain("status text NOT NULL DEFAULT 'todo' CHECK (status IN ('todo','in_progress','in_review','blocked','done','cancelled'))");
+    expect(databaseSource).toContain('version integer NOT NULL DEFAULT 1 CHECK (version >= 1)');
+    expect(databaseSource).toContain('CREATE TABLE IF NOT EXISTS cod_project_task_comments');
+    expect(databaseSource).toContain('FOREIGN KEY (task_id,tenant_id,user_id) REFERENCES cod_project_tasks(id,tenant_id,user_id) ON DELETE CASCADE');
+    expect(databaseSource).toContain('cod_project_tasks_owner_project_updated_idx ON cod_project_tasks(tenant_id,user_id,project_id,updated_at DESC,id DESC)');
+    expect(databaseSource).toContain('cod_project_task_comments_owner_task_created_idx ON cod_project_task_comments(tenant_id,user_id,task_id,created_at,id)');
+  });
+
   it('trusts only the observed multi-AZ ALB subnets and isolates heartbeat bursts', () => {
     const httpConfig = readFileSync(new URL('../../../deploy/nginx-http.conf', import.meta.url), 'utf8');
     const siteConfig = readFileSync(new URL('../../../deploy/cod.nginx.conf', import.meta.url), 'utf8');

@@ -622,6 +622,55 @@ describe('control-plane production rules', () => {
     expect((await fetch(`${retryServer.base}/v1/chat/completions`,{method:'POST',headers:retryHeaders,body:retryBody})).status).toBe(200);expect(retryCalls).toBe(3);expect(upstreamKeys[0]).toMatch(/^cod-[a-f0-9]{48}$/);expect(new Set(upstreamKeys).size).toBe(1);
   });
 
+  it('serves the native project taskboard lifecycle with optimistic concurrency and owner isolation',async()=>{
+    const {base,database}=await start();
+    const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com',password:'Password123'})});
+    const {token}=await login.json() as {token:string};const headers={authorization:`Bearer ${token}`,'content-type':'application/json'};
+    const createdResponse=await fetch(`${base}/v1/projects/workspace/tasks`,{method:'POST',headers,body:JSON.stringify({title:'修复任务看板',description:'连通六列状态',priority:'high'})});
+    expect(createdResponse.status).toBe(201);
+    const created=await createdResponse.json() as {id:string;status:string;version:number;projectId:string};
+    expect(created).toMatchObject({projectId:'workspace',status:'todo',version:1,priority:'high'});
+    expect(await (await fetch(`${base}/v1/projects/workspace/tasks`,{headers})).json()).toEqual([expect.objectContaining({id:created.id})]);
+
+    const transition=(status:string,ifVersion:number,extra:Record<string,unknown>={})=>fetch(`${base}/v1/tasks/${created.id}/transition`,{method:'POST',headers,body:JSON.stringify({status,ifVersion,...extra})});
+    const missingThread=await transition('in_progress',1);expect(missingThread.status).toBe(400);expect(await missingThread.json()).toMatchObject({error:'task_thread_required'});
+    const running=await (await transition('in_progress',1,{threadId:'ui-taskboard-test'})).json() as {version:number;claimedByThreadId:string};
+    expect(running).toMatchObject({status:'in_progress',version:2,claimedByThreadId:'ui-taskboard-test'});
+    const stale=await transition('blocked',1,{threadId:'ui-taskboard-test'});expect(stale.status).toBe(409);expect(await stale.json()).toMatchObject({error:'version_conflict'});
+
+    const commentResponse=await fetch(`${base}/v1/tasks/${created.id}/comments`,{method:'POST',headers,body:JSON.stringify({body:'请先补齐 API',threadId:'ui-taskboard-test',ifVersion:2,authorType:'user'})});
+    expect(commentResponse.status).toBe(201);
+    const commented=await commentResponse.json() as {task:{version:number};comment:{body:string;authorType:string;authorId:string}};
+    expect(commented).toMatchObject({task:{version:3},comment:{body:'请先补齐 API',authorType:'user',authorId:expect.any(String)}});
+    expect(await (await fetch(`${base}/v1/tasks/${created.id}/comments`,{headers})).json()).toEqual([expect.objectContaining({body:'请先补齐 API'})]);
+    const review=await (await transition('in_review',3,{threadId:'ui-taskboard-test'})).json() as {version:number};expect(review).toMatchObject({status:'in_review',version:4});
+    const unaccepted=await transition('done',4,{threadId:'ui-taskboard-test'});expect(unaccepted.status).toBe(409);expect(await unaccepted.json()).toMatchObject({error:'task_acceptance_required'});
+    expect(await (await transition('done',4,{threadId:'ui-taskboard-test',userAccepted:true})).json()).toMatchObject({status:'done',version:5});
+
+    const otherEmail='taskboard-other@kai.com';const otherPrincipal={userId:`usr_${createHash('sha256').update(otherEmail).digest('hex').slice(0,20)}`,tenantId:'tenant_kai_com',email:otherEmail,role:'member' as const};
+    await database.registerIdentity(otherPrincipal,testPasswordHash,null,false);
+    const otherLogin=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:otherEmail,password:'Password123'})});const otherToken=(await otherLogin.json() as {token:string}).token;const otherHeaders={authorization:`Bearer ${otherToken}`,'content-type':'application/json'};
+    expect(await (await fetch(`${base}/v1/projects/workspace/tasks`,{headers:otherHeaders})).json()).toEqual([]);
+    expect((await fetch(`${base}/v1/tasks/${created.id}/comments`,{headers:otherHeaders})).status).toBe(404);
+    expect((await fetch(`${base}/v1/tasks/${created.id}/transition`,{method:'POST',headers:otherHeaders,body:JSON.stringify({status:'cancelled',ifVersion:5})})).status).toBe(404);
+  });
+
+  it('maps exhausted upstream provider credit separately from COD wallet balance',async()=>{
+    const fetcher=vi.fn(async(input:RequestInfo|URL):Promise<Response>=>{
+      const url=String(input);
+      if(url.endsWith('/api/pricing'))return Response.json({data:[{model_name:'quota-model',quota_type:0,model_ratio:1,completion_ratio:1,supported_endpoint_types:['openai']}]});
+      if(url.endsWith('/api/status'))return Response.json({data:{quota_per_unit:500000,price:7}});
+      if(url.endsWith('/models'))return Response.json({data:[{id:'quota-model'}]});
+      if(url.endsWith('/chat/completions'))return Response.json({error:{message:'预扣费额度失败, 用户剩余额度: ¥0.003712',code:'insufficient_user_quota'}},{status:403});
+      throw new Error(`Unexpected provider request: ${url}`);
+    });
+    const {base}=await start({KAI_API_KEY:'test-key'},fetcher as typeof fetch);
+    const login=await fetch(`${base}/api/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'developer@kai.com',password:'Password123'})});const {token}=await login.json() as {token:string};
+    const response=await fetch(`${base}/v1/chat/completions`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:JSON.stringify({source:'ai-kai',model:'quota-model',messages:[{role:'user',content:'hello'}],max_tokens:4096})});
+    expect(response.status).toBe(402);
+    expect(await response.json()).toEqual({error:'ai_upstream_quota_exhausted',message:'ai.kai.com 上游额度不足，本次失败未扣费。请为模型源充值或更换有余额的 Key。'});
+  });
+
   it('maps upstream authentication failures to a sanitized gateway error',async()=>{
     let chatCalls=0;let upstreamBodyCancelled=false;
     const fetcher=vi.fn(async(input:RequestInfo|URL):Promise<Response>=>{
