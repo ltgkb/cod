@@ -290,6 +290,8 @@ export interface HostingApplicationV2 extends HostingApplicationDraft {
   tenantId: string;
   userId: string;
   status: HostingApplicationStatus;
+  hostingStartedAt: string | null;
+  hostingEndsAt: string | null;
   events: Array<ComputeStatusEvent<HostingApplicationStatus>>;
   nextAction: string | null;
   responsibleParty: 'user' | 'cod' | 'partner' | null;

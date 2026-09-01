@@ -83,13 +83,35 @@ describe('ComputeApp', () => {
 
   it('does not render unavailable service shells or withdrawal language', async () => {
     mockFetch((url) => {
-      if (url.endsWith('/api/compute/v2/assets/summary')) return json({ availableCardHoursMilli: 0, lockedCardHoursMilli: 0, pendingHostedSettlementCardHoursMilli: null, availableHostedSettlementCardHoursMilli: null, settledHostedCardHoursMilli: null, runningResourceCount: 0 });
-      if (url.endsWith('/api/compute/v2/devices')) return json({ items: [], nextCursor: null });
+      if (url.endsWith('/api/compute/v2/assets/summary')) return json({ availableCardHoursMilli: 9_200, lockedCardHoursMilli: 1_000, pendingHostedSettlementCardHoursMilli: 500, availableHostedSettlementCardHoursMilli: 3_000, settledHostedCardHoursMilli: 12_500, runningResourceCount: 0 });
+      if (url.endsWith('/api/compute/v2/assets/ledger')) return json({ items: [{ id: 'settlement-1', tenantId: 'tenant', userId: 'user', type: 'hosting_settlement', availableDeltaCardHoursMilli: 4_000, lockedDeltaCardHoursMilli: 0, reference: 'hosting:device-1', createdAt: new Date().toISOString() }], nextCursor: null });
+      if (url.endsWith('/api/compute/v2/devices')) return json({ items: [{ id: 'device-1', tenantId: 'tenant', userId: 'user', hostingApplicationId: 'hosting-1', name: 'H100 节点', gpuModel: 'H100', gpuCount: 8, regionLabel: '香港', status: 'running', lastHeartbeatAt: new Date().toISOString(), availability24hPercent: 99.9, actionRequired: null, events: [], revision: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, { id: 'device-2', tenantId: 'tenant', userId: 'user', hostingApplicationId: 'hosting-1', name: 'RTX 5090 节点', gpuModel: 'RTX 5090', gpuCount: 4, regionLabel: '香港', status: 'maintenance', lastHeartbeatAt: null, availability24hPercent: null, actionRequired: null, events: [], revision: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }], nextCursor: null });
+      if (url.endsWith('/api/compute/v2/hosting/applications')) return json({ items: [{ subjectType: 'enterprise', verificationStatus: 'verified', contactName: '负责人', contactPhone: '13800001111', city: '香港', devices: [], rackUnits: 4, powerWatts: 4000, networkRequirement: '100G', hostingMonths: 12, availableFrom: '2026-09-01', slaRequirement: '99.9%', settlementPreference: 'COD 卡时', responsibilityAccepted: true, privacyAccepted: true, id: 'hosting-1', tenantId: 'tenant', userId: 'user', status: 'running', hostingStartedAt: new Date(Date.now() - 86400_000).toISOString(), hostingEndsAt: new Date(Date.now() + 40 * 86400_000).toISOString(), events: [], nextAction: null, responsibleParty: 'cod', revision: 8, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }], nextCursor: null });
       return undefined;
     });
     const session = { token: 'token', account: { userId: 'user', displayName: '测试用户', balanceCents: 0, currency: 'CNY' as const, plan: 'developer' as const, role: 'member' as const, billingExempt: false } };
     render(<ComputeApp {...props} session={session} initialPath="/compute/me" />);
-    expect(await screen.findByText('统一 COD 账户')).toBeInTheDocument(); expect(screen.queryByText('优惠券')).not.toBeInTheDocument(); expect(screen.queryByText('地址管理')).not.toBeInTheDocument(); expect(document.body).not.toHaveTextContent('提现');
+    expect(await screen.findByText('GPU 资产与工作 Agent 统一账户')).toBeInTheDocument();
+    expect(await screen.findByText('12.50 卡时')).toBeInTheDocument();
+    expect(screen.getByText('2 台')).toBeInTheDocument();
+    expect(screen.getByText('40 天')).toBeInTheDocument();
+    expect(screen.getByText('9.20 卡时')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: '近 30 天托管收益折线图' })).toBeInTheDocument();
+    expect(screen.queryByText('优惠券')).not.toBeInTheDocument(); expect(screen.queryByText('地址管理')).not.toBeInTheDocument(); expect(document.body).not.toHaveTextContent('提现');
+  });
+
+  it('shows truthful unavailable states without calling private compute APIs', async () => {
+    const discoveryCapabilities: ComputeCapabilities = { ...capabilities, instantPurchase: false, reservationPurchase: false, hosting: false, devices: false, assets: false, referrals: false, news: false, services: { ...capabilities.services, onlineSupport: false } };
+    const fetcher = mockFetch((url) => url.endsWith('/api/compute/v2/capabilities') ? json(discoveryCapabilities) : undefined);
+    const session = { token: 'token', account: { userId: 'user', displayName: '测试用户', balanceCents: 0, currency: 'CNY' as const, plan: 'developer' as const, role: 'member' as const, billingExempt: false } };
+    render(<ComputeApp {...props} session={session} initialPath="/compute/me" />);
+    expect(await screen.findByRole('heading', { name: '我的收益与托管' })).toBeInTheDocument();
+    expect(screen.getByText('累计收益')).toBeInTheDocument();
+    expect(screen.getByText('设备个数')).toBeInTheDocument();
+    expect(screen.getByText('托管剩余时长')).toBeInTheDocument();
+    expect(screen.getByText('我的卡时')).toBeInTheDocument();
+    expect(screen.getByText('收益趋势待开放')).toBeInTheDocument();
+    expect(fetcher.mock.calls.some(([url]) => /\/api\/compute\/v2\/(assets|devices|hosting)/.test(String(url)))).toBe(false);
   });
 
   it('opens discovery mode without exposing unconnected account or transaction routes', async () => {
