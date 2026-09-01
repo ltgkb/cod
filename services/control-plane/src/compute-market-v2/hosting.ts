@@ -10,6 +10,16 @@ function event(status: HostingApplicationStatus, label: string, actor: ComputeSt
   return { id: randomUUID(), status, label, actor, note, createdAt: new Date().toISOString() };
 }
 
+function addCalendarMonths(isoDate: string, months: number): string {
+  const start = new Date(isoDate);
+  const day = start.getUTCDate();
+  start.setUTCDate(1);
+  start.setUTCMonth(start.getUTCMonth() + months);
+  const lastDay = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 0)).getUTCDate();
+  start.setUTCDate(Math.min(day, lastDay));
+  return start.toISOString();
+}
+
 export class ComputeHostingService {
   private readonly applications = new Map<string, HostingApplicationV2>();
   private readonly mutations = new Map<string, { fingerprint: string; id: string }>();
@@ -27,6 +37,7 @@ export class ComputeHostingService {
     const status: HostingApplicationStatus = submit ? 'submitted' : 'draft';
     const application: HostingApplicationV2 = {
       ...draft, id: randomUUID(), tenantId: principal.tenantId, userId: principal.userId, status,
+      hostingStartedAt: null, hostingEndsAt: null,
       events: [event(status, submit ? '托管申请已提交' : '草稿已保存', 'user')],
       nextAction: submit ? 'COD 将核验主体与设备资料' : '继续完善并提交申请', responsibleParty: submit ? 'cod' : 'user',
       revision: 1, createdAt: now, updatedAt: now,
@@ -65,8 +76,13 @@ export class ComputeHostingService {
     if (!application || (principal.role !== 'super_admin' && application.tenantId !== principal.tenantId)) throw new HttpError('托管申请不存在', 404, 'hosting_application_not_found');
     if (application.revision !== expectedRevision) throw new HttpError('申请已被更新', 409, 'revision_conflict');
     assertHostingTransition(application.status, status);
+    const transitionedAt = new Date().toISOString();
     application.status = status; application.nextAction = nextAction; application.responsibleParty = responsibleParty;
-    application.revision += 1; application.updatedAt = new Date().toISOString(); application.events.push(event(status, `状态变更为 ${status}`, 'operator', note));
+    if (status === 'running' && !application.hostingStartedAt) {
+      application.hostingStartedAt = transitionedAt;
+      application.hostingEndsAt = application.hostingMonths ? addCalendarMonths(transitionedAt, application.hostingMonths) : null;
+    }
+    application.revision += 1; application.updatedAt = transitionedAt; application.events.push(event(status, `状态变更为 ${status}`, 'operator', note));
     return structuredClone(application);
   }
 

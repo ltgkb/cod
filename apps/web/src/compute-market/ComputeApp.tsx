@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createComputeApi } from './api';
-import { computeAccountEnabled, computePurchasingEnabled, unavailableComputeCapabilities } from './capabilities';
+import { computePurchasingEnabled, unavailableComputeCapabilities } from './capabilities';
 import { ComputeShell } from './components/ComputeShell';
 import { activeTab, normalizeComputePath, parseComputeRoute, routeParam } from './routes';
 import type { ComputeAppProps } from './types';
@@ -80,7 +80,7 @@ function isRouteAvailable(path: string, capabilities: typeof unavailableComputeC
   if (path.startsWith('/compute/devices')) return capabilities.devices;
   if (path.startsWith('/compute/news')) return capabilities.news;
   if (path.startsWith('/compute/rankings')) return capabilities.rankings;
-  if (path === '/compute/me') return computeAccountEnabled(capabilities);
+  if (path === '/compute/me') return true;
   if (path.startsWith('/compute/assets')) return capabilities.assets;
   if (path.startsWith('/compute/referrals')) return capabilities.referrals;
   if (path.startsWith('/compute/support')) return capabilities.services.onlineSupport || capabilities.services.humanSupport;

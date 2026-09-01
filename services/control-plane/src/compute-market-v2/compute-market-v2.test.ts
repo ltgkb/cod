@@ -85,6 +85,12 @@ describe('compute market v2 domain', () => {
     expect(created).toHaveLength(1);
     expect(created[0]).toMatchObject({ userId: user.userId, tenantId: user.tenantId, status: 'deploying' });
     expect(devices.list(other).items).toHaveLength(0);
+    application = hosting.adminTransition(admin, application.id, 'running', application.revision, '设备验收完成', null, 'cod');
+    expect(application.hostingStartedAt).not.toBeNull();
+    expect(application.hostingEndsAt).not.toBeNull();
+    const start = new Date(application.hostingStartedAt!); const end = new Date(application.hostingEndsAt!);
+    expect(end.getUTCFullYear()).toBe(start.getUTCFullYear() + 1);
+    expect(end.getUTCMonth()).toBe(start.getUTCMonth());
   });
 
   it('enforces explicit order, hosting and device state machines', () => {
