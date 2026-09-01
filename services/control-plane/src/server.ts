@@ -22,6 +22,7 @@ import { createComputeShowcaseCatalog } from './compute-market-v2/showcase-catal
 import { OfficialPaymentService } from './payments.js';
 import { OidcClient } from './oidc.js';
 import { defaultPinnedFetcher, maskRegistrationDestination, normalizeRegistrationEmail, normalizeRegistrationPhone, RegistrationVerification, registrationDeliveryFromConfig, validateRegistrationChallengeId, validateRegistrationCode, type PinnedFetcher, type RegistrationDelivery, type RegistrationEndpointValidator } from './registration-verification.js';
+import { validateProjectId, validateProjectTaskCommentInput, validateProjectTaskCreateInput, validateProjectTaskTransitionInput } from './project-tasks.js';
 
 export interface ControlPlaneOptions {
   config?: ControlPlaneConfig;
@@ -275,13 +276,28 @@ async function readResponseBuffer(response: Response, maximumBytes = 5 * 1024 * 
 }
 
 async function throwUpstreamChatError(response: Response): Promise<void> {
-  // Upstream authentication failures describe COD's provider credential, not
-  // the caller's COD session. Do not expose them as a client-facing 401/403 or
-  // forward provider bodies, which may contain operational details.
-  if (response.status === 401 || response.status === 403) {
-    try { await response.body?.cancel(); } catch { /* Preserve the sanitized gateway error. */ }
-    throw new HttpError('KAI model provider authentication failed', 502, 'ai_upstream_auth_failed');
+  if (![401,402,403].includes(response.status)) return;
+  if(response.status===401){
+    try{await response.body?.cancel();}catch{/* Preserve the sanitized gateway error. */}
+    throw new HttpError('KAI model provider authentication failed',502,'ai_upstream_auth_failed');
   }
+  // Provider failures describe COD's own upstream account, not the caller's
+  // COD session. Consume a bounded body only to distinguish exhausted upstream
+  // credit from an invalid credential; never forward provider details.
+  let upstreamCode='';let upstreamMessage='';
+  try {
+    const raw=(await readResponseBuffer(response,64*1024)).toString('utf8');
+    const parsed=JSON.parse(raw) as {error?:{code?:unknown;message?:unknown}|unknown};
+    if(parsed.error&&typeof parsed.error==='object'){
+      const detail=parsed.error as {code?:unknown;message?:unknown};
+      upstreamCode=typeof detail.code==='string'?detail.code:'';
+      upstreamMessage=typeof detail.message==='string'?detail.message:'';
+    }else if(typeof parsed.error==='string')upstreamMessage=parsed.error;
+  }catch{try{await response.body?.cancel();}catch{/* Preserve the sanitized gateway error. */}}
+  if(response.status!==401&&(upstreamCode==='insufficient_user_quota'||/insufficient[_ ](?:user[_ ])?quota|insufficient balance|余额不足|额度不足|预扣费额度失败/i.test(upstreamMessage))){
+    throw new HttpError('ai.kai.com 上游额度不足，本次失败未扣费。请为模型源充值或更换有余额的 Key。',402,'ai_upstream_quota_exhausted');
+  }
+  throw new HttpError('KAI model provider authentication failed',502,'ai_upstream_auth_failed');
 }
 
 function queryInteger(raw: string | null, fallback: number, maximum = Number.MAX_SAFE_INTEGER): number {
@@ -796,6 +812,33 @@ export function createControlPlane(options: ControlPlaneOptions = {}) {
         return sendJson(response, 200, launch);
       }
       if (request.method === 'GET' && url.pathname === '/api/knowledge/search') return sendJson(response, 200, await knowledge.search(url.searchParams.get('q') ?? '', principal));
+      const projectTasksRoute=url.pathname.match(/^\/v1\/projects\/([^/]+)\/tasks$/);
+      if(projectTasksRoute){
+        const projectId=validateProjectId(decodePathSegment(projectTasksRoute[1]));
+        if(request.method==='GET')return sendJson(response,200,await database.listProjectTasks(principal,projectId));
+        if(request.method==='POST'){
+          const task=await database.createProjectTask(principal,projectId,validateProjectTaskCreateInput(await readJson<unknown>(request)));
+          await database.audit(principal,'project_task.create','project_task',task.id,{projectId});
+          return sendJson(response,201,task);
+        }
+      }
+      const projectTaskTransitionRoute=url.pathname.match(/^\/v1\/tasks\/([^/]+)\/transition$/);
+      if(request.method==='POST'&&projectTaskTransitionRoute){
+        const taskId=pathUuid(projectTaskTransitionRoute[1],'Task ID is invalid','invalid_task_id');
+        const task=await database.transitionProjectTask(principal,taskId,validateProjectTaskTransitionInput(await readJson<unknown>(request)));
+        await database.audit(principal,'project_task.transition','project_task',task.id,{status:task.status,version:task.version});
+        return sendJson(response,200,task);
+      }
+      const projectTaskCommentsRoute=url.pathname.match(/^\/v1\/tasks\/([^/]+)\/comments$/);
+      if(projectTaskCommentsRoute){
+        const taskId=pathUuid(projectTaskCommentsRoute[1],'Task ID is invalid','invalid_task_id');
+        if(request.method==='GET')return sendJson(response,200,await database.listProjectTaskComments(principal,taskId));
+        if(request.method==='POST'){
+          const result=await database.addProjectTaskComment(principal,taskId,validateProjectTaskCommentInput(await readJson<unknown>(request)));
+          await database.audit(principal,'project_task.comment','project_task',taskId,{commentId:result.comment.id,version:result.task.version});
+          return sendJson(response,201,result);
+        }
+      }
       if (request.method === 'GET' && url.pathname === '/api/devices') return sendJson(response, 200, await database.listDevices(principal));
       if (request.method === 'POST' && url.pathname === '/api/devices') { const device=await database.registerDevice(principal,await readJson(request)); await database.audit(principal,'device.register','device',device.id); return sendJson(response,201,device); }
       if (request.method === 'POST' && url.pathname.match(/^\/api\/devices\/[^/]+\/heartbeat$/)) {const deviceId=pathUuid(url.pathname.split('/')[3],'Device ID is invalid','invalid_device_id');const body=await readJson<{taskId?:unknown;executionId?:unknown;leaseToken?:unknown}>(request);const hasLease=body.taskId!==undefined||body.executionId!==undefined||body.leaseToken!==undefined;const taskLease=hasLease?{taskId:typeof body.taskId==='string'?body.taskId:'',executionId:typeof body.executionId==='string'?body.executionId:'',leaseToken:typeof body.leaseToken==='string'?body.leaseToken:''}:undefined;return sendJson(response,200,await database.heartbeat(principal,deviceId,taskLease));}

@@ -5,6 +5,7 @@ import { HttpError } from './errors.js';
 import type { ComputeRequest, ComputeRequestInput } from './compute-market.js';
 import { recordUsageReservationsReaped } from './metrics.js';
 import { centsToCardHoursMilli } from './card-hours.js';
+import { assertProjectTaskTransition, type ProjectTask, type ProjectTaskComment, type ProjectTaskCommentInput, type ProjectTaskCreateInput, type ProjectTaskTransitionInput } from './project-tasks.js';
 
 export interface Principal {
   userId: string;
@@ -368,6 +369,11 @@ export interface CodDatabase {
   assertTaskExecution(principal: Principal, taskId: string, executionId: string): Promise<SyncedTask>;
   renewTaskExecution(principal: Principal, taskId: string, executionId: string): Promise<void>;
   updateTask(principal: Principal, taskId: string, status: TaskStatus, expectedVersion: number, outcome?: TaskOutcome, execution?: TaskExecutionCredential): Promise<SyncedTask>;
+  listProjectTasks(principal: Principal, projectId: string): Promise<ProjectTask[]>;
+  createProjectTask(principal: Principal, projectId: string, input: ProjectTaskCreateInput): Promise<ProjectTask>;
+  transitionProjectTask(principal: Principal, taskId: string, input: ProjectTaskTransitionInput): Promise<ProjectTask>;
+  listProjectTaskComments(principal: Principal, taskId: string): Promise<ProjectTaskComment[]>;
+  addProjectTaskComment(principal: Principal, taskId: string, input: ProjectTaskCommentInput): Promise<{ task: ProjectTask; comment: ProjectTaskComment }>;
   eventsAfter(principal: Principal, cursor: number): Promise<TaskEvent[]>;
   audit(principal: Principal, action: string, entityType: string, entityId: string | null, data?: unknown): Promise<void>;
   listAudit(principal: Principal, limit: number): Promise<AuditEntry[]>;
@@ -997,6 +1003,21 @@ ALTER TABLE cod_tasks ADD COLUMN IF NOT EXISTS claim_id_hash text;
 ALTER TABLE cod_tasks ADD COLUMN IF NOT EXISTS lease_token_hash text;
 ALTER TABLE cod_tasks ADD COLUMN IF NOT EXISTS lease_expires_at timestamptz;
 ${taskExecutionLeaseSchemaMigration}
+CREATE TABLE IF NOT EXISTS cod_project_tasks (
+  id uuid PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL, project_id text NOT NULL,
+  title text NOT NULL, description text NOT NULL DEFAULT '', priority text,
+  status text NOT NULL DEFAULT 'todo' CHECK (status IN ('todo','in_progress','in_review','blocked','done','cancelled')),
+  version integer NOT NULL DEFAULT 1 CHECK (version >= 1),
+  claimed_by_thread_id text, claimed_by_agent_id text, branch text, worktree_path text,
+  created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (id,tenant_id,user_id), CHECK (priority IS NULL OR priority IN ('low','medium','high','urgent'))
+);
+CREATE TABLE IF NOT EXISTS cod_project_task_comments (
+  id uuid PRIMARY KEY, task_id uuid NOT NULL, tenant_id text NOT NULL, user_id text NOT NULL,
+  body text NOT NULL, author_type text NOT NULL CHECK (author_type IN ('user','agent','system')),
+  author_id text, thread_id text, created_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (task_id,tenant_id,user_id) REFERENCES cod_project_tasks(id,tenant_id,user_id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS cod_events (
   cursor bigserial PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL, type text NOT NULL, entity_id text NOT NULL,
   data jsonb NOT NULL DEFAULT '{}', created_at timestamptz NOT NULL DEFAULT now()
@@ -1009,6 +1030,8 @@ CREATE INDEX IF NOT EXISTS cod_devices_owner_idx ON cod_devices(tenant_id, user_
 CREATE INDEX IF NOT EXISTS cod_devices_owner_seen_idx ON cod_devices(tenant_id, user_id, last_seen_at);
 CREATE INDEX IF NOT EXISTS cod_tasks_owner_idx ON cod_tasks(tenant_id, user_id);
 CREATE INDEX IF NOT EXISTS cod_tasks_active_lease_idx ON cod_tasks(lease_expires_at) WHERE status IN ('running','waiting');
+CREATE INDEX IF NOT EXISTS cod_project_tasks_owner_project_updated_idx ON cod_project_tasks(tenant_id,user_id,project_id,updated_at DESC,id DESC);
+CREATE INDEX IF NOT EXISTS cod_project_task_comments_owner_task_created_idx ON cod_project_task_comments(tenant_id,user_id,task_id,created_at,id);
 CREATE INDEX IF NOT EXISTS cod_events_owner_cursor_idx ON cod_events(tenant_id, user_id, cursor);
 CREATE INDEX IF NOT EXISTS cod_audit_owner_created_idx ON cod_audit(tenant_id, user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS cod_payment_orders_owner_created_idx ON cod_payment_orders(tenant_id, user_id, created_at DESC);
@@ -1092,6 +1115,20 @@ const deviceFromRow = (row: Record<string, unknown>): DeviceRecord => {
   return { id: String(row.id), name: String(row.name), platform: row.platform as DeviceRecord['platform'], status: stale ? 'offline' : row.status as DeviceRecord['status'], lastSeenAt };
 };
 const taskFromRow = (row: Record<string, unknown>): SyncedTask => ({ id: String(row.id), title: String(row.title), status: row.status as TaskStatus, deviceId: String(row.device_id), updatedAt: new Date(String(row.updated_at)).toISOString(), version: Number(row.version), result: row.result === null || row.result === undefined ? null : String(row.result), error: row.error === null || row.error === undefined ? null : String(row.error) });
+const projectTaskFromRow = (row: Record<string, unknown>): ProjectTask => ({
+  id: String(row.id), projectId: String(row.project_id), title: String(row.title), description: String(row.description ?? ''),
+  priority: row.priority === null || row.priority === undefined ? null : row.priority as ProjectTask['priority'],
+  status: row.status as ProjectTask['status'], version: Number(row.version),
+  claimedByThreadId: row.claimed_by_thread_id ? String(row.claimed_by_thread_id) : null,
+  claimedByAgentId: row.claimed_by_agent_id ? String(row.claimed_by_agent_id) : null,
+  branch: row.branch ? String(row.branch) : null, worktreePath: row.worktree_path ? String(row.worktree_path) : null,
+  createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString(),
+});
+const projectTaskCommentFromRow = (row: Record<string, unknown>): ProjectTaskComment => ({
+  id: String(row.id), taskId: String(row.task_id), body: String(row.body), authorType: row.author_type as ProjectTaskComment['authorType'],
+  authorId: row.author_id ? String(row.author_id) : null, threadId: row.thread_id ? String(row.thread_id) : null,
+  createdAt: new Date(String(row.created_at)).toISOString(),
+});
 
 export class PostgresDatabase implements CodDatabase {
   private readonly pool: Pool;
@@ -1859,6 +1896,70 @@ export class PostgresDatabase implements CodDatabase {
       const task = taskFromRow(rows[0]);
       await client.query('INSERT INTO cod_events (tenant_id,user_id,type,entity_id,data) VALUES ($1,$2,$3,$4,$5)', [p.tenantId,p.userId,'task.updated',id,JSON.stringify(task)]);
       return task;
+    });
+  }
+  async listProjectTasks(p: Principal, projectId: string) {
+    const { rows } = await this.pool.query(
+      'SELECT * FROM cod_project_tasks WHERE tenant_id=$1 AND user_id=$2 AND project_id=$3 ORDER BY updated_at DESC,id DESC',
+      [p.tenantId,p.userId,projectId],
+    );
+    return rows.map(projectTaskFromRow);
+  }
+  async createProjectTask(p: Principal, projectId: string, input: ProjectTaskCreateInput) {
+    const { rows } = await this.pool.query(
+      `INSERT INTO cod_project_tasks (id,tenant_id,user_id,project_id,title,description,priority)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      [randomUUID(),p.tenantId,p.userId,projectId,input.title,input.description,input.priority],
+    );
+    return projectTaskFromRow(rows[0]);
+  }
+  async transitionProjectTask(p: Principal, taskId: string, input: ProjectTaskTransitionInput) {
+    return this.transaction(async (client) => {
+      const currentResult = await client.query(
+        'SELECT * FROM cod_project_tasks WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE',
+        [taskId,p.tenantId,p.userId],
+      );
+      if (!currentResult.rows[0]) throw new HttpError('Project task not found',404,'project_task_not_found');
+      const current = projectTaskFromRow(currentResult.rows[0]);
+      if (current.version !== input.ifVersion) throw new HttpError('Task version conflict',409,'version_conflict');
+      assertProjectTaskTransition(current.status,input);
+      const { rows } = await client.query(
+        `UPDATE cod_project_tasks SET status=$2,
+           claimed_by_thread_id=CASE WHEN $2='in_progress' THEN COALESCE(claimed_by_thread_id,$3) ELSE claimed_by_thread_id END,
+           version=version+1,updated_at=now() WHERE id=$1 RETURNING *`,
+        [taskId,input.status,input.threadId],
+      );
+      return projectTaskFromRow(rows[0]);
+    });
+  }
+  async listProjectTaskComments(p: Principal, taskId: string) {
+    const task = await this.pool.query('SELECT 1 FROM cod_project_tasks WHERE id=$1 AND tenant_id=$2 AND user_id=$3',[taskId,p.tenantId,p.userId]);
+    if (!task.rows[0]) throw new HttpError('Project task not found',404,'project_task_not_found');
+    const { rows } = await this.pool.query(
+      'SELECT * FROM cod_project_task_comments WHERE task_id=$1 AND tenant_id=$2 AND user_id=$3 ORDER BY created_at,id',
+      [taskId,p.tenantId,p.userId],
+    );
+    return rows.map(projectTaskCommentFromRow);
+  }
+  async addProjectTaskComment(p: Principal, taskId: string, input: ProjectTaskCommentInput) {
+    return this.transaction(async (client) => {
+      const currentResult = await client.query(
+        'SELECT * FROM cod_project_tasks WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE',
+        [taskId,p.tenantId,p.userId],
+      );
+      if (!currentResult.rows[0]) throw new HttpError('Project task not found',404,'project_task_not_found');
+      const current = projectTaskFromRow(currentResult.rows[0]);
+      if (current.version !== input.ifVersion) throw new HttpError('Task version conflict',409,'version_conflict');
+      const commentResult = await client.query(
+        `INSERT INTO cod_project_task_comments (id,task_id,tenant_id,user_id,body,author_type,author_id,thread_id)
+         VALUES ($1,$2,$3,$4,$5,'user',$4,$6) RETURNING *`,
+        [randomUUID(),taskId,p.tenantId,p.userId,input.body,input.threadId],
+      );
+      const taskResult = await client.query(
+        'UPDATE cod_project_tasks SET version=version+1,updated_at=now() WHERE id=$1 RETURNING *',
+        [taskId],
+      );
+      return { task: projectTaskFromRow(taskResult.rows[0]), comment: projectTaskCommentFromRow(commentResult.rows[0]) };
     });
   }
   async eventsAfter(p:Principal,cursor:number) { const {rows}=await this.pool.query('SELECT * FROM cod_events WHERE tenant_id=$1 AND user_id=$2 AND cursor>$3 ORDER BY cursor LIMIT 500',[p.tenantId,p.userId,cursor]); return rows.map((row)=>({cursor:Number(row.cursor),type:row.type,entityId:String(row.entity_id),data:row.data,createdAt:new Date(row.created_at).toISOString()})); }
