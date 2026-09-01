@@ -16,8 +16,15 @@ test('public landing page keeps the workspace behind /app/', async () => {
   assert.match(showcaseScript, /fetch\("\/api\/capabilities"/);
   assert.match(showcaseScript, /registrationEnabled === true/);
   assert.match(showcaseScript, /heroDownloadButton\.hidden = true/);
+  const heroRule = showcaseStyles.match(/(?:^|\n)\.hero\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(heroRule, /grid-template-columns:\s*minmax\(0,\s*1fr\)/);
+  const heroCopyRule = showcaseStyles.match(/(?:^|\n)\.hero-copy\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(heroCopyRule, /min-width:\s*0/);
+  const heroActionsRule = showcaseStyles.match(/(?:^|\n)\.hero-actions\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(heroActionsRule, /flex-wrap:\s*wrap/);
   const heroVisualRules = [...showcaseStyles.matchAll(/(?:^|\n)\.hero-visual\s*\{([^}]*)\}/g)];
   assert.equal(heroVisualRules.length, 1);
+  assert.match(heroVisualRules[0][1], /min-width:\s*0/);
   assert.match(heroVisualRules[0][1], /width:\s*100%/);
   assert.doesNotMatch(heroVisualRules[0][1], /(?:min-|max-)?width:\s*[^;]*\d+px/);
   const heroImageRule = showcaseStyles.match(/\.hero-image-shell img\s*\{([^}]*)\}/)?.[1] ?? '';
@@ -25,6 +32,10 @@ test('public landing page keeps the workspace behind /app/', async () => {
   assert.match(heroImageRule, /width:\s*100%/);
   assert.match(heroImageRule, /height:\s*auto/);
   assert.doesNotMatch(heroImageRule, /aspect-ratio|object-fit|object-position/);
+  assert.match(
+    showcaseStyles,
+    /@media \(max-width:\s*680px\)[\s\S]*?\.hero h1 \.hero-line\s*\{[^}]*white-space:\s*normal/,
+  );
   assert.doesNotMatch(landing, /src="\/src\/main\.tsx"/);
   assert.doesNotMatch(landing, /cdn-cgi|challenge-platform/);
 });
