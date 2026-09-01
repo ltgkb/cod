@@ -366,8 +366,8 @@ img {
 
 .hero-visual {
   position: relative;
-  width: min(100%, 920px);
-  margin: 0 auto;
+  width: 100%;
+  margin-inline: auto;
 }
 
 .hero-visual::before {
@@ -1205,10 +1205,6 @@ img {
     font-size: clamp(62px, 8vw, 86px);
   }
 
-  .hero-visual {
-    width: min(90%, 820px);
-  }
-
   .conversation-stage {
     grid-template-columns: 0.9fr 1.1fr;
   }
@@ -1242,16 +1238,8 @@ img {
     max-width: 34rem;
   }
 
-  .hero-visual {
-    width: min(100%, 700px);
-  }
-
   .hero-image-shell {
     border-radius: var(--panel-radius);
-  }
-
-  .hero-image-shell img {
-    height: auto;
   }
 
   .platform-band {
@@ -1384,10 +1372,6 @@ img {
 
   .hero-image-shell {
     border-radius: 24px;
-  }
-
-  .hero-image-shell img {
-    height: auto;
   }
 
   .platform-band {
