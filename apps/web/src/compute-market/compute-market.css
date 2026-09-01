@@ -72,7 +72,7 @@
 @media (max-width: 374px) { .compute-service-grid { grid-template-columns: repeat(3, 1fr); }.compute-device-summary span { font-size: 10px; }.compute-hosting-actions { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { .compute-app *, .compute-app *::before, .compute-app *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; } }
 
-.compute-profile-overview { display: grid; gap: 16px; padding: 20px; border: 1px solid var(--compute-border); border-radius: var(--compute-radius-card); background: var(--compute-surface); box-shadow: var(--compute-shadow-card); }
+.compute-profile-overview { container-type: inline-size; display: grid; gap: 16px; padding: 20px; border: 1px solid var(--compute-border); border-radius: var(--compute-radius-card); background: var(--compute-surface); box-shadow: var(--compute-shadow-card); }
 .compute-profile-overview-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; }
 .compute-profile-overview-heading > div { display: grid; gap: 2px; }
 .compute-profile-overview-heading span { color: var(--compute-accent); font-size: 11px; font-weight: 700; letter-spacing: .08em; }
@@ -82,7 +82,7 @@
 .compute-profile-metric-icon { grid-row: 1 / span 3; width: 36px; height: 36px; display: grid; place-items: center; border-radius: var(--compute-radius-control); color: var(--compute-accent); background: var(--compute-accent-soft); }
 .compute-profile-metric-icon svg { width: 21px; height: 21px; }
 .compute-profile-metrics article > span:not(.compute-profile-metric-icon), .compute-profile-metrics article small { overflow: hidden; color: var(--compute-text-secondary); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.compute-profile-metrics strong { min-width: 0; overflow: hidden; font-family: "DM Mono", ui-monospace, monospace; font-size: clamp(18px, 2vw, 24px); line-height: 30px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.compute-profile-metrics strong { min-width: 0; overflow: hidden; font-family: "DM Mono", ui-monospace, monospace; font-size: 18px; font-size: clamp(18px, 2.3cqw, 24px); line-height: 30px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 .compute-profile-metrics strong.is-loading { width: min(100%, 112px); height: 24px; margin: 3px 0; border-radius: 6px; background: linear-gradient(90deg, color-mix(in srgb, var(--compute-border) 80%, transparent) 20%, var(--compute-surface) 50%, color-mix(in srgb, var(--compute-border) 80%, transparent) 80%); background-size: 240% 100%; animation: compute-skeleton 1.6s ease-in-out infinite; }
 .compute-profile-error { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 16px; border: 1px solid color-mix(in srgb, var(--compute-danger) 40%, var(--compute-border)); border-radius: var(--compute-radius-control); background: color-mix(in srgb, var(--compute-danger) 7%, var(--compute-surface)); }
 .compute-profile-error p { color: var(--compute-text-secondary); font-size: 12px; }
