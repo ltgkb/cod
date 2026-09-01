@@ -256,7 +256,7 @@ img {
   min-height: 100dvh;
   padding-top: 94px;
   padding-bottom: 26px;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
   align-content: center;
   gap: 30px;
 }
@@ -264,6 +264,7 @@ img {
 .hero-copy {
   position: relative;
   z-index: 2;
+  min-width: 0;
   max-width: 980px;
   margin-inline: auto;
   text-align: center;
@@ -315,6 +316,7 @@ img {
 
 .hero-actions {
   display: flex;
+  flex-wrap: wrap;
   margin-top: 28px;
   align-items: center;
   justify-content: center;
@@ -366,6 +368,7 @@ img {
 
 .hero-visual {
   position: relative;
+  min-width: 0;
   width: 100%;
   margin-inline: auto;
 }
@@ -1353,6 +1356,10 @@ img {
 
   .hero h1 {
     font-size: clamp(44px, 12vw, 57px);
+  }
+
+  .hero h1 .hero-line {
+    white-space: normal;
   }
 
   .hero-lede {
